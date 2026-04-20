@@ -29,7 +29,7 @@ class Phase(Enum):
     PHASE4_IR_FOCUS   = 4
 
 
-DomainStep = Literal["rgb", "mid", "ir"]
+DomainStep = Literal["rgb", "mid_near_rgb", "mid_intermediate", "mid_near_ir", "ir"]
 
 
 # ---------------------------------------------------------------------------
@@ -83,27 +83,33 @@ class CurriculumScheduler:
             return "rgb"
 
         elif phase == Phase.PHASE2_RGB_MID:
+            # RGB warmup bridge: RGB ↔ mid_near_rgb
             return self._alternate(
                 phase=Phase.PHASE2_RGB_MID,
                 primary="rgb",
-                secondary="mid",
+                secondary="mid_near_rgb",
                 primary_ratio=self.config.phase2_rgb_ratio,
             )
 
         elif phase == Phase.PHASE3_MID_IR:
-            return self._alternate(
-                phase=Phase.PHASE3_MID_IR,
-                primary="mid",
-                secondary="ir",
-                primary_ratio=self.config.phase3_mid_ratio,
-            )
+            # IR bridge: cycle mid_near_ir (2x) + mid_intermediate (1x) ↔ ir
+            count = self._counters[Phase.PHASE3_MID_IR]
+            self._counters[Phase.PHASE3_MID_IR] += 1
+            period = self._ratio_to_period(self.config.phase3_mid_ratio)
+            n_mid  = max(1, round(period * self.config.phase3_mid_ratio))
+            position = count % period
+            if position < n_mid:
+                # MID slot: every 3rd MID is intermediate, rest are near_ir
+                mid_count = count // period
+                return "mid_intermediate" if mid_count % 3 == 0 else "mid_near_ir"
+            return "ir"
 
         else:  # PHASE4_IR_FOCUS
             count = self._counters[Phase.PHASE4_IR_FOCUS]
             self._counters[Phase.PHASE4_IR_FOCUS] += 1
-            # Inject occasional MID for training stability
+            # Inject occasional mid_near_ir for stability
             if count % self.config.phase4_mid_every_n == 0:
-                return "mid"
+                return "mid_near_ir"
             return "ir"
 
     # ------------------------------------------------------------------

@@ -16,6 +16,9 @@ import random
 from typing import List, Optional
 
 import torch
+from typing import Literal
+
+MidLevel = Literal["mid_near_rgb", "mid_intermediate", "mid_near_ir"]
 
 
 class SemanticAwareGrayAugmentation:
@@ -76,7 +79,7 @@ class SemanticAwareGrayAugmentation:
         device = image.device
 
         # Build per-pixel object mask from all bounding boxes
-        obj_mask = self._build_object_mask(boxes, H, W, device)  # [H, W] bool
+        obj_mask = self._build_object_mask_static(boxes, H, W, device)  # [H, W] bool
 
         if not obj_mask.any():
             return image.clone()
@@ -130,7 +133,7 @@ class SemanticAwareGrayAugmentation:
         return (image * weights.view(3, 1, 1)).sum(dim=0)
 
     @staticmethod
-    def _build_object_mask(
+    def _build_object_mask_static(
         boxes: torch.Tensor,   # [N, 4]  xyxy float
         H: int,
         W: int,
@@ -154,3 +157,70 @@ class SemanticAwareGrayAugmentation:
                 mask[y1:y2, x1:x2] = True
 
         return mask
+
+
+# ---------------------------------------------------------------------------
+# SoftSAGA — soft interpolation between RGB and grayscale in object regions
+# ---------------------------------------------------------------------------
+
+class SoftSAGA:
+    """
+    Soft Semantic-Aware Grayscale Augmentation.
+
+    Unlike hard SAGA (binary object→gray or bg→gray), SoftSAGA blends
+    object regions between RGB and grayscale using alpha:
+
+        pixel_out = alpha * rgb_pixel + (1 - alpha) * gray_pixel
+
+    Background stays unchanged (original RGB).
+
+    3 levels for curriculum bridge RGB → MID → IR:
+        near_rgb     : alpha ~ 0.7  (objects mostly RGB, slightly desaturated)
+        intermediate : alpha ~ 0.5  (half RGB, half gray)
+        near_ir      : alpha ~ 0.25 (objects mostly gray, approaching IR)
+    """
+
+    _LUMA_WEIGHTS = torch.tensor([0.299, 0.587, 0.114])
+
+    def apply(
+        self,
+        image: torch.Tensor,            # [3, H, W]
+        boxes: Optional[torch.Tensor],  # [N, 4] xyxy
+        alpha: float,                   # 1.0=pure RGB, 0.0=pure gray
+    ) -> torch.Tensor:
+        """Deterministic soft blend on object regions. Background unchanged."""
+        if image.dim() != 3 or image.shape[0] != 3:
+            raise ValueError(f"Expected [3,H,W], got {tuple(image.shape)}")
+        if boxes is None or boxes.numel() == 0:
+            return image.clone()
+
+        _, H, W = image.shape
+        device = image.device
+
+        # Grayscale version of whole image (luma)
+        weights = self._LUMA_WEIGHTS.to(device=device, dtype=image.dtype)
+        gray = (image * weights.view(3, 1, 1)).sum(dim=0)   # [H, W]
+        gray_3ch = gray.unsqueeze(0).expand(3, H, W)         # [3, H, W]
+
+        # Build object mask
+        obj_mask = SemanticAwareGrayAugmentation._build_object_mask_static(
+            boxes, H, W, device
+        )
+        if not obj_mask.any():
+            return image.clone()
+
+        # Soft blend in object regions: alpha*rgb + (1-alpha)*gray
+        blended = alpha * image + (1.0 - alpha) * gray_3ch  # [3, H, W]
+        mask_3ch = obj_mask.unsqueeze(0).expand(3, H, W)
+        return torch.where(mask_3ch, blended, image)
+
+    def apply_to_batch(
+        self,
+        images: torch.Tensor,                        # [B, 3, H, W]
+        batch_boxes: List[Optional[torch.Tensor]],
+        alpha: float,
+    ) -> torch.Tensor:
+        return torch.stack([
+            self.apply(img, boxes, alpha)
+            for img, boxes in zip(images, batch_boxes)
+        ])

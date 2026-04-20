@@ -17,6 +17,7 @@ Training flow per iteration:
 
 import copy
 import logging
+import random
 from typing import Dict, Iterator, List, Optional
 
 import torch
@@ -28,8 +29,14 @@ from .batch_types import IRBatch, MidBatch, RGBBatch
 from .config import TrainingConfig
 from .ema import ema_update
 from .losses import compute_ir_loss, compute_mid_loss, compute_rgb_loss
-from .saga import SemanticAwareGrayAugmentation
+from .saga import SemanticAwareGrayAugmentation, SoftSAGA
 from .scheduler import CurriculumScheduler, DomainStep, Phase
+
+try:
+    import torchvision.transforms.functional as TF
+    _HAS_TF = True
+except ImportError:
+    _HAS_TF = False
 
 # Optional — imported only when provided at runtime
 try:
@@ -81,9 +88,8 @@ class CurriculumDomainAdaptationTrainer:
 
         self._setup_models()
 
-        self.saga = SemanticAwareGrayAugmentation(
-            apply_prob=config.saga.apply_prob
-        )
+        self.saga      = SemanticAwareGrayAugmentation(apply_prob=config.saga.apply_prob)
+        self.soft_saga = SoftSAGA()
         self.scheduler = CurriculumScheduler(config.curriculum)
 
         # Infinite data iterators — never exhaust
@@ -196,16 +202,78 @@ class CurriculumDomainAdaptationTrainer:
         images = raw[0] if isinstance(raw, (list, tuple)) else raw
         return IRBatch(images=images.to(self.device))
 
-    def _next_mid(self) -> MidBatch:
-        """Pull an RGB batch and apply SAGA to create the MID batch."""
+    def _next_mid(self, mid_level: DomainStep = "mid_near_rgb") -> MidBatch:
+        """Pull an RGB batch and apply SoftSAGA with the alpha for mid_level."""
         rgb = self._next_rgb()
         boxes_list = [t["boxes"] for t in rgb.targets]
-        mid_images = self.saga.apply_to_batch(rgb.images, boxes_list)
+
+        alpha_map = {
+            "mid_near_rgb":    self.config.soft_saga.alpha_near_rgb,
+            "mid_intermediate": self.config.soft_saga.alpha_intermediate,
+            "mid_near_ir":     self.config.soft_saga.alpha_near_ir,
+        }
+        alpha = alpha_map.get(mid_level, self.config.soft_saga.alpha_near_rgb)
+        mid_images = self.soft_saga.apply_to_batch(rgb.images, boxes_list, alpha)
         return MidBatch(
             images=mid_images,
-            targets=rgb.targets,        # GT from RGB (for optional mid_gt_loss)
-            source_images=rgb.images,   # original RGB kept for reference
+            targets=rgb.targets,
+            source_images=rgb.images,
         )
+
+    def _student_aug(
+        self,
+        images: torch.Tensor,                               # [B, 3, H, W]
+        targets: Optional[List[Dict]] = None,               # list of {boxes, labels}
+    ):
+        """
+        Light student augmentation: hflip + blur + brightness/contrast.
+
+        Geometric aug (hflip) transforms boxes if targets provided.
+        Photometric aug (blur, brightness, contrast) leaves boxes unchanged.
+
+        Returns:
+            aug_images  : [B, 3, H, W]
+            aug_targets : same structure as targets (boxes updated if flipped)
+        """
+        aug = self.config.aug
+        W = images.shape[-1]
+
+        # --- Horizontal flip (per batch, same decision for all images) ---
+        if random.random() < aug.hflip_prob:
+            images = torch.flip(images, dims=[-1])
+            if targets is not None:
+                new_targets = []
+                for t in targets:
+                    boxes = t["boxes"]                  # [N, 4] xyxy
+                    if boxes.numel() > 0:
+                        flipped = boxes.clone()
+                        flipped[:, 0] = W - boxes[:, 2]  # x1_new = W - x2
+                        flipped[:, 2] = W - boxes[:, 0]  # x2_new = W - x1
+                        new_targets.append({**t, "boxes": flipped})
+                    else:
+                        new_targets.append(t)
+                targets = new_targets
+
+        if not _HAS_TF:
+            return images, targets
+
+        # --- Gaussian blur ---
+        if random.random() < aug.blur_prob:
+            sigma = random.uniform(0.1, aug.blur_sigma_max)
+            images = TF.gaussian_blur(images, kernel_size=[3, 3], sigma=sigma)
+
+        # --- Brightness ---
+        if random.random() < aug.brightness_prob:
+            factor = 1.0 + random.uniform(-aug.brightness_mag, aug.brightness_mag)
+            images = torch.clamp(images * factor, 0.0, 1.0)
+
+        # --- Contrast ---
+        if random.random() < aug.contrast_prob:
+            mean = images.mean(dim=[-1, -2], keepdim=True)
+            factor = 1.0 + random.uniform(-aug.contrast_mag, aug.contrast_mag)
+            images = torch.clamp((images - mean) * factor + mean, 0.0, 1.0)
+
+        return images, targets
 
     # ------------------------------------------------------------------
     # Gradient clip + optimizer step
@@ -243,10 +311,13 @@ class CurriculumDomainAdaptationTrainer:
             if self.config.loss.rgb_pseudo_weight > 0.0
             else None
         )
+        # Student aug — hflip + blur + brightness, boxes updated accordingly
+        student_images, student_targets = self._student_aug(batch.images, batch.targets)
+
         loss, log = compute_rgb_loss(
             student=self.student,
-            images=batch.images,
-            gt_targets=batch.targets,
+            images=student_images,
+            gt_targets=student_targets,
             rgb_teacher=teacher_for_pseudo,
             config=self.config.loss,
             conf_thresh=self._get_threshold(phase, teacher="rgb"),
@@ -270,59 +341,92 @@ class CurriculumDomainAdaptationTrainer:
         log["domain"] = "rgb"
         return log
 
-    def train_mid_step(self, phase: Phase = Phase.PHASE2_RGB_MID) -> Dict:
+    def train_mid_step(
+        self,
+        phase: Phase = Phase.PHASE2_RGB_MID,
+        mid_level: DomainStep = "mid_near_rgb",
+    ) -> Dict:
         """
-        MID step — student adapts on SAGA-transformed images using both teachers.
+        MID step — SoftSAGA images, teacher routing per mid_level.
 
-        Loss:   L_rgb_teacher(MID)  +  L_ir_teacher(MID)  +  optional L_gt(MID)
-        Update: configurable (default = no teacher update)
+        mid_near_rgb   : rgb_teacher infers + EMA(rgb_teacher)
+        mid_intermediate: both teachers infer + EMA(ir_teacher, lighter alpha)
+        mid_near_ir    : ir_teacher infers  + EMA(ir_teacher)
         """
         self.student.train()
-        batch = self._next_mid()
+        batch = self._next_mid(mid_level)
 
         self.optimizer.zero_grad()
+
+        # Routing config for this MID level
+        rt = self.config.mid_routing
+        level_cfg = {
+            "mid_near_rgb": (
+                rt.near_rgb_teacher_source,
+                rt.near_rgb_ema_target,
+                self.config.ema.alpha,
+                rt.near_rgb_rgb_weight,
+                rt.near_rgb_ir_weight,
+            ),
+            "mid_intermediate": (
+                rt.intermediate_teacher_source,
+                rt.intermediate_ema_target,
+                rt.intermediate_ema_alpha,
+                rt.intermediate_rgb_weight,
+                rt.intermediate_ir_weight,
+            ),
+            "mid_near_ir": (
+                rt.near_ir_teacher_source,
+                rt.near_ir_ema_target,
+                self.config.ema.alpha,
+                rt.near_ir_rgb_weight,
+                rt.near_ir_ir_weight,
+            ),
+        }
+        teacher_source, ema_target, ema_alpha, rgb_w, ir_w = level_cfg[mid_level]
 
         gt_for_mid = (
             batch.targets
             if self.config.loss.mid_gt_weight > 0.0
             else None
         )
-        # In Phase 2, ir_teacher was just copied from rgb_teacher at transition.
-        # Give it more warmup by weighting rgb_teacher higher until Phase 3.
-        mid_config = self.config.loss
-        if phase == Phase.PHASE2_RGB_MID:
-            from dataclasses import replace
-            mid_config = replace(
-                mid_config,
-                mid_rgb_weight=0.8,  # rgb_teacher dominates in Phase 2
-                mid_ir_weight=0.2,   # ir_teacher contributes lightly
-            )
+
+        # Teacher infers on weak images (original MID, no extra aug)
+        # Student trains on strong images (hflip + blur + brightness)
+        weak_images = batch.images                                    # teacher path
+        strong_images, _ = self._student_aug(batch.images, None)     # student path (boxes not needed for pseudo-label loss)
 
         loss, log = compute_mid_loss(
             student=self.student,
-            mid_images=batch.images,
+            mid_images=strong_images,       # student sees strong aug
+            teacher_images=weak_images,     # teacher sees weak (original MID)
             rgb_teacher=self.rgb_teacher,
             ir_teacher=self.ir_teacher,
             gt_targets=gt_for_mid,
-            config=mid_config,
-            conf_thresh=self._get_threshold(phase, teacher="both"),
+            config=self.config.loss,
+            conf_thresh=self._get_threshold(phase, teacher=teacher_source),
+            teacher_source=teacher_source,
+            rgb_weight_override=rgb_w,
+            ir_weight_override=ir_w,
         )
 
         loss.backward()
         grad_norm = self._clip_and_step()
         log["grad_norm"] = grad_norm
+        log["mid_level"] = mid_level
 
-        # Configurable teacher updates in MID step
-        ema_kwargs = dict(
-            alpha=self.config.ema.alpha,
-            global_step=self.global_step if self.config.ema.use_warmup else None,
-        )
-        if self.config.teacher_update.mid_update_rgb_teacher:
-            ema_update(teacher=self.rgb_teacher, student=self.student, **ema_kwargs)
-        if self.config.teacher_update.mid_update_ir_teacher:
-            ema_update(teacher=self.ir_teacher,  student=self.student, **ema_kwargs)
+        # EMA update — only the routed teacher, NEVER both
+        if ema_target != "none":
+            ema_kwargs = dict(
+                alpha=ema_alpha,
+                global_step=self.global_step if self.config.ema.use_warmup else None,
+            )
+            if ema_target == "rgb":
+                ema_update(teacher=self.rgb_teacher, student=self.student, **ema_kwargs)
+            elif ema_target == "ir":
+                ema_update(teacher=self.ir_teacher,  student=self.student, **ema_kwargs)
 
-        log["domain"] = "mid"
+        log["domain"] = mid_level
         return log
 
     def train_ir_step(self, phase: Phase = Phase.PHASE3_MID_IR) -> Dict:
@@ -386,8 +490,8 @@ class CurriculumDomainAdaptationTrainer:
 
         if step == "rgb":
             log = self.train_rgb_step(phase=phase)
-        elif step == "mid":
-            log = self.train_mid_step(phase=phase)
+        elif step in ("mid_near_rgb", "mid_intermediate", "mid_near_ir"):
+            log = self.train_mid_step(phase=phase, mid_level=step)
         elif step == "ir":
             log = self.train_ir_step(phase=phase)
         else:

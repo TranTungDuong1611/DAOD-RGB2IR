@@ -116,12 +116,16 @@ def compute_rgb_loss(
 
 def compute_mid_loss(
     student: nn.Module,
-    mid_images: torch.Tensor,
+    mid_images: torch.Tensor,                              # student sees this (strong aug)
     rgb_teacher: nn.Module,
     ir_teacher: nn.Module,
     gt_targets: Optional[List[Dict[str, torch.Tensor]]] = None,
     config: Optional[LossConfig] = None,
     conf_thresh: float = 0.7,
+    teacher_source: str = "both",                          # "rgb" | "ir" | "both"
+    rgb_weight_override: Optional[float] = None,
+    ir_weight_override: Optional[float] = None,
+    teacher_images: Optional[torch.Tensor] = None,         # teacher sees this (weak aug)
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     MID (intermediate domain) step:
@@ -143,25 +147,31 @@ def compute_mid_loss(
     components: List[torch.Tensor] = []
     log: Dict[str, float] = {}
 
-    # --- rgb_teacher pseudo-labels on MID images ---
-    if config.mid_rgb_weight > 0.0:
+    rgb_w = rgb_weight_override if rgb_weight_override is not None else config.mid_rgb_weight
+    ir_w  = ir_weight_override  if ir_weight_override  is not None else config.mid_ir_weight
+
+    # Teacher infers on weak images; student trains on strong images
+    t_images = teacher_images if teacher_images is not None else mid_images
+
+    # --- rgb_teacher pseudo-labels (weak) → student loss (strong) ---
+    if teacher_source in ("rgb", "both") and rgb_w > 0.0:
         with torch.no_grad():
-            rgb_preds = rgb_teacher(mid_images)
+            rgb_preds = rgb_teacher(t_images)
         rgb_pseudo = filter_pseudo_labels(rgb_preds, conf_thresh)
 
         loss_dict = student(mid_images, rgb_pseudo)
-        loss = _sum_loss_dict(loss_dict) * config.mid_rgb_weight
+        loss = _sum_loss_dict(loss_dict) * rgb_w
         components.append(loss)
         log["mid_rgb_teacher_loss"] = loss.item()
 
-    # --- ir_teacher pseudo-labels on MID images ---
-    if config.mid_ir_weight > 0.0:
+    # --- ir_teacher pseudo-labels (weak) → student loss (strong) ---
+    if teacher_source in ("ir", "both") and ir_w > 0.0:
         with torch.no_grad():
-            ir_preds = ir_teacher(mid_images)
+            ir_preds = ir_teacher(t_images)
         ir_pseudo = filter_pseudo_labels(ir_preds, conf_thresh)
 
         loss_dict = student(mid_images, ir_pseudo)
-        loss = _sum_loss_dict(loss_dict) * config.mid_ir_weight
+        loss = _sum_loss_dict(loss_dict) * ir_w
         components.append(loss)
         log["mid_ir_teacher_loss"] = loss.item()
 

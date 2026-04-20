@@ -20,8 +20,52 @@ class EMAConfig:
 
 @dataclass
 class SAGAConfig:
-    """SemanticAwareGrayAugmentation settings."""
+    """SemanticAwareGrayAugmentation settings (hard SAGA, legacy)."""
     apply_prob: float = 0.5       # probability of applying SAGA per image
+
+
+@dataclass
+class SoftSAGAConfig:
+    """SoftSAGA alpha per MID level (1.0=pure RGB, 0.0=pure gray)."""
+    alpha_near_rgb:     float = 0.70   # objects mostly RGB
+    alpha_intermediate: float = 0.50   # half RGB, half gray
+    alpha_near_ir:      float = 0.25   # objects mostly gray
+
+
+@dataclass
+class MidRoutingConfig:
+    """
+    Per-MID-level routing: which teacher generates pseudo-labels and
+    which teacher receives the EMA update.
+
+    teacher_source: "rgb" | "ir" | "both"
+    ema_target:     "rgb" | "ir" | "none"
+    """
+    near_rgb_teacher_source:      str   = "rgb"    # rgb_teacher infers
+    near_rgb_ema_target:          str   = "rgb"    # rgb_teacher updated
+    near_rgb_rgb_weight:          float = 1.0
+    near_rgb_ir_weight:           float = 0.0
+
+    intermediate_teacher_source:  str   = "both"
+    intermediate_ema_target:      str   = "ir"     # ir_teacher updated (lighter)
+    intermediate_ema_alpha:       float = 0.9998   # slower EMA for gentle start
+    intermediate_rgb_weight:      float = 0.5
+    intermediate_ir_weight:       float = 0.5
+
+    near_ir_teacher_source:       str   = "ir"     # ir_teacher infers
+    near_ir_ema_target:           str   = "ir"     # ir_teacher updated
+    near_ir_rgb_weight:           float = 0.0
+    near_ir_ir_weight:            float = 1.0
+
+
+@dataclass
+class AugConfig:
+    """Weak/strong augmentation for teacher vs student."""
+    # Student additional photometric aug (applied on top of DataLoader transforms)
+    student_blur_prob:       float = 0.5
+    student_blur_sigma_max:  float = 1.0
+    student_brightness_prob: float = 0.3
+    student_brightness_mag:  float = 0.2   # ±20% brightness
 
 
 @dataclass
@@ -88,6 +132,9 @@ class TrainingConfig:
     """Master config for CurriculumDomainAdaptationTrainer."""
     ema: EMAConfig = field(default_factory=EMAConfig)
     saga: SAGAConfig = field(default_factory=SAGAConfig)
+    soft_saga: SoftSAGAConfig = field(default_factory=SoftSAGAConfig)
+    mid_routing: MidRoutingConfig = field(default_factory=MidRoutingConfig)
+    aug: AugConfig = field(default_factory=AugConfig)
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     teacher_update: TeacherUpdateConfig = field(default_factory=TeacherUpdateConfig)
