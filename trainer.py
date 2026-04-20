@@ -92,6 +92,7 @@ class CurriculumDomainAdaptationTrainer:
 
         self.global_step: int = 0
         self._last_phase: Optional[Phase] = None
+        self._phase_step_count: int = 0   # steps taken in current phase (for early logging)
 
     # ------------------------------------------------------------------
     # Setup
@@ -207,6 +208,21 @@ class CurriculumDomainAdaptationTrainer:
         )
 
     # ------------------------------------------------------------------
+    # Gradient clip + optimizer step
+    # ------------------------------------------------------------------
+
+    def _clip_and_step(self) -> float:
+        """Clip gradients then step optimizer. Returns grad norm."""
+        if self.config.grad_clip > 0:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.student.parameters(), self.config.grad_clip
+            ).item()
+        else:
+            grad_norm = 0.0
+        self.optimizer.step()
+        return grad_norm
+
+    # ------------------------------------------------------------------
     # Domain steps
     # ------------------------------------------------------------------
 
@@ -237,7 +253,8 @@ class CurriculumDomainAdaptationTrainer:
         )
 
         loss.backward()
-        self.optimizer.step()
+        grad_norm = self._clip_and_step()
+        log["grad_norm"] = grad_norm
 
         # EMA update rgb_teacher — but NOT during Phase 1 (pretrain).
         # Phase 1 is pure supervised pretrain; teachers are initialized from
@@ -292,7 +309,8 @@ class CurriculumDomainAdaptationTrainer:
         )
 
         loss.backward()
-        self.optimizer.step()
+        grad_norm = self._clip_and_step()
+        log["grad_norm"] = grad_norm
 
         # Configurable teacher updates in MID step
         ema_kwargs = dict(
@@ -329,7 +347,8 @@ class CurriculumDomainAdaptationTrainer:
         )
 
         loss.backward()
-        self.optimizer.step()
+        grad_norm = self._clip_and_step()
+        log["grad_norm"] = grad_norm
 
         if self.config.teacher_update.ir_update_ir_teacher:
             ema_update(
@@ -362,6 +381,7 @@ class CurriculumDomainAdaptationTrainer:
         # Detect phase transition and sync teachers if needed
         if phase != self._last_phase:
             self._on_phase_transition(from_phase=self._last_phase, to_phase=phase)
+            self._phase_step_count = 0
         self._last_phase = phase
 
         if step == "rgb":
@@ -389,9 +409,11 @@ class CurriculumDomainAdaptationTrainer:
                 current_phase=phase,
             )
 
-        if self.global_step % self.config.log_interval == 0:
+        # Log every log_interval steps OR for the first 10 steps of each phase
+        if self.global_step % self.config.log_interval == 0 or self._phase_step_count < 10:
             self._log(log)
 
+        self._phase_step_count += 1
         self.global_step += 1
         return log
 

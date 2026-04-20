@@ -93,5 +93,6 @@ class TrainingConfig:
     teacher_update: TeacherUpdateConfig = field(default_factory=TeacherUpdateConfig)
 
     pseudo_label_conf_thresh: float = 0.7   # min score to keep a pseudo-label box
+    grad_clip: float = 10.0                 # max gradient norm (0 = disabled)
     device: str = "cuda"
     log_interval: int = 50                  # log every N iterations

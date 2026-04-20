@@ -300,12 +300,22 @@ class PhaseEvaluator:
         self.vis_score_thresh = vis_score_thresh
         self.class_names      = class_names
 
+        # Best checkpoint tracking
+        self.best_map50: float = -1.0
+        self.on_new_best_fn   = None   # set via .register_best_fn(fn)
+
         # State
         self._last_phase     = None
         self._last_eval_step = -1
 
         # Results history: List[{"step": int, "phase": str, "trigger": str, ...metrics}]
         self.history: List[Dict] = []
+
+    def register_best_fn(self, fn) -> None:
+        """Register a callback called when a new best mAP@0.5 is achieved.
+        fn(results: Dict) where results contains global_step, phase, mAP@0.5, etc.
+        """
+        self.on_new_best_fn = fn
 
     def step(
         self,
@@ -362,6 +372,14 @@ class PhaseEvaluator:
         self.history.append(results)
         self._last_eval_step = global_step
         self._log_results(results)
+
+        # Best checkpoint
+        map50 = results.get("mAP@0.5", 0.0)
+        if map50 > self.best_map50:
+            self.best_map50 = map50
+            self.log_fn(f"[Eval] New best mAP@0.5={map50:.4f} at step={global_step}")
+            if self.on_new_best_fn is not None:
+                self.on_new_best_fn(results)
 
         # Optional visualization
         if self.vis_dir is not None:
