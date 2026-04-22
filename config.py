@@ -60,12 +60,16 @@ class MidRoutingConfig:
 
 @dataclass
 class AugConfig:
-    """Weak/strong augmentation for teacher vs student."""
-    # Student additional photometric aug (applied on top of DataLoader transforms)
-    student_blur_prob:       float = 0.5
-    student_blur_sigma_max:  float = 1.0
-    student_brightness_prob: float = 0.3
-    student_brightness_mag:  float = 0.2   # ±20% brightness
+    """Augmentation config for student (applied on top of DataLoader transforms)."""
+    # Geometric
+    hflip_prob:              float = 0.5   # horizontal flip
+    # Photometric
+    blur_prob:               float = 0.5
+    blur_sigma_max:          float = 1.0
+    brightness_prob:         float = 0.3
+    brightness_mag:          float = 0.2   # ±20% brightness
+    contrast_prob:           float = 0.3
+    contrast_mag:            float = 0.2   # ±20% contrast
 
 
 @dataclass

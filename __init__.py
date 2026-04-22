@@ -4,10 +4,13 @@ Curriculum Domain Adaptation: RGB → MID(SAGA) → IR
 
 from .batch_types import IRBatch, MidBatch, RGBBatch
 from .config import (
+    AugConfig,
     CurriculumConfig,
     EMAConfig,
     LossConfig,
+    MidRoutingConfig,
     SAGAConfig,
+    SoftSAGAConfig,
     TeacherUpdateConfig,
     TrainingConfig,
 )
@@ -28,6 +31,9 @@ __all__ = [
     "TrainingConfig",
     "EMAConfig",
     "SAGAConfig",
+    "SoftSAGAConfig",
+    "MidRoutingConfig",
+    "AugConfig",
     "CurriculumConfig",
     "LossConfig",
     "TeacherUpdateConfig",
