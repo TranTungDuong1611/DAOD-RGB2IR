@@ -282,6 +282,8 @@ class PhaseEvaluator:
         eval_every_n:    Optional[int] = None,   # None = only at phase transitions
         eval_on_phases:  Optional[List] = None,  # subset of Phase enum values
         log_fn: Optional[callable] = None,
+        # RGB val — evaluated in Phase 1 only
+        rgb_val_loader:  Optional[DataLoader] = None,
         # Visualization
         vis_dir:         Optional[str] = None,   # None = no visualization
         vis_every_n:     Optional[int] = None,   # None = only on eval trigger
@@ -291,10 +293,19 @@ class PhaseEvaluator:
     ) -> None:
         self.evaluator      = evaluator
         self.ir_val_loader  = ir_val_loader
+        self.rgb_val_loader = rgb_val_loader
         self.device         = device
         self.eval_every_n   = eval_every_n
         self.eval_on_phases = eval_on_phases    # None = all phases
         self.log_fn         = log_fn or logger.info
+
+        # Separate evaluator instance for RGB val (same config as IR evaluator)
+        self._rgb_evaluator = DetectionEvaluator(
+            num_classes=evaluator.num_classes,
+            class_names=evaluator.class_names,
+            iou_thresholds=evaluator.iou_thresholds,
+            interp=evaluator.interp,
+        ) if rgb_val_loader is not None else None
 
         self.vis_dir          = vis_dir
         self.vis_every_n      = vis_every_n
@@ -387,6 +398,11 @@ class PhaseEvaluator:
             "trigger":        trigger_reason,
         })
 
+        # RGB val metrics — only in Phase 1 (model trained purely on RGB)
+        if self._rgb_evaluator is not None and current_phase.name == "PHASE1_RGB_WARMUP":
+            rgb_results = self._eval_rgb_val(model)
+            results.update(rgb_results)
+
         self.history.append(results)
         self._last_eval_step = global_step
         self._log_results(results)
@@ -458,14 +474,60 @@ class PhaseEvaluator:
 
         return False, ""
 
+    @torch.no_grad()
+    def _eval_rgb_val(self, model) -> Dict:
+        """Compute mAP and supervised loss on the RGB validation set."""
+        self.log_fn(
+            f"[RGB Eval] running on {len(self.rgb_val_loader.dataset)} RGB val images ..."
+        )
+
+        # --- mAP ---
+        self._rgb_evaluator.reset()
+        model.eval()
+        for images, targets in self.rgb_val_loader:
+            images = images.to(self.device)
+            preds  = model(images)
+            self._rgb_evaluator.update(preds, [{k: v for k, v in t.items()} for t in targets])
+        map_results = self._rgb_evaluator.compute()
+
+        # --- Supervised val loss (model in train mode to get loss dict from FCOS) ---
+        model.train()
+        total_loss = 0.0
+        n_batches  = 0
+        for images, targets in self.rgb_val_loader:
+            images  = images.to(self.device)
+            targets = [
+                {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                 for k, v in t.items()}
+                for t in targets
+            ]
+            loss_dict   = model(images, targets)
+            total_loss += sum(v.item() for v in loss_dict.values())
+            n_batches  += 1
+        model.eval()
+
+        out = {f"rgb_{k}": v for k, v in map_results.items()}
+        out["rgb_val_loss"] = total_loss / max(n_batches, 1)
+        return out
+
     def _log_results(self, results: Dict) -> None:
+        # --- IR val metrics ---
         map50 = results.get("mAP@0.5", 0.0)
-        self.log_fn(f"[Eval result] mAP@0.5={map50:.4f}")
+        self.log_fn(f"[IR  Val] mAP@0.5={map50:.4f}")
         per_class = {k: v for k, v in results.items() if k.startswith("AP@")}
         for name, ap in sorted(per_class.items()):
             self.log_fn(f"  {name} = {ap:.4f}")
         if "mAP@0.5:0.95" in results:
             self.log_fn(f"  mAP@0.5:0.95 = {results['mAP@0.5:0.95']:.4f}")
+
+        # --- RGB val metrics (Phase 1 only) ---
+        if "rgb_mAP@0.5" in results:
+            rgb_map50 = results["rgb_mAP@0.5"]
+            rgb_loss  = results.get("rgb_val_loss", float("nan"))
+            self.log_fn(f"[RGB Val] mAP@0.5={rgb_map50:.4f}  val_loss={rgb_loss:.4f}")
+            rgb_per_class = {k: v for k, v in results.items() if k.startswith("rgb_AP@")}
+            for name, ap in sorted(rgb_per_class.items()):
+                self.log_fn(f"  {name} = {ap:.4f}")
 
     def _visualize(self, model, global_step: int, current_phase, trigger_reason: str) -> None:
         try:

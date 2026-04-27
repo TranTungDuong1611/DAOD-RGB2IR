@@ -162,11 +162,13 @@ def main(args):
     rgb_train = FLIRRGBDataset(data_root, split="train")
     ir_train  = FLIRIRDataset( data_root, split="train")
     ir_val    = FLIRIRValDataset(data_root, split="validation")
+    rgb_val   = FLIRRGBDataset( data_root, split="validation")
 
     logger.info(
         f"  RGB train     : {len(rgb_train):>5} images  (labeled, source domain)\n"
         f"  IR  train     : {len(ir_train):>5} images  (unlabeled, target domain)\n"
-        f"  IR  val       : {len(ir_val):>5} images  (labeled, for mAP)"
+        f"  IR  val       : {len(ir_val):>5} images  (labeled, for mAP)\n"
+        f"  RGB val       : {len(rgb_val):>5} images  (labeled, Phase 1 eval)"
     )
 
     # --- DataLoaders ---
@@ -183,6 +185,10 @@ def main(args):
     ir_val_loader = DataLoader(
         ir_val, batch_size=args.batch_size, shuffle=False,
         collate_fn=ir_val_collate, num_workers=args.workers,
+    )
+    rgb_val_loader = DataLoader(
+        rgb_val, batch_size=args.batch_size, shuffle=False,
+        collate_fn=rgb_collate, num_workers=args.workers,
     )
 
     # --- Models ---
@@ -228,6 +234,7 @@ def main(args):
         ir_val_loader=ir_val_loader,
         device=device,
         eval_every_n=args.eval_every,
+        rgb_val_loader=rgb_val_loader,
         vis_dir=os.path.join(args.output_dir, "vis"),
         vis_every_n=args.vis_every,
         vis_num_samples=8,
