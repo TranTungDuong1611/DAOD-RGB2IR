@@ -220,59 +220,69 @@ class CurriculumDomainAdaptationTrainer:
             source_images=rgb.images,
         )
 
-    def _student_aug(
+    def _weak_aug(
         self,
-        images: torch.Tensor,                               # [B, 3, H, W]
-        targets: Optional[List[Dict]] = None,               # list of {boxes, labels}
+        images: torch.Tensor,
+        targets: Optional[List[Dict]] = None,
     ):
         """
-        Light student augmentation: hflip + blur + brightness/contrast.
-
-        Geometric aug (hflip) transforms boxes if targets provided.
-        Photometric aug (blur, brightness, contrast) leaves boxes unchanged.
+        Weak aug: stochastic horizontal flip only.
 
         Returns:
             aug_images  : [B, 3, H, W]
-            aug_targets : same structure as targets (boxes updated if flipped)
+            aug_targets : boxes updated if flipped
+            did_flip    : bool — whether flip was applied (shared with student)
         """
         aug = self.config.aug
         W = images.shape[-1]
-
-        # --- Horizontal flip (per batch, same decision for all images) ---
         if random.random() < aug.hflip_prob:
             images = torch.flip(images, dims=[-1])
             if targets is not None:
                 new_targets = []
                 for t in targets:
-                    boxes = t["boxes"]                  # [N, 4] xyxy
+                    boxes = t["boxes"]
                     if boxes.numel() > 0:
                         flipped = boxes.clone()
-                        flipped[:, 0] = W - boxes[:, 2]  # x1_new = W - x2
-                        flipped[:, 2] = W - boxes[:, 0]  # x2_new = W - x1
+                        flipped[:, 0] = W - boxes[:, 2]
+                        flipped[:, 2] = W - boxes[:, 0]
                         new_targets.append({**t, "boxes": flipped})
                     else:
                         new_targets.append(t)
                 targets = new_targets
+            return images, targets, True
+        return images, targets, False
 
+    def _photometric_aug(self, images: torch.Tensor) -> torch.Tensor:
+        """Photometric aug: blur + brightness/contrast. No geometric change."""
         if not _HAS_TF:
-            return images, targets
-
-        # --- Gaussian blur ---
+            return images
+        aug = self.config.aug
         if random.random() < aug.blur_prob:
             sigma = random.uniform(0.1, aug.blur_sigma_max)
             images = TF.gaussian_blur(images, kernel_size=[3, 3], sigma=sigma)
-
-        # --- Brightness ---
         if random.random() < aug.brightness_prob:
             factor = 1.0 + random.uniform(-aug.brightness_mag, aug.brightness_mag)
             images = torch.clamp(images * factor, 0.0, 1.0)
-
-        # --- Contrast ---
         if random.random() < aug.contrast_prob:
             mean = images.mean(dim=[-1, -2], keepdim=True)
             factor = 1.0 + random.uniform(-aug.contrast_mag, aug.contrast_mag)
             images = torch.clamp((images - mean) * factor + mean, 0.0, 1.0)
+        return images
 
+    def _student_aug(
+        self,
+        images: torch.Tensor,
+        targets: Optional[List[Dict]] = None,
+    ):
+        """
+        Strong aug: hflip (stochastic) + photometric (blur/brightness/contrast).
+
+        Returns:
+            aug_images  : [B, 3, H, W]
+            aug_targets : boxes updated if flipped
+        """
+        images, targets, _ = self._weak_aug(images, targets)
+        images = self._photometric_aug(images)
         return images, targets
 
     # ------------------------------------------------------------------
@@ -311,8 +321,12 @@ class CurriculumDomainAdaptationTrainer:
             if self.config.loss.rgb_pseudo_weight > 0.0
             else None
         )
-        # Student aug — hflip + blur + brightness, boxes updated accordingly
-        student_images, student_targets = self._student_aug(batch.images, batch.targets)
+        # Phase 1 warmup: weak aug (hflip only) — stable supervised pretrain
+        # Phase 2+: strong aug (hflip + photometric)
+        if phase == Phase.PHASE1_RGB_WARMUP:
+            student_images, student_targets, _ = self._weak_aug(batch.images, batch.targets)
+        else:
+            student_images, student_targets = self._student_aug(batch.images, batch.targets)
 
         loss, log = compute_rgb_loss(
             student=self.student,
@@ -391,10 +405,10 @@ class CurriculumDomainAdaptationTrainer:
             else None
         )
 
-        # Teacher infers on weak images (original MID, no extra aug)
-        # Student trains on strong images (hflip + blur + brightness)
-        weak_images = batch.images                                    # teacher path
-        strong_images, _ = self._student_aug(batch.images, None)     # student path (boxes not needed for pseudo-label loss)
+        # Teacher: weak aug (hflip only) — stable pseudo-label generation
+        # Student: same flipped base + photometric — spatial structure stays aligned
+        weak_images, _, did_flip = self._weak_aug(batch.images, None)
+        strong_images = self._photometric_aug(weak_images.clone())
 
         loss, log = compute_mid_loss(
             student=self.student,
