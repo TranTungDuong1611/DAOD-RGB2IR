@@ -300,9 +300,12 @@ class PhaseEvaluator:
         self.vis_score_thresh = vis_score_thresh
         self.class_names      = class_names
 
-        # Best checkpoint tracking
+        # Best checkpoint tracking — global and per-phase
         self.best_map50: float = -1.0
-        self.on_new_best_fn   = None   # set via .register_best_fn(fn)
+        self.on_new_best_fn = None          # set via .register_best_fn(fn)
+
+        self.best_map50_per_phase: Dict[str, float] = {}
+        self.on_new_phase_best_fn = None    # set via .register_phase_best_fn(fn)
 
         # State
         self._last_phase     = None
@@ -312,10 +315,14 @@ class PhaseEvaluator:
         self.history: List[Dict] = []
 
     def register_best_fn(self, fn) -> None:
-        """Register a callback called when a new best mAP@0.5 is achieved.
-        fn(results: Dict) where results contains global_step, phase, mAP@0.5, etc.
-        """
+        """Register a callback called when a new global best mAP@0.5 is achieved."""
         self.on_new_best_fn = fn
+
+    def register_phase_best_fn(self, fn) -> None:
+        """Register a callback called when a new per-phase best mAP@0.5 is achieved.
+        fn(results: Dict) — results includes global_step, phase, mAP@0.5, etc.
+        """
+        self.on_new_phase_best_fn = fn
 
     def step(
         self,
@@ -373,13 +380,21 @@ class PhaseEvaluator:
         self._last_eval_step = global_step
         self._log_results(results)
 
-        # Best checkpoint
+        # Global best checkpoint
         map50 = results.get("mAP@0.5", 0.0)
         if map50 > self.best_map50:
             self.best_map50 = map50
-            self.log_fn(f"[Eval] New best mAP@0.5={map50:.4f} at step={global_step}")
+            self.log_fn(f"[Eval] New global best mAP@0.5={map50:.4f} at step={global_step}")
             if self.on_new_best_fn is not None:
                 self.on_new_best_fn(results)
+
+        # Per-phase best checkpoint
+        phase_key = current_phase.name
+        if map50 > self.best_map50_per_phase.get(phase_key, -1.0):
+            self.best_map50_per_phase[phase_key] = map50
+            self.log_fn(f"[Eval] New best for {phase_key}: mAP@0.5={map50:.4f} at step={global_step}")
+            if self.on_new_phase_best_fn is not None:
+                self.on_new_phase_best_fn(results)
 
         # Optional visualization
         if self.vis_dir is not None:

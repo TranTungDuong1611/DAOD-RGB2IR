@@ -248,33 +248,60 @@ def main(args):
         phase_evaluator=phase_eval,
     )
 
-    # --- Best checkpoint callback ---
+    # --- Best checkpoint callbacks ---
     os.makedirs(args.output_dir, exist_ok=True)
 
-    def save_best(results):
+    def save_global_best(results):
         step  = results["global_step"]
         phase = results["phase"]
         map50 = results["mAP@0.5"]
         path  = f"{args.output_dir}/best.pt"
         trainer.save_checkpoint(path)
-        logger.info(f"[Best] mAP@0.5={map50:.4f}  phase={phase}  step={step}  → {path}")
+        logger.info(f"[Global Best] mAP@0.5={map50:.4f}  phase={phase}  step={step}  → {path}")
 
-    phase_eval.register_best_fn(save_best)
+    def save_phase_best(results):
+        step  = results["global_step"]
+        phase = results["phase"]
+        map50 = results["mAP@0.5"]
+        path  = f"{args.output_dir}/best_{phase}.pt"
+        trainer.save_checkpoint(path)
+        logger.info(f"[Phase Best] {phase}  mAP@0.5={map50:.4f}  step={step}  → {path}")
 
-    # --- Baseline eval ---
-    logger.info("\nBaseline evaluation (before training) ...")
-    phase_eval.evaluate(student, global_step=0,
-                        current_phase=Phase.PHASE1_RGB_WARMUP,
-                        trigger_reason="baseline")
+    phase_eval.register_best_fn(save_global_best)
+    phase_eval.register_phase_best_fn(save_phase_best)
+
+    # --- Resume ---
+    if args.resume:
+        logger.info(f"Resuming from: {args.resume}")
+        trainer.load_checkpoint(args.resume)
+        # Recreate LR scheduler synced to resumed step so cosine curve continues correctly
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.total_iters, last_epoch=trainer.global_step,
+        )
+        logger.info(
+            f"Resumed at global_step={trainer.global_step}  "
+            f"remaining={args.total_iters - trainer.global_step} iters"
+        )
+    else:
+        # --- Baseline eval (only on fresh run) ---
+        logger.info("\nBaseline evaluation (before training) ...")
+        phase_eval.evaluate(student, global_step=0,
+                            current_phase=Phase.PHASE1_RGB_WARMUP,
+                            trigger_reason="baseline")
 
     # --- Training loop ---
-    logger.info(f"\nStarting training: {args.total_iters} iterations ...")
-    for i in range(args.total_iters):
-        log = trainer.train_one_iteration()
+    remaining_iters = args.total_iters - trainer.global_step
+    logger.info(
+        f"\nStarting training: {remaining_iters} remaining iterations "
+        f"(global_step {trainer.global_step} → {args.total_iters}) ..."
+    )
+    for _ in range(remaining_iters):
+        log  = trainer.train_one_iteration()
         lr_scheduler.step()
+        step = trainer.global_step  # incremented at end of train_one_iteration
 
         # Verbose log every 500 iters
-        if i % 500 == 0:
+        if step % 500 == 0:
             phase  = log.get("phase", "?")
             domain = log.get("domain", "?")
             t_rgb  = log.get("thresh_rgb", "?")
@@ -282,15 +309,15 @@ def main(args):
             lr     = optimizer.param_groups[-1]["lr"]
             thresh_str = f"({t_rgb:.2f}/{t_ir:.2f})" if isinstance(t_rgb, float) else ""
             logger.info(
-                f"[{i:07d}/{args.total_iters}]  "
+                f"[{step:07d}/{args.total_iters}]  "
                 f"phase={phase:<22}  domain={domain}  "
                 f"thresh={thresh_str}  lr={lr:.2e}"
             )
 
         # Checkpoint
-        if i > 0 and i % args.save_every == 0:
+        if step % args.save_every == 0:
             os.makedirs(args.output_dir, exist_ok=True)
-            trainer.save_checkpoint(f"{args.output_dir}/ckpt_{i:07d}.pt")
+            trainer.save_checkpoint(f"{args.output_dir}/ckpt_{step:07d}.pt")
 
     # --- Final eval + summary ---
     logger.info("\nFinal evaluation ...")
@@ -324,6 +351,8 @@ def parse_args():
     p.add_argument("--save_every",  type=int,   default=5_000)
     p.add_argument("--from_coco",   action="store_true",
                    help="Init head from COCO pretrained FCOS (91-class → replace head)")
+    p.add_argument("--resume",      default=None,
+                   help="Path to checkpoint to resume from (e.g. output/best_PHASE1_RGB_WARMUP.pt)")
     p.add_argument("--device",      default="cuda",
                    choices=["cuda", "cpu", "mps"])
     return p.parse_args()
