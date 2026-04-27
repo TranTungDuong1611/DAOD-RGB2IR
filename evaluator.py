@@ -284,6 +284,7 @@ class PhaseEvaluator:
         log_fn: Optional[callable] = None,
         # Visualization
         vis_dir:         Optional[str] = None,   # None = no visualization
+        vis_every_n:     Optional[int] = None,   # None = only on eval trigger
         vis_num_samples: int = 8,
         vis_score_thresh: float = 0.3,
         class_names:     Optional[List[str]] = None,
@@ -296,6 +297,7 @@ class PhaseEvaluator:
         self.log_fn         = log_fn or logger.info
 
         self.vis_dir          = vis_dir
+        self.vis_every_n      = vis_every_n
         self.vis_num_samples  = vis_num_samples
         self.vis_score_thresh = vis_score_thresh
         self.class_names      = class_names
@@ -338,10 +340,19 @@ class PhaseEvaluator:
         triggered, trigger_reason = self._should_evaluate(global_step, current_phase)
         self._last_phase = current_phase
 
-        if not triggered:
-            return None
+        if triggered:
+            return self.evaluate(model, global_step, current_phase, trigger_reason)
 
-        return self.evaluate(model, global_step, current_phase, trigger_reason)
+        # Visualization-only trigger (no full eval)
+        if (
+            self.vis_dir is not None
+            and self.vis_every_n is not None
+            and global_step > 0
+            and global_step % self.vis_every_n == 0
+        ):
+            self._visualize(model, global_step, current_phase, trigger_reason="vis_periodic")
+
+        return None
 
     def evaluate(
         self,
@@ -458,7 +469,7 @@ class PhaseEvaluator:
 
     def _visualize(self, model, global_step: int, current_phase, trigger_reason: str) -> None:
         try:
-            from .visualize import visualize_eval_samples
+            from visualize import visualize_eval_samples
         except ImportError:
             self.log_fn("[Visualize] matplotlib not available, skipping visualization")
             return

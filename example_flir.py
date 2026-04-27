@@ -135,10 +135,10 @@ def make_training_config(device: str) -> TrainingConfig:
 def make_adaptive_threshold() -> AdaptiveThresholdScheduler:
     return AdaptiveThresholdScheduler(AdaptiveThresholdConfig(
         rgb_teacher=TeacherThresholds(
-            phase1=0.90, phase2=0.88, phase3=0.80, phase4=0.70,
+            phase1=0.85, phase2=0.83, phase3=0.75, phase4=0.65,
         ),
         ir_teacher=TeacherThresholds(
-            phase1=0.95, phase2=0.90, phase3=0.85, phase4=0.78,
+            phase1=0.90, phase2=0.85, phase3=0.80, phase4=0.73,
         ),
     ))
 
@@ -229,6 +229,7 @@ def main(args):
         device=device,
         eval_every_n=args.eval_every,
         vis_dir=os.path.join(args.output_dir, "vis"),
+        vis_every_n=args.vis_every,
         vis_num_samples=8,
         vis_score_thresh=0.3,
         class_names=FLIR_CLASSES,
@@ -348,6 +349,7 @@ def parse_args():
     p.add_argument("--min_size",    type=int,   default=512)
     p.add_argument("--max_size",    type=int,   default=640)
     p.add_argument("--eval_every",  type=int,   default=2_000)
+    p.add_argument("--vis_every",   type=int,   default=500)
     p.add_argument("--save_every",  type=int,   default=5_000)
     p.add_argument("--from_coco",   action="store_true",
                    help="Init head from COCO pretrained FCOS (91-class → replace head)")

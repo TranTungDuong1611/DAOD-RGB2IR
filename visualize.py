@@ -183,3 +183,126 @@ def visualize_eval_samples(
     plt.savefig(save_path, bbox_inches="tight", dpi=120)
     plt.close(fig)
     logger.info(f"[Visualize] saved {n} samples → {save_path}")
+
+
+# ---------------------------------------------------------------------------
+# Multi-model comparison grid
+# ---------------------------------------------------------------------------
+
+def visualize_compare_models(
+    models: Dict[str, "torch.nn.Module"],
+    val_loader: "torch.utils.data.DataLoader",
+    device: "torch.device",
+    save_path: str,
+    num_samples: int = 8,
+    score_thresh: float = 0.3,
+    class_names: Optional[List[str]] = None,
+    title: str = "",
+) -> None:
+    """
+    For each image show one column per model: GT (green) + predictions (dashed).
+
+    Layout: num_samples rows × len(models) cols.
+    Column headers = model names, row labels = sample index.
+
+    Args:
+        models       : OrderedDict {name: model}, e.g. {"student": m1, "rgb_teacher": m2, ...}
+        val_loader   : yields (images [B,3,H,W], targets List[Dict])
+        device       : inference device
+        save_path    : output PNG path
+        num_samples  : number of images
+        score_thresh : minimum confidence to draw a predicted box
+        class_names  : class name strings
+        title        : figure suptitle
+    """
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+
+    model_names = list(models.keys())
+    n_models    = len(model_names)
+
+    # --- collect images & targets ---
+    samples_images:  List[torch.Tensor] = []
+    samples_targets: List[Dict]         = []
+
+    first_model = next(iter(models.values()))
+    first_model.eval()
+    with torch.no_grad():
+        for batch in val_loader:
+            images, targets = batch
+            images = images.to(device)
+            for i in range(len(images)):
+                if len(samples_images) >= num_samples:
+                    break
+                samples_images.append(images[i].cpu())
+                samples_targets.append({k: v.cpu() if isinstance(v, torch.Tensor) else v
+                                        for k, v in targets[i].items()})
+            if len(samples_images) >= num_samples:
+                break
+    first_model.train()
+
+    n = len(samples_images)
+
+    # --- run inference for each model ---
+    all_preds: Dict[str, List[Dict]] = {}
+    for name, model in models.items():
+        model.eval()
+        preds_list: List[Dict] = []
+        with torch.no_grad():
+            collected = 0
+            for batch in val_loader:
+                images, _ = batch
+                images = images.to(device)
+                preds  = model(images)
+                for i in range(len(images)):
+                    if collected >= n:
+                        break
+                    preds_list.append({k: v.cpu() if isinstance(v, torch.Tensor) else v
+                                       for k, v in preds[i].items()})
+                    collected += 1
+                if collected >= n:
+                    break
+        model.train()
+        all_preds[name] = preds_list
+
+    # --- draw grid: rows=images, cols=models ---
+    fig, axes = plt.subplots(
+        n, n_models,
+        figsize=(n_models * 3.5, n * 3.2),
+        squeeze=False,
+    )
+
+    for col, name in enumerate(model_names):
+        axes[0][col].set_title(name, fontsize=9, fontweight="bold", pad=4)
+
+    for row in range(n):
+        tgt = samples_targets[row]
+        for col, name in enumerate(model_names):
+            pred = all_preds[name][row]
+            draw_boxes_on_ax(
+                ax=axes[row][col],
+                image=samples_images[row],
+                gt_boxes=tgt.get("boxes"),
+                gt_labels=tgt.get("labels"),
+                pred_boxes=pred.get("boxes"),
+                pred_labels=pred.get("labels"),
+                pred_scores=pred.get("scores"),
+                class_names=class_names,
+                score_thresh=score_thresh,
+                title="",
+            )
+        axes[row][0].set_ylabel(f"img {row}", fontsize=7, rotation=0,
+                                labelpad=28, va="center")
+
+    legend_handles = [
+        patches.Patch(edgecolor=_GT_COLOR,       facecolor="none", label="GT"),
+        patches.Patch(edgecolor=_PRED_COLORS[0], facecolor="none", linestyle="--",
+                      label=f"pred (thresh={score_thresh})"),
+    ]
+    fig.legend(handles=legend_handles, loc="lower center", ncol=2,
+               fontsize=8, frameon=True, bbox_to_anchor=(0.5, 0.0))
+
+    fig.suptitle(title or "Model comparison", fontsize=11, y=1.01)
+    plt.tight_layout()
+    plt.savefig(save_path, bbox_inches="tight", dpi=120)
+    plt.close(fig)
+    logger.info(f"[Visualize] comparison grid ({n} samples × {n_models} models) → {save_path}")

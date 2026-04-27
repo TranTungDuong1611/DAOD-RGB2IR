@@ -15,7 +15,7 @@ Within-phase alternation is ratio-based:
 from enum import Enum, auto
 from typing import Literal
 
-from .config import CurriculumConfig
+from config import CurriculumConfig
 
 
 # ---------------------------------------------------------------------------

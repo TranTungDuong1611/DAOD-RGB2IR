@@ -2,8 +2,8 @@
 Curriculum Domain Adaptation: RGB → MID(SAGA) → IR
 """
 
-from .batch_types import IRBatch, MidBatch, RGBBatch
-from .config import (
+from batch_types import IRBatch, MidBatch, RGBBatch
+from config import (
     AugConfig,
     CurriculumConfig,
     EMAConfig,
@@ -14,15 +14,15 @@ from .config import (
     TeacherUpdateConfig,
     TrainingConfig,
 )
-from .ema import copy_student_to_teacher, ema_update
-from .losses import compute_ir_loss, compute_mid_loss, compute_rgb_loss
-from .saga import SemanticAwareGrayAugmentation
-from .scheduler import CurriculumScheduler, DomainStep, Phase
-from .trainer import CurriculumDomainAdaptationTrainer
-from .fcos_wrapper import FCOSDetector, build_fcos_trio
-from .adaptive_threshold import AdaptiveThresholdScheduler, AdaptiveThresholdConfig, TeacherThresholds
-from .evaluator import DetectionEvaluator, PhaseEvaluator
-from .visualize import visualize_eval_samples
+from ema import copy_student_to_teacher, ema_update
+from losses import compute_ir_loss, compute_mid_loss, compute_rgb_loss
+from saga import SemanticAwareGrayAugmentation
+from scheduler import CurriculumScheduler, DomainStep, Phase
+from trainer import CurriculumDomainAdaptationTrainer
+from fcos_wrapper import FCOSDetector, build_fcos_trio
+from adaptive_threshold import AdaptiveThresholdScheduler, AdaptiveThresholdConfig, TeacherThresholds
+from evaluator import DetectionEvaluator, PhaseEvaluator
+from visualize import visualize_eval_samples
 
 __all__ = [
     # Trainer (main entry point)

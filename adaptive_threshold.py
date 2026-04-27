@@ -19,7 +19,7 @@ Each teacher can have an independent threshold since:
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-from .scheduler import Phase
+from scheduler import Phase
 
 
 # ---------------------------------------------------------------------------

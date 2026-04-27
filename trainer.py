@@ -25,12 +25,12 @@ import torch.nn as nn
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
-from .batch_types import IRBatch, MidBatch, RGBBatch
-from .config import TrainingConfig
-from .ema import ema_update
-from .losses import compute_ir_loss, compute_mid_loss, compute_rgb_loss
-from .saga import SemanticAwareGrayAugmentation, SoftSAGA
-from .scheduler import CurriculumScheduler, DomainStep, Phase
+from batch_types import IRBatch, MidBatch, RGBBatch
+from config import TrainingConfig
+from ema import ema_update
+from losses import compute_ir_loss, compute_mid_loss, compute_rgb_loss
+from saga import SemanticAwareGrayAugmentation, SoftSAGA
+from scheduler import CurriculumScheduler, DomainStep, Phase
 
 try:
     import torchvision.transforms.functional as TF
@@ -40,8 +40,8 @@ except ImportError:
 
 # Optional — imported only when provided at runtime
 try:
-    from .adaptive_threshold import AdaptiveThresholdScheduler
-    from .evaluator import PhaseEvaluator
+    from adaptive_threshold import AdaptiveThresholdScheduler
+    from evaluator import PhaseEvaluator
 except ImportError:
     AdaptiveThresholdScheduler = None  # type: ignore
     PhaseEvaluator = None              # type: ignore
@@ -132,7 +132,7 @@ class CurriculumDomainAdaptationTrainer:
           ir_teacher has been partially updated (if mid_update_ir_teacher=True)
           or still needs a sync. Copy student → ir_teacher for a fresh start.
         """
-        from .ema import copy_student_to_teacher
+        from ema import copy_student_to_teacher
 
         if from_phase is None:
             return  # initial call, no transition
