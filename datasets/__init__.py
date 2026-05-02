@@ -1,6 +1,7 @@
 from .flir import (
     FLIR_CLASSES,
     FLIR_CLASS_TO_IDX,
+    FLIR_TO_COCO_IDX,
     NUM_CLASSES,
     FLIRIRDataset,
     FLIRIRValDataset,
@@ -13,6 +14,7 @@ from .flir import (
 __all__ = [
     "FLIR_CLASSES",
     "FLIR_CLASS_TO_IDX",
+    "FLIR_TO_COCO_IDX",
     "NUM_CLASSES",
     "FLIRRGBDataset",
     "FLIRIRDataset",

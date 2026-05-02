@@ -51,6 +51,11 @@ FLIR_CLASSES    = ["person", "car", "bicycle"]
 FLIR_CLASS_TO_IDX: Dict[str, int] = {c: i for i, c in enumerate(FLIR_CLASSES)}
 NUM_CLASSES     = len(FLIR_CLASSES)   # 3
 
+# COCO 91-class output indices for each FLIR class (used to slice COCO cls_logits).
+# COCO label space: 0=__background__, 1=person, 2=bicycle, 3=car, ...
+# FLIR order:        person(0)          car(1)              bicycle(2)
+FLIR_TO_COCO_IDX: List[int] = [1, 3, 2]
+
 # Labels to silently skip (noise / artefacts in the XML)
 _IGNORE_LABELS  = {"FLIR", "dog"}
 

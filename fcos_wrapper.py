@@ -137,6 +137,7 @@ class FCOSDetector(nn.Module):
         min_size: int = 600,
         max_size: int = 1000,
         ir_to_rgb: bool = True,
+        coco_src_indices: Optional[List[int]] = None,
         **fcos_kwargs,
     ) -> "FCOSDetector":
         """
@@ -144,6 +145,13 @@ class FCOSDetector(nn.Module):
         head for `num_classes` foreground classes. Useful for fine-tuning.
 
         If num_classes == 91, the head is kept as-is.
+
+        Args:
+            coco_src_indices : COCO 91-class output indices to slice into the new head,
+                               one per new class. When provided, the class-agnostic conv
+                               layers and the matching cls_logits rows are transferred
+                               instead of random init.
+                               Example (FLIR person/car/bicycle): [1, 3, 2]
         """
         if not _HAS_NEW_WEIGHTS_API:
             raise RuntimeError(
@@ -157,7 +165,7 @@ class FCOSDetector(nn.Module):
             **fcos_kwargs,
         )
         if num_classes != 91:
-            model = _replace_classification_head(model, num_classes)
+            model = _replace_classification_head(model, num_classes, coco_src_indices)
         return cls(model, ir_to_rgb=ir_to_rgb)
 
 
@@ -173,6 +181,7 @@ def build_fcos_trio(
     max_size: int = 1000,
     ir_to_rgb: bool = True,
     from_coco: bool = False,
+    coco_src_indices: Optional[List[int]] = None,
 ) -> Tuple["FCOSDetector", "FCOSDetector", "FCOSDetector"]:
     """
     Create (student, rgb_teacher, ir_teacher) — all sharing the same
@@ -186,6 +195,9 @@ def build_fcos_trio(
         min_size / max_size      : detection resize range
         ir_to_rgb                : expand 1-ch IR images to 3 channels
         from_coco                : start from COCO pretrained FCOS head
+        coco_src_indices         : COCO 91-class indices to slice into the new head
+                                   (only used when from_coco=True). See
+                                   FCOSDetector.from_coco_pretrained for details.
 
     Returns:
         (student, rgb_teacher, ir_teacher)
@@ -196,6 +208,7 @@ def build_fcos_trio(
             min_size=min_size,
             max_size=max_size,
             ir_to_rgb=ir_to_rgb,
+            coco_src_indices=coco_src_indices,
         )
     else:
         student = FCOSDetector.from_scratch(
@@ -217,10 +230,22 @@ def build_fcos_trio(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _replace_classification_head(model: FCOS, num_classes: int) -> FCOS:
+def _replace_classification_head(
+    model: FCOS,
+    num_classes: int,
+    coco_src_indices: Optional[List[int]] = None,
+) -> FCOS:
     """
     Replace FCOS classification head with one sized for `num_classes`.
     Regression head (bbox + centerness) is kept with pretrained weights.
+
+    Args:
+        coco_src_indices : if provided, transfer weights from the COCO head instead of
+                           random init. List of length `num_classes` — each entry is the
+                           0-based output index in the COCO 91-class cls_logits for the
+                           i-th new class. Example (FLIR): [1, 3, 2] → person=1, car=3,
+                           bicycle=2. When set, class-agnostic conv layers are copied and
+                           cls_logits weight/bias are sliced from the COCO head.
     """
     old_head = model.head.classification_head
     # Infer in_channels from the existing conv layers.
@@ -237,10 +262,29 @@ def _replace_classification_head(model: FCOS, num_classes: int) -> FCOS:
     def _group_norm(*args):
         return torch.nn.GroupNorm(32, args[-1])
 
-    model.head.classification_head = FCOSClassificationHead(
+    new_head = FCOSClassificationHead(
         in_channels=in_channels,
         num_anchors=num_anchors,
         num_classes=num_classes,
         norm_layer=_group_norm,
     )
+
+    if coco_src_indices is not None:
+        # Transfer class-agnostic conv stack (same architecture, same channels)
+        new_head.conv.load_state_dict(old_head.conv.state_dict())
+
+        # Slice cls_logits for the target classes.
+        # cls_logits.weight : [old_num_classes * num_anchors, in_channels, 1, 1]
+        # cls_logits.bias   : [old_num_classes * num_anchors]
+        # Each class c occupies rows [c*num_anchors : (c+1)*num_anchors].
+        src_rows = [
+            c * num_anchors + a
+            for c in coco_src_indices
+            for a in range(num_anchors)
+        ]
+        with torch.no_grad():
+            new_head.cls_logits.weight.copy_(old_head.cls_logits.weight[src_rows])
+            new_head.cls_logits.bias.copy_(old_head.cls_logits.bias[src_rows])
+
+    model.head.classification_head = new_head
     return model

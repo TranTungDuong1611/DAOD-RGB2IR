@@ -50,6 +50,7 @@ from config import (
 )
 from datasets import (
     FLIR_CLASSES,
+    FLIR_TO_COCO_IDX,
     NUM_CLASSES,
     FLIRIRDataset,
     FLIRIRValDataset,
@@ -201,6 +202,7 @@ def main(args):
         max_size=args.max_size,
         ir_to_rgb=True,
         from_coco=args.from_coco,
+        coco_src_indices=FLIR_TO_COCO_IDX if args.from_coco else None,
     )
     copy_student_to_teacher(rgb_teacher, student)
     copy_student_to_teacher(ir_teacher,  student)
