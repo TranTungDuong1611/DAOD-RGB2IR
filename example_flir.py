@@ -254,6 +254,7 @@ def main(args):
         ir_loader=ir_loader,
         threshold_scheduler=thresh,
         phase_evaluator=phase_eval,
+        phase1_best_path=os.path.join(args.output_dir, "best_PHASE1_RGB_WARMUP.pt"),
     )
 
     # --- Best checkpoint callbacks ---

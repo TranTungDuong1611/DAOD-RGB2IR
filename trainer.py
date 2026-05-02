@@ -17,6 +17,7 @@ Training flow per iteration:
 
 import copy
 import logging
+import os
 import random
 from typing import Dict, Iterator, List, Optional
 
@@ -74,6 +75,7 @@ class CurriculumDomainAdaptationTrainer:
         ir_loader: DataLoader,
         threshold_scheduler: Optional["AdaptiveThresholdScheduler"] = None,
         phase_evaluator: Optional["PhaseEvaluator"] = None,
+        phase1_best_path: Optional[str] = None,
     ) -> None:
         self.student = student
         self.rgb_teacher = rgb_teacher
@@ -85,6 +87,7 @@ class CurriculumDomainAdaptationTrainer:
         # Optional extensions
         self.threshold_scheduler = threshold_scheduler
         self.phase_evaluator     = phase_evaluator
+        self.phase1_best_path    = phase1_best_path
 
         self._setup_models()
 
@@ -138,13 +141,26 @@ class CurriculumDomainAdaptationTrainer:
             return  # initial call, no transition
 
         if from_phase == Phase.PHASE1_RGB_WARMUP and to_phase == Phase.PHASE2_RGB_MID:
-            logger.info(
-                f"[Phase transition] PHASE1→PHASE2: "
-                f"copying pretrained student → rgb_teacher AND ir_teacher "
-                f"(both teachers initialised from exact pretrained weights)"
-            )
-            copy_student_to_teacher(self.rgb_teacher, self.student)
-            copy_student_to_teacher(self.ir_teacher,  self.student)
+            # Prefer best Phase 1 checkpoint over current student (which may not be the best)
+            if self.phase1_best_path and os.path.exists(self.phase1_best_path):
+                logger.info(
+                    f"[Phase transition] PHASE1→PHASE2: "
+                    f"loading best Phase 1 student from {self.phase1_best_path} → teachers"
+                )
+                ckpt = torch.load(
+                    self.phase1_best_path, map_location=self.device, weights_only=False
+                )
+                self.rgb_teacher.load_state_dict(ckpt["student"])
+                self.ir_teacher.load_state_dict(ckpt["student"])
+            else:
+                logger.info(
+                    f"[Phase transition] PHASE1→PHASE2: "
+                    f"copying current student → rgb_teacher AND ir_teacher"
+                    + (f" (best checkpoint not found at {self.phase1_best_path})"
+                       if self.phase1_best_path else "")
+                )
+                copy_student_to_teacher(self.rgb_teacher, self.student)
+                copy_student_to_teacher(self.ir_teacher,  self.student)
 
         elif from_phase == Phase.PHASE2_RGB_MID and to_phase == Phase.PHASE3_MID_IR:
             logger.info(
