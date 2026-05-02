@@ -398,8 +398,11 @@ class PhaseEvaluator:
             "trigger":        trigger_reason,
         })
 
-        # RGB val metrics — only in Phase 1 (model trained purely on RGB)
-        if self._rgb_evaluator is not None and current_phase.name == "PHASE1_RGB_WARMUP":
+        # RGB val metrics — Phase 1 periodic evals + Phase 1→2 transition
+        if self._rgb_evaluator is not None and (
+            current_phase.name == "PHASE1_RGB_WARMUP"
+            or trigger_reason == "phase_end:PHASE1_RGB_WARMUP"
+        ):
             rgb_results = self._eval_rgb_val(model)
             results.update(rgb_results)
 

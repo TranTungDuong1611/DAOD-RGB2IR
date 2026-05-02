@@ -223,14 +223,24 @@ def _replace_classification_head(model: FCOS, num_classes: int) -> FCOS:
     Regression head (bbox + centerness) is kept with pretrained weights.
     """
     old_head = model.head.classification_head
-    # Infer in_channels from the existing conv layers
-    in_channels = old_head.conv[0][0].in_channels
+    # Infer in_channels from the existing conv layers.
+    # torchvision < 0.13 : conv is ModuleList of Sequential → conv[0][0] is Conv2d
+    # torchvision >= 0.13 : conv is flat Sequential         → conv[0]    is Conv2d
+    first = old_head.conv[0]
+    in_channels = (first[0] if isinstance(first, torch.nn.Sequential) else first).in_channels
     num_anchors = old_head.num_anchors
+
+    # norm_layer wrapper: handles both torchvision calling conventions
+    #   old (< 0.13): norm_layer(num_groups, num_channels)
+    #   new (>= 0.13): norm_layer(num_channels)
+    # args[-1] is always num_channels regardless of convention.
+    def _group_norm(*args):
+        return torch.nn.GroupNorm(32, args[-1])
 
     model.head.classification_head = FCOSClassificationHead(
         in_channels=in_channels,
         num_anchors=num_anchors,
         num_classes=num_classes,
-        norm_layer=torch.nn.GroupNorm,
+        norm_layer=_group_norm,
     )
     return model

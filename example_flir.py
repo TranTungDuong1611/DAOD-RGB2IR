@@ -87,12 +87,12 @@ def make_training_config(device: str) -> TrainingConfig:
         ),
         mid_routing=MidRoutingConfig(
             near_rgb_teacher_source="rgb",  near_rgb_ema_target="rgb",
-            near_rgb_rgb_weight=1.0,        near_rgb_ir_weight=0.0,
+            near_rgb_rgb_weight=0.5,        near_rgb_ir_weight=0.0,
             intermediate_teacher_source="both", intermediate_ema_target="ir",
             intermediate_ema_alpha=0.9998,
-            intermediate_rgb_weight=0.5,    intermediate_ir_weight=0.5,
+            intermediate_rgb_weight=0.25,    intermediate_ir_weight=0.25,
             near_ir_teacher_source="ir",    near_ir_ema_target="ir",
-            near_ir_rgb_weight=0.0,         near_ir_ir_weight=1.0,
+            near_ir_rgb_weight=0.0,         near_ir_ir_weight=0.5,
         ),
         aug=AugConfig(
             hflip_prob=0.5,
@@ -104,9 +104,9 @@ def make_training_config(device: str) -> TrainingConfig:
             contrast_mag=0.2,
         ),
         curriculum=CurriculumConfig(
-            phase1_end=3_000,       # RGB warmup
-            phase2_end=9_000,       # RGB + MID
-            phase3_end=15_000,      # MID + IR
+            phase1_end=4_000,       # RGB warmup
+            phase2_end=6_000,       # RGB + MID
+            phase3_end=8_000,      # MID + IR
             phase2_rgb_ratio=0.67,  # RGB:MID = 2:1 → MID ít hơn, ổn định hơn
             phase3_mid_ratio=0.4,
             phase4_mid_every_n=5,
@@ -135,10 +135,10 @@ def make_training_config(device: str) -> TrainingConfig:
 def make_adaptive_threshold() -> AdaptiveThresholdScheduler:
     return AdaptiveThresholdScheduler(AdaptiveThresholdConfig(
         rgb_teacher=TeacherThresholds(
-            phase1=0.85, phase2=0.83, phase3=0.75, phase4=0.65,
+            phase1=0.45, phase2=0.45, phase3=0.4, phase4=0.4,
         ),
         ir_teacher=TeacherThresholds(
-            phase1=0.90, phase2=0.85, phase3=0.80, phase4=0.73,
+            phase1=0.5, phase2=0.5, phase3=0.45, phase4=0.45,
         ),
     ))
 
