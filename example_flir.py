@@ -270,10 +270,16 @@ def main(args):
     def save_phase_best(results):
         step  = results["global_step"]
         phase = results["phase"]
-        map50 = results["mAP@0.5"]
-        path  = f"{args.output_dir}/best_{phase}.pt"
+        # Phase 1 best tracked by RGB mAP; all other phases by IR mAP
+        if phase == "PHASE1_RGB_WARMUP" and "rgb_mAP@0.5" in results:
+            map50       = results["rgb_mAP@0.5"]
+            metric_name = "rgb_mAP@0.5"
+        else:
+            map50       = results["mAP@0.5"]
+            metric_name = "mAP@0.5"
+        path = f"{args.output_dir}/best_{phase}.pt"
         trainer.save_checkpoint(path)
-        logger.info(f"[Phase Best] {phase}  mAP@0.5={map50:.4f}  step={step}  → {path}")
+        logger.info(f"[Phase Best] {phase}  {metric_name}={map50:.4f}  step={step}  → {path}")
 
     phase_eval.register_best_fn(save_global_best)
     phase_eval.register_phase_best_fn(save_phase_best)
@@ -351,8 +357,8 @@ def parse_args():
     p.add_argument("--total_iters", type=int,   default=20_000)
     p.add_argument("--batch_size",  type=int,   default=4)
     p.add_argument("--workers",     type=int,   default=4)
-    p.add_argument("--lr_backbone", type=float, default=1e-4)
-    p.add_argument("--lr_head",     type=float, default=1e-3)
+    p.add_argument("--lr_backbone", type=float, default=5e-5)
+    p.add_argument("--lr_head",     type=float, default=5e-4)
     p.add_argument("--min_size",    type=int,   default=512)
     p.add_argument("--max_size",    type=int,   default=640)
     p.add_argument("--eval_every",  type=int,   default=2_000)

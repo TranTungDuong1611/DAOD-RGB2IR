@@ -418,11 +418,21 @@ class PhaseEvaluator:
             if self.on_new_best_fn is not None:
                 self.on_new_best_fn(results)
 
-        # Per-phase best checkpoint
+        # Per-phase best checkpoint — Phase 1 uses RGB mAP (trained on RGB only),
+        # all other phases use IR mAP (target domain metric).
         phase_key = current_phase.name
-        if map50 > self.best_map50_per_phase.get(phase_key, -1.0):
-            self.best_map50_per_phase[phase_key] = map50
-            self.log_fn(f"[Eval] New best for {phase_key}: mAP@0.5={map50:.4f} at step={global_step}")
+        if current_phase.name == "PHASE1_RGB_WARMUP" and "rgb_mAP@0.5" in results:
+            phase_map50      = results["rgb_mAP@0.5"]
+            phase_metric_key = "rgb_mAP@0.5"
+        else:
+            phase_map50      = map50
+            phase_metric_key = "mAP@0.5"
+
+        if phase_map50 > self.best_map50_per_phase.get(phase_key, -1.0):
+            self.best_map50_per_phase[phase_key] = phase_map50
+            self.log_fn(
+                f"[Eval] New best for {phase_key}: {phase_metric_key}={phase_map50:.4f} at step={global_step}"
+            )
             if self.on_new_phase_best_fn is not None:
                 self.on_new_phase_best_fn(results)
 
