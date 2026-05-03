@@ -61,6 +61,7 @@ from datasets import (
 )
 from ema import copy_student_to_teacher
 from evaluator import DetectionEvaluator, PhaseEvaluator
+from faster_rcnn_wrapper import build_faster_rcnn_trio
 from fcos_wrapper import build_fcos_trio
 from scheduler import Phase
 from trainer import CurriculumDomainAdaptationTrainer
@@ -193,8 +194,8 @@ def main(args):
     )
 
     # --- Models ---
-    logger.info("Building FCOS trio ...")
-    student, rgb_teacher, ir_teacher = build_fcos_trio(
+    logger.info(f"Building {args.model.upper()} trio ...")
+    _trio_kwargs = dict(
         num_classes=NUM_CLASSES,
         pretrained_backbone=True,
         trainable_backbone_layers=3,
@@ -204,6 +205,10 @@ def main(args):
         from_coco=args.from_coco,
         coco_src_indices=FLIR_TO_COCO_IDX if args.from_coco else None,
     )
+    if args.model == "faster_rcnn":
+        student, rgb_teacher, ir_teacher = build_faster_rcnn_trio(**_trio_kwargs)
+    else:
+        student, rgb_teacher, ir_teacher = build_fcos_trio(**_trio_kwargs)
     copy_student_to_teacher(rgb_teacher, student)
     copy_student_to_teacher(ir_teacher,  student)
 
@@ -367,8 +372,11 @@ def parse_args():
     p.add_argument("--eval_every",  type=int,   default=2_000)
     p.add_argument("--vis_every",   type=int,   default=500)
     p.add_argument("--save_every",  type=int,   default=5_000)
+    p.add_argument("--model",       default="fcos",
+                   choices=["fcos", "faster_rcnn"],
+                   help="Detector backbone (default: fcos)")
     p.add_argument("--from_coco",   action="store_true",
-                   help="Init head from COCO pretrained FCOS (91-class → replace head)")
+                   help="Init head from COCO pretrained weights (91-class → replace head)")
     p.add_argument("--resume",      default=None,
                    help="Path to checkpoint to resume from (e.g. output/best_PHASE1_RGB_WARMUP.pt)")
     p.add_argument("--device",      default="cuda",
