@@ -1,136 +1,66 @@
-"""
-CurriculumScheduler — decides which domain step to execute at each iteration.
-
-Curriculum (NOT zigzag):
-  Phase 1  [0,          phase1_end)  → RGB only        (supervised warmup)
-  Phase 2  [phase1_end, phase2_end)  → RGB + MID       (bridge begins)
-  Phase 3  [phase2_end, phase3_end)  → MID + IR        (bridge ends)
-  Phase 4  [phase3_end, ∞)           → IR focus         (final adaptation)
-
-Within-phase alternation is ratio-based:
-  e.g. phase2_rgb_ratio=0.5 → RGBMIDRGBMID...
-       phase2_rgb_ratio=0.67 → RGBRGBMIDRGBRGBMID...
-"""
-
-from enum import Enum, auto
 from typing import Literal
+from .config import Phase 
 
-from .config import CurriculumConfig
-
-
-# ---------------------------------------------------------------------------
-# Types
-# ---------------------------------------------------------------------------
-
-class Phase(Enum):
-    PHASE1_RGB_WARMUP = 1
-    PHASE2_RGB_MID    = 2
-    PHASE3_MID_IR     = 3
-    PHASE4_IR_FOCUS   = 4
-
-
-DomainStep = Literal["rgb", "mid_near_rgb", "mid_intermediate", "mid_near_ir", "ir"]
-
-
-# ---------------------------------------------------------------------------
-# Scheduler
-# ---------------------------------------------------------------------------
+# Định nghĩa các bước để Trainer biết loại ảnh và nhãn cần dùng
+DomainStep = Literal[
+    "p1_rgb_supervised",    # Student(RGB+GT)
+    "p2_rgb_flow",          # Student(SAGA-Weak) + Teacher(RGB) + GT
+    "p2_ir_flow",           # Student(SAGA-High) + Teacher(SAGA-Mid) + GT
+    "p3_rgb_flow",          # Student(SAGA-Mid) + Teacher(SAGA-Weak) + GT
+    "p3_ir_flow",           # Student(IR) + Teacher(SAGA-High) [NO GT]
+    "p4_ir_focus"           # Student(IR) + Teacher(IR) [NO GT]
+]
 
 class CurriculumScheduler:
     """
-    Stateful curriculum scheduler.
-
-    Call `get_next_step(global_step)` at every iteration.
-    The scheduler tracks an internal counter per phase to implement
-    the within-phase ratio — this counter is independent of global_step
-    so phase transitions reset the alternation pattern cleanly.
+    Handles within-phase alternation (RGB vs IR flows) 
+    using ratios defined in TrainingConfig.
     """
-
-    def __init__(self, config: CurriculumConfig) -> None:
+    def __init__(self, config) -> None:
         self.config = config
-        # Internal alternation counters — one per phase that needs them
+        # Counters are internal to maintain strict alternating patterns
+        
+        self.Phase = Phase
         self._counters = {
             Phase.PHASE2_RGB_MID: 0,
             Phase.PHASE3_MID_IR:  0,
-            Phase.PHASE4_IR_FOCUS: 0,
         }
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def get_phase(self, global_step: int) -> Phase:
-        """Return the curriculum phase for a given global_step."""
-        cfg = self.config
-        if global_step < cfg.phase1_end:
-            return Phase.PHASE1_RGB_WARMUP
-        elif global_step < cfg.phase2_end:
-            return Phase.PHASE2_RGB_MID
-        elif global_step < cfg.phase3_end:
-            return Phase.PHASE3_MID_IR
-        else:
-            return Phase.PHASE4_IR_FOCUS
 
     def get_next_step(self, global_step: int) -> DomainStep:
         """
-        Determine (and advance) the next domain step to execute.
-
-        Must be called exactly once per iteration in order.
+        Main logic to decide what the Student and Teachers see in this iteration.
         """
-        phase = self.get_phase(global_step)
+        # Call the phase logic from the Master Config
+        phase = self.config.get_phase(global_step)
 
-        if phase == Phase.PHASE1_RGB_WARMUP:
-            return "rgb"
+        if phase == self.Phase.PHASE1_RGB_WARMUP:
+            return "p1_rgb_supervised"
 
-        elif phase == Phase.PHASE2_RGB_MID:
-            # RGB warmup bridge: RGB ↔ mid_near_rgb
+        elif phase == self.Phase.PHASE2_RGB_MID:
+            # Phase 2: RGB dominant (e.g., 80% RGB flow, 20% IR flow)
             return self._alternate(
-                phase=Phase.PHASE2_RGB_MID,
-                primary="rgb",
-                secondary="mid_near_rgb",
-                primary_ratio=self.config.phase2_rgb_ratio,
+                phase=self.Phase.PHASE2_RGB_MID,
+                primary="p2_rgb_flow",
+                secondary="p2_ir_flow",
+                primary_ratio=self.config.curriculum.phase2_rgb_ratio
             )
 
-        elif phase == Phase.PHASE3_MID_IR:
-            # IR bridge: cycle mid_near_ir (2x) + mid_intermediate (1x) ↔ ir
-            count = self._counters[Phase.PHASE3_MID_IR]
-            self._counters[Phase.PHASE3_MID_IR] += 1
-            period = self._ratio_to_period(self.config.phase3_mid_ratio)
-            n_mid  = max(1, round(period * self.config.phase3_mid_ratio))
-            position = count % period
-            if position < n_mid:
-                # MID slot: every 3rd MID is intermediate, rest are near_ir
-                mid_count = count // period
-                return "mid_intermediate" if mid_count % 3 == 0 else "mid_near_ir"
-            return "ir"
+        elif phase == self.Phase.PHASE3_MID_IR:
+            # Phase 3: IR dominant (e.g., 80% IR flow, 20% RGB flow)
+            return self._alternate(
+                phase=self.Phase.PHASE3_MID_IR,
+                primary="p3_ir_flow",
+                secondary="p3_rgb_flow",
+                primary_ratio=self.config.curriculum.phase3_mid_ratio # This is IR ratio now
+            )
 
-        else:  # PHASE4_IR_FOCUS
-            count = self._counters[Phase.PHASE4_IR_FOCUS]
-            self._counters[Phase.PHASE4_IR_FOCUS] += 1
-            # Inject occasional mid_near_ir for stability
-            if count % self.config.phase4_mid_every_n == 0:
-                return "mid_near_ir"
-            return "ir"
+        else: # PHASE4_IR_FOCUS
+            return "p4_ir_focus"
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _alternate(
-        self,
-        phase: Phase,
-        primary: DomainStep,
-        secondary: DomainStep,
-        primary_ratio: float,
-    ) -> DomainStep:
-        """
-        Alternate between two domain steps according to primary_ratio.
-
-        primary_ratio=0.5  → primary, secondary, primary, secondary, ...
-        primary_ratio=0.67 → primary, primary, secondary, primary, primary, ...
-        """
-        period = self._ratio_to_period(primary_ratio)
-        n_primary = max(1, round(period * primary_ratio))
+    def _alternate(self, phase, primary: DomainStep, secondary: DomainStep, ratio: float) -> DomainStep:
+        """Helper to alternate between two steps based on a ratio."""
+        period = self._ratio_to_period(ratio)
+        n_primary = max(1, round(period * ratio))
 
         count = self._counters[phase]
         self._counters[phase] += 1
@@ -140,25 +70,9 @@ class CurriculumScheduler:
 
     @staticmethod
     def _ratio_to_period(ratio: float) -> int:
-        """
-        Convert a ratio in (0, 1) to the smallest integer cycle period.
-
-        Examples:
-          0.5  → 2  (1 primary + 1 secondary per cycle)
-          0.33 → 3  (1 primary + 2 secondary per cycle)
-          0.67 → 3  (2 primary + 1 secondary per cycle)
-          0.25 → 4  (1 primary + 3 secondary per cycle)
-        """
-        ratio = max(1e-6, min(1.0 - 1e-6, ratio))
-        # period = round of 1 / min(ratio, 1-ratio)
-        smaller = min(ratio, 1.0 - ratio)
-        return max(2, round(1.0 / smaller))
-
-    def __repr__(self) -> str:
-        cfg = self.config
-        return (
-            f"CurriculumScheduler("
-            f"phase1_end={cfg.phase1_end}, "
-            f"phase2_end={cfg.phase2_end}, "
-            f"phase3_end={cfg.phase3_end})"
-        )
+        """Converts a float ratio to a repeating cycle period (e.g., 0.8 -> 5)."""
+        ratio = max(0.01, min(0.99, ratio))
+        for d in range(2, 11): # Check for cycles up to 10
+            if abs(ratio * d - round(ratio * d)) < 0.02:
+                return d
+        return 10

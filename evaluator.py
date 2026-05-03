@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch.utils.data import DataLoader
 from torchvision.ops import box_iou
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -187,60 +188,37 @@ class DetectionEvaluator:
             self._gts.append(  {k: v.cpu() for k, v in target.items() if isinstance(v, torch.Tensor)})
 
     def compute(self) -> Dict[str, float]:
-        """
-        Compute mAP@IoU for all configured IoU thresholds.
+        results = {}
+        if not self._preds: return {"mAP@0.5": 0.0}
 
-        Returns dict with:
-          "mAP@0.5"          : mean AP over classes at IoU=0.5
-          "mAP@0.5:0.95"     : COCO-style (if multiple IoU thresholds)
-          "AP@0.5/{class}"   : per-class AP at IoU=0.5
-        """
-        results: Dict[str, float] = {}
-
-        # Per-class, per-image prediction/GT split
-        by_cls_pred: Dict[int, List[Dict]] = defaultdict(lambda: [{}] * len(self._preds))
-        by_cls_gt:   Dict[int, List[Dict]] = defaultdict(lambda: [{}] * len(self._gts))
+        by_cls_pred = defaultdict(lambda: [{}] * len(self._preds))
+        by_cls_gt = defaultdict(lambda: [{}] * len(self._gts))
 
         for img_i, (pred, gt) in enumerate(zip(self._preds, self._gts)):
             for c in range(self.num_classes):
                 pm = pred["labels"] == c
-                gm = gt["labels"]   == c
-
+                gm = gt["labels"] == c
                 by_cls_pred[c][img_i] = {
-                    "boxes":  pred["boxes"][pm]  if pm.any() else torch.zeros(0, 4),
+                    "boxes": pred["boxes"][pm] if pm.any() else torch.zeros(0, 4),
                     "scores": pred["scores"][pm] if pm.any() else torch.zeros(0),
                 }
-                by_cls_gt[c][img_i] = {
-                    "boxes": gt["boxes"][gm] if gm.any() else torch.zeros(0, 4),
-                }
+                by_cls_gt[c][img_i] = {"boxes": gt["boxes"][gm] if gm.any() else torch.zeros(0, 4)}
 
-        all_threshold_maps: List[float] = []
-
+        all_threshold_maps = []
         for iou_t in self.iou_thresholds:
-            class_aps: List[float] = []
+            class_aps = []
             for c in range(self.num_classes):
-                ap = _compute_class_ap(
-                    by_cls_pred[c], by_cls_gt[c],
-                    iou_thresh=iou_t,
-                    interp=self.interp,
-                )
-                if not (ap != ap):   # skip NaN (class absent in GT)
+                ap = _compute_class_ap(by_cls_pred[c], by_cls_gt[c], iou_thresh=iou_t, interp=self.interp)
+                if not (ap != ap): # Skip NaN
                     class_aps.append(ap)
-                    if iou_t == 0.5:
-                        results[f"AP@0.5/{self.class_names[c]}"] = round(ap, 4)
-
+                    if iou_t == 0.5: results[f"AP@0.5/{self.class_names[c]}"] = round(ap, 4)
+            
             map_at_t = sum(class_aps) / len(class_aps) if class_aps else 0.0
-
-            if iou_t == 0.5:
-                results["mAP@0.5"] = round(map_at_t, 4)
+            if iou_t == 0.5: results["mAP@0.5"] = round(map_at_t, 4)
             all_threshold_maps.append(map_at_t)
 
         if len(self.iou_thresholds) > 1:
-            results["mAP@0.5:0.95"] = round(
-                sum(all_threshold_maps) / len(all_threshold_maps), 4
-            )
-
-        results["num_images"] = len(self._preds)
+            results["mAP@0.5:0.95"] = round(sum(all_threshold_maps) / len(all_threshold_maps), 4)
         return results
 
 
@@ -249,67 +227,27 @@ class DetectionEvaluator:
 # ---------------------------------------------------------------------------
 
 class PhaseEvaluator:
-    """
-    Evaluates the student model at configurable checkpoints during curriculum training.
-
-    Supports two evaluation triggers:
-      1. Phase transition  : evaluate when curriculum phase changes
-      2. Periodic          : evaluate every `eval_every_n` iterations
-
-    Results are stored in `history` and can be printed/logged at any time.
-
-    Usage:
-        phase_eval = PhaseEvaluator(
-            evaluator=DetectionEvaluator(num_classes=3, ...),
-            ir_val_loader=...,
-            device=device,
-            eval_every_n=500,
-        )
-
-        # Inside training loop:
-        phase_eval.step(
-            model=student,
-            global_step=trainer.global_step,
-            current_phase=current_phase,
-        )
-    """
-
     def __init__(
         self,
-        evaluator:       DetectionEvaluator,
-        ir_val_loader:   DataLoader,
-        device:          torch.device,
-        eval_every_n:    Optional[int] = None,   # None = only at phase transitions
-        eval_on_phases:  Optional[List] = None,  # subset of Phase enum values
-        log_fn: Optional[callable] = None,
-        # Visualization
-        vis_dir:         Optional[str] = None,   # None = no visualization
-        vis_num_samples: int = 8,
-        vis_score_thresh: float = 0.3,
-        class_names:     Optional[List[str]] = None,
-    ) -> None:
-        self.evaluator      = evaluator
-        self.ir_val_loader  = ir_val_loader
-        self.device         = device
-        self.eval_every_n   = eval_every_n
-        self.eval_on_phases = eval_on_phases    # None = all phases
-        self.log_fn         = log_fn or logger.info
+        evaluator: DetectionEvaluator,
+        ir_val_loader: torch.utils.data.DataLoader,
+        device: torch.device,
+        rgb_val_loader: Optional[torch.utils.data.DataLoader] = None,
+        eval_every_n: int = 500,
+        vis_dir: Optional[str] = None,
+    ):
+        self.evaluator = evaluator
+        self.ir_val_loader = ir_val_loader
+        self.rgb_val_loader = rgb_val_loader
+        self.device = device
+        self.eval_every_n = eval_every_n
+        self.vis_dir = vis_dir
 
-        self.vis_dir          = vis_dir
-        self.vis_num_samples  = vis_num_samples
-        self.vis_score_thresh = vis_score_thresh
-        self.class_names      = class_names
-
-        # Best checkpoint tracking
-        self.best_map50: float = -1.0
-        self.on_new_best_fn   = None   # set via .register_best_fn(fn)
-
-        # State
-        self._last_phase     = None
-        self._last_eval_step = -1
-
-        # Results history: List[{"step": int, "phase": str, "trigger": str, ...metrics}]
-        self.history: List[Dict] = []
+        # Best metrics tracking
+        self.best_ir_map = -1.0
+        self.best_rgb_map = -1.0
+        self._last_phase = None
+        self.history = []
 
     def register_best_fn(self, fn) -> None:
         """Register a callback called when a new best mAP@0.5 is achieved.
@@ -325,16 +263,14 @@ class PhaseEvaluator:
     ) -> Optional[Dict]:
         """
         Call once per training iteration. Evaluates if triggered.
-
-        Returns the result dict if evaluation ran, else None.
         """
-        triggered, trigger_reason = self._should_evaluate(global_step, current_phase)
+        should_eval = (global_step > 0 and global_step % self.eval_every_n == 0) or \
+                      (self._last_phase is not None and current_phase != self._last_phase)
+        
         self._last_phase = current_phase
-
-        if not triggered:
-            return None
-
-        return self.evaluate(model, global_step, current_phase, trigger_reason)
+        if should_eval:
+            return self.evaluate(model, global_step, current_phase)
+        return None
 
     def evaluate(
         self,
@@ -343,50 +279,50 @@ class PhaseEvaluator:
         current_phase,
         trigger_reason: str = "manual",
     ) -> Dict:
-        """
-        Run evaluation on the IR val set and log results.
-        """
-        self.log_fn(
-            f"[Eval] step={global_step}  phase={current_phase.name}  "
-            f"trigger={trigger_reason}  running on {len(self.ir_val_loader.dataset)} IR val images ..."
-        )
-
         model.eval()
-        self.evaluator.reset()
+        phase_name = current_phase.name
+        logger.info(f"--- [Evaluation] Step: {global_step} | Phase: {phase_name} ---")
+        
+        results = {"global_step": global_step, "phase": phase_name}
 
-        with torch.no_grad():
-            for batch in self.ir_val_loader:
-                images, targets = batch
-                images  = images.to(self.device)
-                preds   = model(images)
-                targets = [{k: v for k, v in t.items()} for t in targets]
-                self.evaluator.update(preds, targets)
+        # Eval on IR (Target Domain - Always run)
+        ir_results = self._run_eval_on_loader(model, self.ir_val_loader, "IR")
+        results.update(ir_results)
+        
+        # Update Best IR mAP
+        if ir_results["mAP@0.5"] > self.best_ir_map:
+            self.best_ir_map = ir_results["mAP@0.5"]
+            results["is_best_ir"] = True
 
-        results = self.evaluator.compute()
-        results.update({
-            "global_step":    global_step,
-            "phase":          current_phase.name,
-            "trigger":        trigger_reason,
-        })
+        # Eval on RGB (Only run in Phase 1 or Phase 2 to check stability)
+        if self.rgb_val_loader is not None and phase_name in ["PHASE1_RGB_WARMUP", "PHASE2_TRANSITION"]:
+            rgb_results = self._run_eval_on_loader(model, self.rgb_val_loader, "RGB")
+            results.update({f"rgb_{k}": v for k, v in rgb_results.items()})
+            
+            if rgb_results["mAP@0.5"] > self.best_rgb_map:
+                self.best_rgb_map = rgb_results["mAP@0.5"]
+                results["is_best_rgb"] = True
 
         self.history.append(results)
-        self._last_eval_step = global_step
-        self._log_results(results)
-
-        # Best checkpoint
-        map50 = results.get("mAP@0.5", 0.0)
-        if map50 > self.best_map50:
-            self.best_map50 = map50
-            self.log_fn(f"[Eval] New best mAP@0.5={map50:.4f} at step={global_step}")
-            if self.on_new_best_fn is not None:
-                self.on_new_best_fn(results)
-
-        # Optional visualization
-        if self.vis_dir is not None:
-            self._visualize(model, global_step, current_phase, trigger_reason)
-
         model.train()
         return results
+    
+    def _run_eval_on_loader(self, model, loader, domain_name) -> Dict:
+        self.evaluator.reset()
+        start_time = time.time()
+        
+        with torch.no_grad():
+            for images, targets in loader:
+                images = images.to(self.device)
+                targets = [{k: v for k, v in t.items()} for t in targets]
+                
+                preds = model(images)
+                self.evaluator.update(preds, targets)
+        
+        metrics = self.evaluator.compute()
+        elapsed = time.time() - start_time
+        logger.info(f"[{domain_name} Val] mAP@0.5: {metrics['mAP@0.5']:.4f} ({elapsed:.1f}s)")
+        return metrics
 
     def print_history(self) -> None:
         """Print a summary table of all evaluations."""

@@ -16,7 +16,7 @@ import torch.nn as nn
 def ema_update(
     teacher: nn.Module,
     student: nn.Module,
-    alpha: float = 0.999,
+    alpha: float = 0.9996,
     global_step: Optional[int] = None,
 ) -> None:
     """
