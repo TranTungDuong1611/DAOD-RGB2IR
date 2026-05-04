@@ -87,15 +87,6 @@ def make_training_config(device: str) -> TrainingConfig:
             alpha_intermediate=0.50,
             alpha_near_ir=0.25,
         ),
-        mid_routing=MidRoutingConfig(
-            near_rgb_teacher_source="rgb",  near_rgb_ema_target="rgb",
-            near_rgb_rgb_weight=0.5,        near_rgb_ir_weight=0.0,
-            intermediate_teacher_source="both", intermediate_ema_target="ir",
-            intermediate_ema_alpha=0.9998,
-            intermediate_rgb_weight=0.25,    intermediate_ir_weight=0.25,
-            near_ir_teacher_source="ir",    near_ir_ema_target="ir",
-            near_ir_rgb_weight=0.0,         near_ir_ir_weight=0.5,
-        ),
         aug=AugConfig(
             hflip_prob=0.5,
             blur_prob=0.5,
@@ -106,27 +97,21 @@ def make_training_config(device: str) -> TrainingConfig:
             contrast_mag=0.2,
         ),
         curriculum=CurriculumConfig(
-            phase1_end=4_000,       # RGB warmup
-            phase2_end=6_000,       # RGB + MID
-            phase3_end=8_000,      # MID + IR
-            phase2_rgb_ratio=0.67,  # RGB:MID = 2:1 → MID ít hơn, ổn định hơn
-            phase3_mid_ratio=0.4,
-            phase4_mid_every_n=5,
+            phase1_end=4_000,    # RGB warmup
+            phase2_end=8_000,    # RGB + mid_near_rgb
+            phase3_end=13_000,   # full mid_intermediate
+            phase4_end=18_000,   # mid_near_ir + IR
+            # Phase 5: full IR until total_iters
+            phase2_rgb_ratio=0.67,
+            phase4_mid_ratio=0.67,
         ),
         loss=LossConfig(
             rgb_gt_weight=1.0,
             rgb_pseudo_weight=0.0,
-            mid_rgb_weight=0.1,
+            mid_rgb_weight=0.5,
             mid_ir_weight=0.5,
-            mid_gt_weight=1.0,          # anchor MID step to GT → prevents forgetting
-            ir_rgb_teacher_weight=0.4,
-            ir_ir_teacher_weight=0.6,
-        ),
-        teacher_update=TeacherUpdateConfig(
-            rgb_update_rgb_teacher=True,
-            mid_update_rgb_teacher=False,
-            mid_update_ir_teacher=True,   # MID step EMA update ir_teacher
-            ir_update_ir_teacher=True,
+            mid_gt_weight=1.0,
+            ir_ir_teacher_weight=1.0,
         ),
         pseudo_label_conf_thresh=0.7,
         device=device,
@@ -137,10 +122,10 @@ def make_training_config(device: str) -> TrainingConfig:
 def make_adaptive_threshold() -> AdaptiveThresholdScheduler:
     return AdaptiveThresholdScheduler(AdaptiveThresholdConfig(
         rgb_teacher=TeacherThresholds(
-            phase1=0.45, phase2=0.45, phase3=0.4, phase4=0.4,
+            phase1=0.85, phase2=0.70, phase3=0.55, phase4=0.45, phase5=0.40,
         ),
         ir_teacher=TeacherThresholds(
-            phase1=0.5, phase2=0.5, phase3=0.45, phase4=0.45,
+            phase1=0.95, phase2=0.80, phase3=0.65, phase4=0.55, phase5=0.45,
         ),
     ))
 
@@ -344,7 +329,7 @@ def main(args):
     # --- Final eval + summary ---
     logger.info("\nFinal evaluation ...")
     phase_eval.evaluate(student, global_step=trainer.global_step,
-                        current_phase=Phase.PHASE4_IR_FOCUS,
+                        current_phase=Phase.PHASE5_IR_FOCUS,
                         trigger_reason="final")
     phase_eval.print_history()
 

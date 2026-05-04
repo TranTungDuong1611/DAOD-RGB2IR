@@ -17,7 +17,7 @@ Each teacher can have an independent threshold since:
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Optional
 
 from scheduler import Phase
 
@@ -29,17 +29,19 @@ from scheduler import Phase
 @dataclass
 class TeacherThresholds:
     """Confidence thresholds per phase for a single teacher model."""
-    phase1: float = 0.90   # RGB warmup — teacher predictions least reliable
-    phase2: float = 0.75   # RGB+MID transition
-    phase3: float = 0.60   # MID+IR — teacher significantly improved
-    phase4: float = 0.50   # IR focus — teacher reliable, mine more boxes
+    phase1: float = 0.90   # RGB warmup
+    phase2: float = 0.75   # RGB + mid_near_rgb
+    phase3: float = 0.60   # full intermediate
+    phase4: float = 0.50   # mid_near_ir + IR
+    phase5: float = 0.45   # full IR — teacher most reliable
 
     def get(self, phase: Phase) -> float:
         mapping = {
-            Phase.PHASE1_RGB_WARMUP: self.phase1,
-            Phase.PHASE2_RGB_MID:    self.phase2,
-            Phase.PHASE3_MID_IR:     self.phase3,
-            Phase.PHASE4_IR_FOCUS:   self.phase4,
+            Phase.PHASE1_RGB_WARMUP:   self.phase1,
+            Phase.PHASE2_RGB_NEAR_RGB: self.phase2,
+            Phase.PHASE3_INTERMEDIATE: self.phase3,
+            Phase.PHASE4_NEAR_IR_MIX:  self.phase4,
+            Phase.PHASE5_IR_FOCUS:     self.phase5,
         }
         return mapping.get(phase, 0.7)
 
@@ -49,14 +51,14 @@ class AdaptiveThresholdConfig:
     """
     Configuration for adaptive confidence thresholds.
 
-    rgb_teacher and ir_teacher can have different schedules because
-    rgb_teacher trains earlier and thus becomes reliable earlier.
+    rgb_teacher trains earlier → becomes reliable earlier.
+    ir_teacher is frozen until Phase 4 → needs higher threshold initially.
     """
     rgb_teacher: TeacherThresholds = field(default_factory=lambda: TeacherThresholds(
-        phase1=0.85, phase2=0.70, phase3=0.55, phase4=0.45,
+        phase1=0.85, phase2=0.70, phase3=0.55, phase4=0.45, phase5=0.40,
     ))
     ir_teacher: TeacherThresholds = field(default_factory=lambda: TeacherThresholds(
-        phase1=0.95, phase2=0.80, phase3=0.65, phase4=0.50,
+        phase1=0.95, phase2=0.80, phase3=0.65, phase4=0.55, phase5=0.45,
     ))
 
 

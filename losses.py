@@ -199,17 +199,15 @@ def compute_mid_loss(
 def compute_ir_loss(
     student: nn.Module,
     ir_images: torch.Tensor,
-    rgb_teacher: nn.Module,
     ir_teacher: nn.Module,
     config: Optional[LossConfig] = None,
     conf_thresh: float = 0.7,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
-    IR (target domain) unsupervised step:
-      - student learns from rgb_teacher pseudo-labels on IR images
-      - student learns from ir_teacher  pseudo-labels on IR images
+    IR (target domain) unsupervised step — ir_teacher pseudo-labels only.
 
-    Both teacher forward passes run under no_grad.
+    No GT available. Student learns exclusively from ir_teacher predictions.
+    Teacher forward pass runs under no_grad.
 
     Returns:
         total_loss : scalar tensor with grad
@@ -218,35 +216,15 @@ def compute_ir_loss(
     if config is None:
         config = LossConfig()
 
-    components: List[torch.Tensor] = []
     log: Dict[str, float] = {}
 
-    # --- rgb_teacher pseudo-labels on IR ---
-    if config.ir_rgb_teacher_weight > 0.0:
-        with torch.no_grad():
-            rgb_preds = rgb_teacher(ir_images)
-        rgb_pseudo = filter_pseudo_labels(rgb_preds, conf_thresh)
+    with torch.no_grad():
+        ir_preds = ir_teacher(ir_images)
+    ir_pseudo = filter_pseudo_labels(ir_preds, conf_thresh)
 
-        loss_dict = student(ir_images, rgb_pseudo)
-        loss = _sum_loss_dict(loss_dict) * config.ir_rgb_teacher_weight
-        components.append(loss)
-        log["ir_rgb_teacher_loss"] = loss.item()
+    loss_dict  = student(ir_images, ir_pseudo)
+    total_loss = _sum_loss_dict(loss_dict) * config.ir_ir_teacher_weight
 
-    # --- ir_teacher pseudo-labels on IR ---
-    if config.ir_ir_teacher_weight > 0.0:
-        with torch.no_grad():
-            ir_preds = ir_teacher(ir_images)
-        ir_pseudo = filter_pseudo_labels(ir_preds, conf_thresh)
-
-        loss_dict = student(ir_images, ir_pseudo)
-        loss = _sum_loss_dict(loss_dict) * config.ir_ir_teacher_weight
-        components.append(loss)
-        log["ir_ir_teacher_loss"] = loss.item()
-
-    if not components:
-        total_loss = ir_images.sum() * 0.0
-    else:
-        total_loss = sum(components)
-
-    log["ir_total_loss"] = total_loss.item()
+    log["ir_ir_teacher_loss"] = total_loss.item()
+    log["ir_total_loss"]      = total_loss.item()
     return total_loss, log

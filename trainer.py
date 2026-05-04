@@ -87,7 +87,11 @@ class CurriculumDomainAdaptationTrainer:
         # Optional extensions
         self.threshold_scheduler = threshold_scheduler
         self.phase_evaluator     = phase_evaluator
-        self.phase1_best_path    = phase1_best_path
+        # phase_best_paths: maps phase name → path of best checkpoint for that phase
+        # Used to initialise teachers at phase transitions.
+        self.phase_best_paths: Dict[str, str] = {}
+        if phase1_best_path:
+            self.phase_best_paths["PHASE1_RGB_WARMUP"] = phase1_best_path
 
         self._setup_models()
 
@@ -140,34 +144,36 @@ class CurriculumDomainAdaptationTrainer:
         if from_phase is None:
             return  # initial call, no transition
 
-        if from_phase == Phase.PHASE1_RGB_WARMUP and to_phase == Phase.PHASE2_RGB_MID:
-            # Prefer best Phase 1 checkpoint over current student (which may not be the best)
-            if self.phase1_best_path and os.path.exists(self.phase1_best_path):
-                logger.info(
-                    f"[Phase transition] PHASE1→PHASE2: "
-                    f"loading best Phase 1 student from {self.phase1_best_path} → teachers"
-                )
-                ckpt = torch.load(
-                    self.phase1_best_path, map_location=self.device, weights_only=False
-                )
-                self.rgb_teacher.load_state_dict(ckpt["student"])
-                self.ir_teacher.load_state_dict(ckpt["student"])
-            else:
-                logger.info(
-                    f"[Phase transition] PHASE1→PHASE2: "
-                    f"copying current student → rgb_teacher AND ir_teacher"
-                    + (f" (best checkpoint not found at {self.phase1_best_path})"
-                       if self.phase1_best_path else "")
-                )
-                copy_student_to_teacher(self.rgb_teacher, self.student)
-                copy_student_to_teacher(self.ir_teacher,  self.student)
-
-        elif from_phase == Phase.PHASE2_RGB_MID and to_phase == Phase.PHASE3_MID_IR:
-            logger.info(
-                f"[Phase transition] PHASE2→PHASE3: "
-                f"copying student → ir_teacher for IR domain warm start"
+        if from_phase == Phase.PHASE1_RGB_WARMUP and to_phase == Phase.PHASE2_RGB_NEAR_RGB:
+            # Init both teachers from best Phase 1 checkpoint (or current student)
+            self._init_teachers_from_checkpoint(
+                "PHASE1_RGB_WARMUP", teachers=["rgb", "ir"],
+                fallback_msg="PHASE1→PHASE2: no best checkpoint, using current student",
             )
-            copy_student_to_teacher(self.ir_teacher, self.student)
+
+    def _init_teachers_from_checkpoint(
+        self,
+        phase_key: str,
+        teachers: list,
+        fallback_msg: str,
+    ) -> None:
+        """Load student weights from the best checkpoint of a phase into teachers."""
+        from ema import copy_student_to_teacher
+        best_path = self.phase_best_paths.get(phase_key)
+        if best_path and os.path.exists(best_path):
+            logger.info(f"[Phase transition] loading {best_path} → {teachers} teacher(s)")
+            ckpt = torch.load(best_path, map_location=self.device, weights_only=False)
+            state = ckpt["student"]
+            if "rgb" in teachers:
+                self.rgb_teacher.load_state_dict(state)
+            if "ir" in teachers:
+                self.ir_teacher.load_state_dict(state)
+        else:
+            logger.info(f"[Phase transition] {fallback_msg}")
+            if "rgb" in teachers:
+                copy_student_to_teacher(self.rgb_teacher, self.student)
+            if "ir" in teachers:
+                copy_student_to_teacher(self.ir_teacher,  self.student)
 
     # ------------------------------------------------------------------
     # Adaptive threshold
@@ -373,47 +379,41 @@ class CurriculumDomainAdaptationTrainer:
 
     def train_mid_step(
         self,
-        phase: Phase = Phase.PHASE2_RGB_MID,
+        phase: Phase = Phase.PHASE2_RGB_NEAR_RGB,
         mid_level: DomainStep = "mid_near_rgb",
     ) -> Dict:
         """
-        MID step — SoftSAGA images, teacher routing per mid_level.
+        MID step — SoftSAGA images, phase-based teacher routing.
 
-        mid_near_rgb   : rgb_teacher infers + EMA(rgb_teacher)
-        mid_intermediate: both teachers infer + EMA(ir_teacher, lighter alpha)
-        mid_near_ir    : ir_teacher infers  + EMA(ir_teacher)
+        Phase 2 / Phase 3 (mid_near_rgb / mid_intermediate):
+          Both teachers infer → rgb_pseudo + ir_pseudo + gt_loss
+          EMA: rgb_teacher only
+
+        Phase 4 (mid_near_ir):
+          ir_teacher infers → ir_pseudo + gt_loss
+          EMA: ir_teacher only
         """
         self.student.train()
         batch = self._next_mid(mid_level)
 
         self.optimizer.zero_grad()
 
-        # Routing config for this MID level
-        rt = self.config.mid_routing
-        level_cfg = {
-            "mid_near_rgb": (
-                rt.near_rgb_teacher_source,
-                rt.near_rgb_ema_target,
-                self.config.ema.alpha,
-                rt.near_rgb_rgb_weight,
-                rt.near_rgb_ir_weight,
-            ),
-            "mid_intermediate": (
-                rt.intermediate_teacher_source,
-                rt.intermediate_ema_target,
-                rt.intermediate_ema_alpha,
-                rt.intermediate_rgb_weight,
-                rt.intermediate_ir_weight,
-            ),
-            "mid_near_ir": (
-                rt.near_ir_teacher_source,
-                rt.near_ir_ema_target,
-                self.config.ema.alpha,
-                rt.near_ir_rgb_weight,
-                rt.near_ir_ir_weight,
-            ),
-        }
-        teacher_source, ema_target, ema_alpha, rgb_w, ir_w = level_cfg[mid_level]
+        # Phase-based routing
+        if phase == Phase.PHASE2_RGB_NEAR_RGB:
+            teacher_source = "both"
+            ema_target     = "rgb"
+            rgb_w = self.config.loss.mid_rgb_weight
+            ir_w  = self.config.loss.mid_ir_weight
+        elif phase == Phase.PHASE3_INTERMEDIATE:
+            teacher_source = "both"
+            ema_target     = "ir"
+            rgb_w = self.config.loss.mid_rgb_weight
+            ir_w  = self.config.loss.mid_ir_weight
+        else:  # Phase.PHASE4_NEAR_IR_MIX
+            teacher_source = "ir"
+            ema_target     = "ir"
+            rgb_w = 0.0
+            ir_w  = self.config.loss.mid_ir_weight
 
         gt_for_mid = (
             batch.targets
@@ -428,8 +428,8 @@ class CurriculumDomainAdaptationTrainer:
 
         loss, log = compute_mid_loss(
             student=self.student,
-            mid_images=strong_images,       # student sees strong aug
-            teacher_images=weak_images,     # teacher sees weak (original MID)
+            mid_images=strong_images,
+            teacher_images=weak_images,
             rgb_teacher=self.rgb_teacher,
             ir_teacher=self.ir_teacher,
             gt_targets=gt_for_mid,
@@ -445,25 +445,23 @@ class CurriculumDomainAdaptationTrainer:
         log["grad_norm"] = grad_norm
         log["mid_level"] = mid_level
 
-        # EMA update — only the routed teacher, NEVER both
-        if ema_target != "none":
-            ema_kwargs = dict(
-                alpha=ema_alpha,
-                global_step=self.global_step if self.config.ema.use_warmup else None,
-            )
-            if ema_target == "rgb":
-                ema_update(teacher=self.rgb_teacher, student=self.student, **ema_kwargs)
-            elif ema_target == "ir":
-                ema_update(teacher=self.ir_teacher,  student=self.student, **ema_kwargs)
+        ema_kwargs = dict(
+            alpha=self.config.ema.alpha,
+            global_step=self.global_step if self.config.ema.use_warmup else None,
+        )
+        if ema_target == "rgb":
+            ema_update(teacher=self.rgb_teacher, student=self.student, **ema_kwargs)
+        elif ema_target == "ir":
+            ema_update(teacher=self.ir_teacher,  student=self.student, **ema_kwargs)
 
         log["domain"] = mid_level
         return log
 
-    def train_ir_step(self, phase: Phase = Phase.PHASE3_MID_IR) -> Dict:
+    def train_ir_step(self, phase: Phase = Phase.PHASE4_NEAR_IR_MIX) -> Dict:
         """
-        IR step — unsupervised learning on unlabeled target data.
+        IR step — unsupervised on unlabeled IR data, ir_teacher pseudo-labels only.
 
-        Loss:   L_rgb_teacher(IR)  +  L_ir_teacher(IR)
+        Loss:   L_ir_teacher(IR)
         Update: EMA(ir_teacher ← student)
         """
         self.student.train()
@@ -474,7 +472,6 @@ class CurriculumDomainAdaptationTrainer:
         loss, log = compute_ir_loss(
             student=self.student,
             ir_images=batch.images,
-            rgb_teacher=self.rgb_teacher,
             ir_teacher=self.ir_teacher,
             config=self.config.loss,
             conf_thresh=self._get_threshold(phase, teacher="ir"),
@@ -484,13 +481,12 @@ class CurriculumDomainAdaptationTrainer:
         grad_norm = self._clip_and_step()
         log["grad_norm"] = grad_norm
 
-        if self.config.teacher_update.ir_update_ir_teacher:
-            ema_update(
-                teacher=self.ir_teacher,
-                student=self.student,
-                alpha=self.config.ema.alpha,
-                global_step=self.global_step if self.config.ema.use_warmup else None,
-            )
+        ema_update(
+            teacher=self.ir_teacher,
+            student=self.student,
+            alpha=self.config.ema.alpha,
+            global_step=self.global_step if self.config.ema.use_warmup else None,
+        )
 
         log["domain"] = "ir"
         return log
@@ -525,7 +521,7 @@ class CurriculumDomainAdaptationTrainer:
         elif step == "ir":
             log = self.train_ir_step(phase=phase)
         else:
-            raise ValueError(f"Unknown domain step: {step!r}")
+            raise ValueError(f"Unknown domain step: {step!r}")  # pragma: no cover
 
         log["phase"]       = phase.name
         log["global_step"] = self.global_step

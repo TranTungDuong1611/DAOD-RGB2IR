@@ -1,18 +1,19 @@
 """
 CurriculumScheduler — decides which domain step to execute at each iteration.
 
-Curriculum (NOT zigzag):
-  Phase 1  [0,          phase1_end)  → RGB only        (supervised warmup)
-  Phase 2  [phase1_end, phase2_end)  → RGB + MID       (bridge begins)
-  Phase 3  [phase2_end, phase3_end)  → MID + IR        (bridge ends)
-  Phase 4  [phase3_end, ∞)           → IR focus         (final adaptation)
+Curriculum:
+  Phase 1  [0,           phase1_end)  → RGB only             (supervised warmup)
+  Phase 2  [phase1_end,  phase2_end)  → RGB + mid_near_rgb   (bridge starts)
+  Phase 3  [phase2_end,  phase3_end)  → mid_intermediate      (full bridge)
+  Phase 4  [phase3_end,  phase4_end)  → mid_near_ir + IR     (IR adaptation)
+  Phase 5  [phase4_end,  ∞)           → IR only              (IR focus)
 
 Within-phase alternation is ratio-based:
-  e.g. phase2_rgb_ratio=0.5 → RGBMIDRGBMID...
-       phase2_rgb_ratio=0.67 → RGBRGBMIDRGBRGBMID...
+  phase2_rgb_ratio=0.67  → RGB RGB mid_near_rgb  RGB RGB mid_near_rgb  ...
+  phase4_mid_ratio=0.67  → mid_near_ir mid_near_ir ir  mid_near_ir ...
 """
 
-from enum import Enum, auto
+from enum import Enum
 from typing import Literal
 
 from config import CurriculumConfig
@@ -23,10 +24,11 @@ from config import CurriculumConfig
 # ---------------------------------------------------------------------------
 
 class Phase(Enum):
-    PHASE1_RGB_WARMUP = 1
-    PHASE2_RGB_MID    = 2
-    PHASE3_MID_IR     = 3
-    PHASE4_IR_FOCUS   = 4
+    PHASE1_RGB_WARMUP   = 1
+    PHASE2_RGB_NEAR_RGB = 2
+    PHASE3_INTERMEDIATE = 3
+    PHASE4_NEAR_IR_MIX  = 4
+    PHASE5_IR_FOCUS     = 5
 
 
 DomainStep = Literal["rgb", "mid_near_rgb", "mid_intermediate", "mid_near_ir", "ir"]
@@ -48,11 +50,9 @@ class CurriculumScheduler:
 
     def __init__(self, config: CurriculumConfig) -> None:
         self.config = config
-        # Internal alternation counters — one per phase that needs them
         self._counters = {
-            Phase.PHASE2_RGB_MID: 0,
-            Phase.PHASE3_MID_IR:  0,
-            Phase.PHASE4_IR_FOCUS: 0,
+            Phase.PHASE2_RGB_NEAR_RGB: 0,
+            Phase.PHASE4_NEAR_IR_MIX:  0,
         }
 
     # ------------------------------------------------------------------
@@ -65,16 +65,17 @@ class CurriculumScheduler:
         if global_step < cfg.phase1_end:
             return Phase.PHASE1_RGB_WARMUP
         elif global_step < cfg.phase2_end:
-            return Phase.PHASE2_RGB_MID
+            return Phase.PHASE2_RGB_NEAR_RGB
         elif global_step < cfg.phase3_end:
-            return Phase.PHASE3_MID_IR
+            return Phase.PHASE3_INTERMEDIATE
+        elif global_step < cfg.phase4_end:
+            return Phase.PHASE4_NEAR_IR_MIX
         else:
-            return Phase.PHASE4_IR_FOCUS
+            return Phase.PHASE5_IR_FOCUS
 
     def get_next_step(self, global_step: int) -> DomainStep:
         """
         Determine (and advance) the next domain step to execute.
-
         Must be called exactly once per iteration in order.
         """
         phase = self.get_phase(global_step)
@@ -82,34 +83,26 @@ class CurriculumScheduler:
         if phase == Phase.PHASE1_RGB_WARMUP:
             return "rgb"
 
-        elif phase == Phase.PHASE2_RGB_MID:
-            # RGB warmup bridge: RGB ↔ mid_near_rgb
+        elif phase == Phase.PHASE2_RGB_NEAR_RGB:
             return self._alternate(
-                phase=Phase.PHASE2_RGB_MID,
+                phase=Phase.PHASE2_RGB_NEAR_RGB,
                 primary="rgb",
                 secondary="mid_near_rgb",
                 primary_ratio=self.config.phase2_rgb_ratio,
             )
 
-        elif phase == Phase.PHASE3_MID_IR:
-            # IR bridge: cycle mid_near_ir (2x) + mid_intermediate (1x) ↔ ir
-            count = self._counters[Phase.PHASE3_MID_IR]
-            self._counters[Phase.PHASE3_MID_IR] += 1
-            period = self._ratio_to_period(self.config.phase3_mid_ratio)
-            n_mid  = max(1, round(period * self.config.phase3_mid_ratio))
-            position = count % period
-            if position < n_mid:
-                # MID slot: every 3rd MID is intermediate, rest are near_ir
-                mid_count = count // period
-                return "mid_intermediate" if mid_count % 3 == 0 else "mid_near_ir"
-            return "ir"
+        elif phase == Phase.PHASE3_INTERMEDIATE:
+            return "mid_intermediate"
 
-        else:  # PHASE4_IR_FOCUS
-            count = self._counters[Phase.PHASE4_IR_FOCUS]
-            self._counters[Phase.PHASE4_IR_FOCUS] += 1
-            # Inject occasional mid_near_ir for stability
-            if count % self.config.phase4_mid_every_n == 0:
-                return "mid_near_ir"
+        elif phase == Phase.PHASE4_NEAR_IR_MIX:
+            return self._alternate(
+                phase=Phase.PHASE4_NEAR_IR_MIX,
+                primary="mid_near_ir",
+                secondary="ir",
+                primary_ratio=self.config.phase4_mid_ratio,
+            )
+
+        else:  # PHASE5_IR_FOCUS
             return "ir"
 
     # ------------------------------------------------------------------

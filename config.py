@@ -77,23 +77,22 @@ class CurriculumConfig:
     """
     Phase boundaries (in global iterations) and within-phase ratios.
 
-    Phase 1: [0,           phase1_end)   → RGB only   (warmup)
-    Phase 2: [phase1_end,  phase2_end)   → RGB + MID  (alternating)
-    Phase 3: [phase2_end,  phase3_end)   → MID + IR   (alternating)
-    Phase 4: [phase3_end,  ∞)            → IR focus   (with occasional MID)
+    Phase 1: [0,           phase1_end)   → RGB only            (supervised warmup)
+    Phase 2: [phase1_end,  phase2_end)   → RGB + mid_near_rgb  (bridge starts)
+    Phase 3: [phase2_end,  phase3_end)   → mid_intermediate     (full bridge)
+    Phase 4: [phase3_end,  phase4_end)   → mid_near_ir + IR    (IR adaptation)
+    Phase 5: [phase4_end,  ∞)            → IR only             (IR focus)
     """
-    phase1_end: int = 2_000       # end of RGB warmup
-    phase2_end: int = 5_000       # end of RGB+MID phase
-    phase3_end: int = 8_000       # end of MID+IR phase
+    phase1_end: int = 3_000
+    phase2_end: int = 7_000
+    phase3_end: int = 12_000
+    phase4_end: int = 17_000
 
-    # Ratio of RGB steps in Phase 2  (rest = MID)
-    phase2_rgb_ratio: float = 0.5
+    # Ratio of RGB steps in Phase 2  (rest = mid_near_rgb)
+    phase2_rgb_ratio: float = 0.67
 
-    # Ratio of MID steps in Phase 3  (rest = IR)
-    phase3_mid_ratio: float = 0.5
-
-    # In Phase 4: every N IR steps, insert 1 MID step for stability
-    phase4_mid_every_n: int = 5
+    # Ratio of mid_near_ir steps in Phase 4  (rest = IR)
+    phase4_mid_ratio: float = 0.67
 
 
 @dataclass
@@ -103,14 +102,13 @@ class LossConfig:
     rgb_gt_weight: float = 1.0
     rgb_pseudo_weight: float = 0.0    # set > 0 to enable pseudo loss in RGB step
 
-    # MID step
-    mid_rgb_weight: float = 0.5       # weight for rgb_teacher pseudo-labels on MID
-    mid_ir_weight: float = 0.5        # weight for ir_teacher  pseudo-labels on MID
-    mid_gt_weight: float = 0.0        # weight for GT loss on MID (optional)
+    # MID step (Phase 2/3: both teachers; Phase 4: ir_teacher only)
+    mid_rgb_weight: float = 0.5       # weight for rgb_teacher pseudo-labels (Phase 2/3)
+    mid_ir_weight: float = 0.5        # weight for ir_teacher  pseudo-labels
+    mid_gt_weight: float = 1.0        # weight for GT loss on MID
 
-    # IR step
-    ir_rgb_teacher_weight: float = 0.5
-    ir_ir_teacher_weight: float = 0.5
+    # IR step (Phase 4/5: ir_teacher only, no GT)
+    ir_ir_teacher_weight: float = 1.0
 
 
 @dataclass
