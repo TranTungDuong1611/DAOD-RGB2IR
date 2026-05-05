@@ -230,8 +230,8 @@ def main(args):
         vis_dir=os.path.join(args.output_dir, "vis"),
         vis_every_n=args.vis_every,
         vis_num_samples=8,
-        vis_score_thresh=0.3,
         class_names=FLIR_CLASSES,
+        thresh_scheduler=thresh,
     )
 
     # --- Trainer ---

@@ -19,6 +19,8 @@ import torch
 from torch.utils.data import DataLoader
 from torchvision.ops import box_iou
 
+from adaptive_threshold import AdaptiveThresholdScheduler
+
 logger = logging.getLogger(__name__)
 
 
@@ -290,6 +292,7 @@ class PhaseEvaluator:
         vis_num_samples: int = 8,
         vis_score_thresh: float = 0.3,
         class_names:     Optional[List[str]] = None,
+        thresh_scheduler: Optional[AdaptiveThresholdScheduler] = None,
     ) -> None:
         self.evaluator      = evaluator
         self.ir_val_loader  = ir_val_loader
@@ -307,11 +310,12 @@ class PhaseEvaluator:
             interp=evaluator.interp,
         ) if rgb_val_loader is not None else None
 
-        self.vis_dir          = vis_dir
-        self.vis_every_n      = vis_every_n
-        self.vis_num_samples  = vis_num_samples
-        self.vis_score_thresh = vis_score_thresh
-        self.class_names      = class_names
+        self.vis_dir           = vis_dir
+        self.vis_every_n       = vis_every_n
+        self.vis_num_samples   = vis_num_samples
+        self.vis_score_thresh  = vis_score_thresh
+        self.class_names       = class_names
+        self.thresh_scheduler  = thresh_scheduler
 
         # Best checkpoint tracking — global and per-phase
         self.best_map50: float = -1.0
@@ -556,13 +560,18 @@ class PhaseEvaluator:
             f"step={global_step}  phase={current_phase.name}  "
             f"trigger={trigger_reason}  mAP@0.5={map50:.4f}"
         )
+        if self.thresh_scheduler is not None:
+            score_thresh = self.thresh_scheduler.ir_teacher(current_phase)
+        else:
+            score_thresh = self.vis_score_thresh
+
         visualize_eval_samples(
             model=model,
             val_loader=self.ir_val_loader,
             device=self.device,
             save_path=save_path,
             num_samples=self.vis_num_samples,
-            score_thresh=self.vis_score_thresh,
+            score_thresh=score_thresh,
             class_names=self.class_names,
             title=title,
         )
