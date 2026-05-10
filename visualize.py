@@ -10,7 +10,9 @@ Dependencies: matplotlib (standard in ML environments)
 import logging
 import math
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
+
+ThreshType = Union[float, Dict[int, float]]
 
 import torch
 import matplotlib.pyplot as plt
@@ -21,6 +23,12 @@ logger = logging.getLogger(__name__)
 # Class colors for per-class box coloring (predictions)
 _PRED_COLORS = ["#FF4444", "#FF8800", "#CC00FF", "#0088FF", "#00CC88"]
 _GT_COLOR    = "#00FF44"   # bright green for GT
+
+
+def _fmt_thresh(t) -> str:
+    if isinstance(t, dict):
+        return "{" + ", ".join(f"{k}:{v:.2f}" for k, v in sorted(t.items())) + "}"
+    return f"{t:.2f}"
 
 
 # ---------------------------------------------------------------------------
@@ -36,10 +44,14 @@ def draw_boxes_on_ax(
     pred_labels: Optional[torch.Tensor],   # [N]          (can be None)
     pred_scores: Optional[torch.Tensor],   # [N]          (can be None)
     class_names: Optional[List[str]] = None,
-    score_thresh: float = 0.3,
+    score_thresh: ThreshType = 0.3,
     title: str = "",
 ) -> None:
     """Draw one image with GT and prediction boxes onto a matplotlib Axes."""
+    def _thresh_for(cls: int) -> float:
+        if isinstance(score_thresh, dict):
+            return score_thresh.get(cls, 0.7)
+        return score_thresh
     img_np = image.permute(1, 2, 0).cpu().clamp(0, 1).numpy()
     ax.imshow(img_np, cmap="gray" if img_np.mean(axis=2).std() < 0.02 else None)
     ax.axis("off")
@@ -67,10 +79,10 @@ def draw_boxes_on_ax(
     if pred_boxes is not None and len(pred_boxes) > 0:
         for i, box in enumerate(pred_boxes):
             score = pred_scores[i].item() if pred_scores is not None else 1.0
-            if score < score_thresh:
+            c = pred_labels[i].item() if pred_labels is not None else 0
+            if score < _thresh_for(c):
                 continue
             x1, y1, x2, y2 = box.tolist()
-            c = pred_labels[i].item() if pred_labels is not None else 0
             color = _PRED_COLORS[c % len(_PRED_COLORS)]
             rect = patches.Rectangle(
                 (x1, y1), x2 - x1, y2 - y1,
@@ -97,7 +109,7 @@ def visualize_eval_samples(
     save_path: str,
     num_samples: int = 8,
     cols: int = 4,
-    score_thresh: float = 0.3,
+    score_thresh: ThreshType = 0.3,
     class_names: Optional[List[str]] = None,
     title: str = "",
 ) -> None:
@@ -172,7 +184,7 @@ def visualize_eval_samples(
     legend_handles = [
         patches.Patch(edgecolor=_GT_COLOR,         facecolor="none", label="GT"),
         patches.Patch(edgecolor=_PRED_COLORS[0],   facecolor="none", linestyle="--",
-                      label=f"pred (thresh={score_thresh})"),
+                      label=f"pred (thresh={_fmt_thresh(score_thresh)})"),
     ]
     fig.legend(handles=legend_handles, loc="lower center", ncol=2,
                fontsize=8, frameon=True, bbox_to_anchor=(0.5, 0.0))
@@ -195,7 +207,7 @@ def visualize_compare_models(
     device: "torch.device",
     save_path: str,
     num_samples: int = 8,
-    score_thresh: float = 0.3,
+    score_thresh: ThreshType = 0.3,
     class_names: Optional[List[str]] = None,
     title: str = "",
 ) -> None:
@@ -296,7 +308,7 @@ def visualize_compare_models(
     legend_handles = [
         patches.Patch(edgecolor=_GT_COLOR,       facecolor="none", label="GT"),
         patches.Patch(edgecolor=_PRED_COLORS[0], facecolor="none", linestyle="--",
-                      label=f"pred (thresh={score_thresh})"),
+                      label=f"pred (thresh={_fmt_thresh(score_thresh)})"),
     ]
     fig.legend(handles=legend_handles, loc="lower center", ncol=2,
                fontsize=8, frameon=True, bbox_to_anchor=(0.5, 0.0))

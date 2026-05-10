@@ -293,6 +293,9 @@ class PhaseEvaluator:
         vis_score_thresh: float = 0.3,
         class_names:     Optional[List[str]] = None,
         thresh_scheduler: Optional[AdaptiveThresholdScheduler] = None,
+        # Teacher models for comparison visualization (optional)
+        rgb_teacher: Optional["torch.nn.Module"] = None,
+        ir_teacher:  Optional["torch.nn.Module"] = None,
     ) -> None:
         self.evaluator      = evaluator
         self.ir_val_loader  = ir_val_loader
@@ -316,6 +319,8 @@ class PhaseEvaluator:
         self.vis_score_thresh  = vis_score_thresh
         self.class_names       = class_names
         self.thresh_scheduler  = thresh_scheduler
+        self.rgb_teacher       = rgb_teacher
+        self.ir_teacher        = ir_teacher
 
         # Best checkpoint tracking — global and per-phase
         self.best_map50: float = -1.0
@@ -548,7 +553,7 @@ class PhaseEvaluator:
 
     def _visualize(self, model, global_step: int, current_phase, trigger_reason: str) -> None:
         try:
-            from visualize import visualize_eval_samples
+            from visualize import visualize_compare_models, visualize_eval_samples
         except ImportError:
             self.log_fn("[Visualize] matplotlib not available, skipping visualization")
             return
@@ -565,13 +570,31 @@ class PhaseEvaluator:
         else:
             score_thresh = self.vis_score_thresh
 
-        visualize_eval_samples(
-            model=model,
-            val_loader=self.ir_val_loader,
-            device=self.device,
-            save_path=save_path,
-            num_samples=self.vis_num_samples,
-            score_thresh=score_thresh,
-            class_names=self.class_names,
-            title=title,
-        )
+        if self.rgb_teacher is not None or self.ir_teacher is not None:
+            # Comparison grid: student + available teachers
+            models = {"student": model}
+            if self.rgb_teacher is not None:
+                models["rgb_teacher"] = self.rgb_teacher
+            if self.ir_teacher is not None:
+                models["ir_teacher"] = self.ir_teacher
+            visualize_compare_models(
+                models=models,
+                val_loader=self.ir_val_loader,
+                device=self.device,
+                save_path=save_path,
+                num_samples=self.vis_num_samples,
+                score_thresh=score_thresh,
+                class_names=self.class_names,
+                title=title,
+            )
+        else:
+            visualize_eval_samples(
+                model=model,
+                val_loader=self.ir_val_loader,
+                device=self.device,
+                save_path=save_path,
+                num_samples=self.vis_num_samples,
+                score_thresh=score_thresh,
+                class_names=self.class_names,
+                title=title,
+            )

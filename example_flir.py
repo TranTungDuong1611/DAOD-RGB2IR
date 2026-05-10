@@ -256,6 +256,8 @@ def main(args):
         vis_num_samples=8,
         class_names=FLIR_CLASSES,
         thresh_scheduler=thresh,
+        rgb_teacher=rgb_teacher,
+        ir_teacher=ir_teacher,
     )
 
     # --- Trainer ---
