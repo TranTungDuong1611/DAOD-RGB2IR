@@ -72,11 +72,16 @@ def compute_rgb_loss(
     rgb_teacher: Optional[nn.Module] = None,
     config: Optional[LossConfig] = None,
     conf_thresh: float = 0.7,
+    teacher_images: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     RGB supervised step:
-      - mandatory:  supervised GT loss
+      - mandatory:  supervised GT loss (student sees strong aug)
       - optional:   pseudo-label loss from rgb_teacher (rgb_pseudo_weight > 0)
+
+    teacher_images: if provided, teacher infers on this (weak aug);
+                    student trains on images (strong aug).
+                    If None, both use images.
 
     Returns:
         total_loss : scalar tensor with grad
@@ -84,6 +89,8 @@ def compute_rgb_loss(
     """
     if config is None:
         config = LossConfig()
+
+    t_images = teacher_images if teacher_images is not None else images
 
     components: List[torch.Tensor] = []
     log: Dict[str, float] = {}
@@ -97,7 +104,7 @@ def compute_rgb_loss(
     # --- Optional pseudo-label loss from rgb_teacher ---
     if rgb_teacher is not None and config.rgb_pseudo_weight > 0.0:
         with torch.no_grad():
-            pseudo_preds = rgb_teacher(images)
+            pseudo_preds = rgb_teacher(t_images)
         pseudo_targets = filter_pseudo_labels(pseudo_preds, conf_thresh)
 
         pseudo_loss_dict = student(images, pseudo_targets)
@@ -202,12 +209,14 @@ def compute_ir_loss(
     ir_teacher: nn.Module,
     config: Optional[LossConfig] = None,
     conf_thresh: float = 0.7,
+    teacher_images: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     IR (target domain) unsupervised step — ir_teacher pseudo-labels only.
 
-    No GT available. Student learns exclusively from ir_teacher predictions.
-    Teacher forward pass runs under no_grad.
+    teacher_images: if provided, teacher infers on this (weak aug);
+                    student trains on ir_images (strong aug).
+                    If None, both use ir_images.
 
     Returns:
         total_loss : scalar tensor with grad
@@ -216,10 +225,11 @@ def compute_ir_loss(
     if config is None:
         config = LossConfig()
 
+    t_images = teacher_images if teacher_images is not None else ir_images
     log: Dict[str, float] = {}
 
     with torch.no_grad():
-        ir_preds = ir_teacher(ir_images)
+        ir_preds = ir_teacher(t_images)
     ir_pseudo = filter_pseudo_labels(ir_preds, conf_thresh)
 
     loss_dict  = student(ir_images, ir_pseudo)

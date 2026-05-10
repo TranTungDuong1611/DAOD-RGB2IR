@@ -70,6 +70,12 @@ class AugConfig:
     brightness_mag:          float = 0.2   # ±20% brightness
     contrast_prob:           float = 0.3
     contrast_mag:            float = 0.2   # ±20% contrast
+    # Color jitter (brightness + contrast + saturation + hue in one transform)
+    color_jitter_prob:       float = 0.5
+    cj_brightness:           float = 0.2
+    cj_contrast:             float = 0.2
+    cj_saturation:           float = 0.3
+    cj_hue:                  float = 0.05
 
 
 @dataclass

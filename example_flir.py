@@ -87,6 +87,18 @@ def make_training_config(device: str) -> TrainingConfig:
             alpha_intermediate=0.50,
             alpha_near_ir=0.25,
         ),
+        mid_routing=MidRoutingConfig(
+            # Phase 2: mid_near_rgb — both teachers, EMA → rgb_teacher
+            near_rgb_teacher_source="both",  near_rgb_ema_target="rgb",
+            near_rgb_rgb_weight=0.2,         near_rgb_ir_weight=0.0,
+            # Phase 3: mid_intermediate — both teachers, EMA → ir_teacher (slow)
+            intermediate_teacher_source="both", intermediate_ema_target="ir",
+            intermediate_ema_alpha=0.9998,
+            intermediate_rgb_weight=0.2,     intermediate_ir_weight=0.2,
+            # Phase 4: mid_near_ir — both teachers, EMA → ir_teacher
+            near_ir_teacher_source="both",     near_ir_ema_target="ir",
+            near_ir_rgb_weight=0.0,          near_ir_ir_weight=0.2,
+        ),
         aug=AugConfig(
             hflip_prob=0.5,
             blur_prob=0.5,
@@ -97,19 +109,19 @@ def make_training_config(device: str) -> TrainingConfig:
             contrast_mag=0.2,
         ),
         curriculum=CurriculumConfig(
-            phase1_end=4_000,    # RGB warmup
+            phase1_end=6_000,    # RGB warmup
             phase2_end=8_000,    # RGB + mid_near_rgb
-            phase3_end=13_000,   # full mid_intermediate
-            phase4_end=18_000,   # mid_near_ir + IR
+            phase3_end=10_000,   # full mid_intermediate
+            phase4_end=12_000,   # mid_near_ir + IR
             # Phase 5: full IR until total_iters
             phase2_rgb_ratio=0.67,
             phase4_mid_ratio=0.67,
         ),
         loss=LossConfig(
             rgb_gt_weight=1.0,
-            rgb_pseudo_weight=0.0,
-            mid_rgb_weight=0.5,
-            mid_ir_weight=0.5,
+            rgb_pseudo_weight=0.2,
+            mid_rgb_weight=0.2,
+            mid_ir_weight=0.2,
             mid_gt_weight=1.0,
             ir_ir_teacher_weight=1.0,
         ),
@@ -122,10 +134,10 @@ def make_training_config(device: str) -> TrainingConfig:
 def make_adaptive_threshold() -> AdaptiveThresholdScheduler:
     return AdaptiveThresholdScheduler(AdaptiveThresholdConfig(
         rgb_teacher=TeacherThresholds(
-            phase1=0.85, phase2=0.70, phase3=0.55, phase4=0.45, phase5=0.40,
+            phase1=0.7, phase2=0.7, phase3=0.7, phase4=0.65, phase5=0.60,
         ),
         ir_teacher=TeacherThresholds(
-            phase1=0.95, phase2=0.80, phase3=0.65, phase4=0.55, phase5=0.45,
+            phase1=0.7, phase2=0.7, phase3=0.7, phase4=0.65, phase5=0.60,
         ),
     ))
 

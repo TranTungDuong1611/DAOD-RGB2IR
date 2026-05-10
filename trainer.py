@@ -15,7 +15,6 @@ Training flow per iteration:
   dispatch to train_rgb_step / train_mid_step / train_ir_step
 """
 
-import copy
 import logging
 import os
 import random
@@ -34,6 +33,7 @@ from saga import SemanticAwareGrayAugmentation, SoftSAGA
 from scheduler import CurriculumScheduler, DomainStep, Phase
 
 try:
+    import torchvision.transforms as T
     import torchvision.transforms.functional as TF
     _HAS_TF = True
 except ImportError:
@@ -139,8 +139,6 @@ class CurriculumDomainAdaptationTrainer:
           ir_teacher has been partially updated (if mid_update_ir_teacher=True)
           or still needs a sync. Copy student → ir_teacher for a fresh start.
         """
-        from ema import copy_student_to_teacher
-
         if from_phase is None:
             return  # initial call, no transition
 
@@ -275,7 +273,7 @@ class CurriculumDomainAdaptationTrainer:
         return images, targets, False
 
     def _photometric_aug(self, images: torch.Tensor) -> torch.Tensor:
-        """Photometric aug: blur + brightness/contrast. No geometric change."""
+        """Photometric aug: blur + brightness/contrast + color jitter. No geometric change."""
         if not _HAS_TF:
             return images
         aug = self.config.aug
@@ -289,6 +287,14 @@ class CurriculumDomainAdaptationTrainer:
             mean = images.mean(dim=[-1, -2], keepdim=True)
             factor = 1.0 + random.uniform(-aug.contrast_mag, aug.contrast_mag)
             images = torch.clamp((images - mean) * factor + mean, 0.0, 1.0)
+        if random.random() < aug.color_jitter_prob:
+            jitter = T.ColorJitter(
+                brightness=aug.cj_brightness,
+                contrast=aug.cj_contrast,
+                saturation=aug.cj_saturation,
+                hue=aug.cj_hue,
+            )
+            images = torch.stack([jitter(img) for img in images])
         return images
 
     def _student_aug(
@@ -340,15 +346,18 @@ class CurriculumDomainAdaptationTrainer:
 
         teacher_for_pseudo = (
             self.rgb_teacher
-            if self.config.loss.rgb_pseudo_weight > 0.0
+            if self.config.loss.rgb_pseudo_weight > 0.0 and phase != Phase.PHASE1_RGB_WARMUP
             else None
         )
-        # Phase 1 warmup: weak aug (hflip only) — stable supervised pretrain
-        # Phase 2+: strong aug (hflip + photometric)
+
         if phase == Phase.PHASE1_RGB_WARMUP:
+            # Phase 1: geometric only, no teacher
             student_images, student_targets, _ = self._weak_aug(batch.images, batch.targets)
+            teacher_images = None
         else:
-            student_images, student_targets = self._student_aug(batch.images, batch.targets)
+            # Phase 2+: teacher weak (geometric only), student strong (geometric + photometric)
+            teacher_images, student_targets, _ = self._weak_aug(batch.images, batch.targets)
+            student_images = self._photometric_aug(teacher_images.clone())
 
         loss, log = compute_rgb_loss(
             student=self.student,
@@ -357,6 +366,7 @@ class CurriculumDomainAdaptationTrainer:
             rgb_teacher=teacher_for_pseudo,
             config=self.config.loss,
             conf_thresh=self._get_threshold(phase, teacher="rgb"),
+            teacher_images=teacher_images,
         )
 
         loss.backward()
@@ -383,37 +393,42 @@ class CurriculumDomainAdaptationTrainer:
         mid_level: DomainStep = "mid_near_rgb",
     ) -> Dict:
         """
-        MID step — SoftSAGA images, phase-based teacher routing.
+        MID step — SoftSAGA images, MidRoutingConfig-based teacher routing.
 
-        Phase 2 / Phase 3 (mid_near_rgb / mid_intermediate):
-          Both teachers infer → rgb_pseudo + ir_pseudo + gt_loss
-          EMA: rgb_teacher only
-
-        Phase 4 (mid_near_ir):
-          ir_teacher infers → ir_pseudo + gt_loss
-          EMA: ir_teacher only
+        Routing (teacher_source, ema_target, weights) is read from
+        self.config.mid_routing per mid_level, not hardcoded by phase.
         """
         self.student.train()
         batch = self._next_mid(mid_level)
 
         self.optimizer.zero_grad()
 
-        # Phase-based routing
-        if phase == Phase.PHASE2_RGB_NEAR_RGB:
-            teacher_source = "both"
-            ema_target     = "rgb"
-            rgb_w = self.config.loss.mid_rgb_weight
-            ir_w  = self.config.loss.mid_ir_weight
-        elif phase == Phase.PHASE3_INTERMEDIATE:
-            teacher_source = "both"
-            ema_target     = "ir"
-            rgb_w = self.config.loss.mid_rgb_weight
-            ir_w  = self.config.loss.mid_ir_weight
-        else:  # Phase.PHASE4_NEAR_IR_MIX
-            teacher_source = "ir"
-            ema_target     = "ir"
-            rgb_w = 0.0
-            ir_w  = self.config.loss.mid_ir_weight
+        # Routing from MidRoutingConfig — keyed by mid_level
+        rt = self.config.mid_routing
+        level_cfg = {
+            "mid_near_rgb": (
+                rt.near_rgb_teacher_source,
+                rt.near_rgb_ema_target,
+                self.config.ema.alpha,
+                rt.near_rgb_rgb_weight,
+                rt.near_rgb_ir_weight,
+            ),
+            "mid_intermediate": (
+                rt.intermediate_teacher_source,
+                rt.intermediate_ema_target,
+                rt.intermediate_ema_alpha,
+                rt.intermediate_rgb_weight,
+                rt.intermediate_ir_weight,
+            ),
+            "mid_near_ir": (
+                rt.near_ir_teacher_source,
+                rt.near_ir_ema_target,
+                self.config.ema.alpha,
+                rt.near_ir_rgb_weight,
+                rt.near_ir_ir_weight,
+            ),
+        }
+        teacher_source, ema_target, ema_alpha, rgb_w, ir_w = level_cfg[mid_level]
 
         gt_for_mid = (
             batch.targets
@@ -423,7 +438,7 @@ class CurriculumDomainAdaptationTrainer:
 
         # Teacher: weak aug (hflip only) — stable pseudo-label generation
         # Student: same flipped base + photometric — spatial structure stays aligned
-        weak_images, _, did_flip = self._weak_aug(batch.images, None)
+        weak_images, _, _ = self._weak_aug(batch.images, None)
         strong_images = self._photometric_aug(weak_images.clone())
 
         loss, log = compute_mid_loss(
@@ -445,14 +460,15 @@ class CurriculumDomainAdaptationTrainer:
         log["grad_norm"] = grad_norm
         log["mid_level"] = mid_level
 
-        ema_kwargs = dict(
-            alpha=self.config.ema.alpha,
-            global_step=self.global_step if self.config.ema.use_warmup else None,
-        )
-        if ema_target == "rgb":
-            ema_update(teacher=self.rgb_teacher, student=self.student, **ema_kwargs)
-        elif ema_target == "ir":
-            ema_update(teacher=self.ir_teacher,  student=self.student, **ema_kwargs)
+        if ema_target != "none":
+            ema_kwargs = dict(
+                alpha=ema_alpha,
+                global_step=self.global_step if self.config.ema.use_warmup else None,
+            )
+            if ema_target == "rgb":
+                ema_update(teacher=self.rgb_teacher, student=self.student, **ema_kwargs)
+            elif ema_target == "ir":
+                ema_update(teacher=self.ir_teacher,  student=self.student, **ema_kwargs)
 
         log["domain"] = mid_level
         return log
@@ -469,12 +485,17 @@ class CurriculumDomainAdaptationTrainer:
 
         self.optimizer.zero_grad()
 
+        # Teacher sees weak (hflip only), student sees strong (hflip + photometric)
+        weak_images, _, _ = self._weak_aug(batch.images, None)
+        strong_images = self._photometric_aug(weak_images.clone())
+
         loss, log = compute_ir_loss(
             student=self.student,
-            ir_images=batch.images,
+            ir_images=strong_images,
             ir_teacher=self.ir_teacher,
             config=self.config.loss,
             conf_thresh=self._get_threshold(phase, teacher="ir"),
+            teacher_images=weak_images,
         )
 
         loss.backward()
