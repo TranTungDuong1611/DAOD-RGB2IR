@@ -215,7 +215,7 @@ def compute_mid_loss(
                 with torch.no_grad():
                     rgb_teacher(t_images)
                 if t_hook is not None and t_hook.output is not None:
-                    kl = cls_kl_loss(s_logits, t_hook.output, kl_temperature) * rgb_w
+                    kl = cls_kl_loss(s_logits, t_hook.output, kl_temperature, conf_thresh) * rgb_w
                     components.append(kl)
                     log["mid_rgb_kl_loss"] = kl.item()
                 if t_hook is not None:
@@ -226,7 +226,7 @@ def compute_mid_loss(
                 with torch.no_grad():
                     ir_teacher(t_images)
                 if t_hook is not None and t_hook.output is not None:
-                    kl = cls_kl_loss(s_logits, t_hook.output, kl_temperature) * ir_w
+                    kl = cls_kl_loss(s_logits, t_hook.output, kl_temperature, conf_thresh) * ir_w
                     components.append(kl)
                     log["mid_ir_kl_loss"] = kl.item()
                 if t_hook is not None:
@@ -334,7 +334,7 @@ def compute_ir_loss(
             s_logits = None
 
         if s_logits is not None and t_logits is not None:
-            total_loss = cls_kl_loss(s_logits, t_logits, kl_temperature) * config.ir_ir_teacher_weight
+            total_loss = cls_kl_loss(s_logits, t_logits, kl_temperature, conf_thresh) * config.ir_ir_teacher_weight
             log["ir_kl_loss"] = total_loss.item()
         else:
             total_loss = ir_images.sum() * 0.0
