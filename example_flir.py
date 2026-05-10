@@ -132,12 +132,24 @@ def make_training_config(device: str) -> TrainingConfig:
 
 
 def make_adaptive_threshold() -> AdaptiveThresholdScheduler:
+    # FLIR classes: 0=person  1=car  2=bicycle
+    # person: harder to detect in IR → lower threshold
+    # car: most distinct in IR → higher threshold
+    # bicycle: small, rare → lower threshold
     return AdaptiveThresholdScheduler(AdaptiveThresholdConfig(
         rgb_teacher=TeacherThresholds(
-            phase1=0.7, phase2=0.7, phase3=0.7, phase4=0.65, phase5=0.60,
+            phase1={0: 0.70, 1: 0.70, 2: 0.70},
+            phase2={0: 0.70, 1: 0.70, 2: 0.70},
+            phase3={0: 0.70, 1: 0.70, 2: 0.70},
+            phase4={0: 0.62, 1: 0.68, 2: 0.60},
+            phase5={0: 0.58, 1: 0.65, 2: 0.55},
         ),
         ir_teacher=TeacherThresholds(
-            phase1=0.7, phase2=0.7, phase3=0.7, phase4=0.65, phase5=0.60,
+            phase1={0: 0.70, 1: 0.70, 2: 0.70},
+            phase2={0: 0.70, 1: 0.70, 2: 0.70},
+            phase3={0: 0.70, 1: 0.70, 2: 0.70},
+            phase4={0: 0.62, 1: 0.68, 2: 0.60},
+            phase5={0: 0.58, 1: 0.65, 2: 0.55},
         ),
     ))
 
@@ -293,13 +305,20 @@ def main(args):
     if args.resume:
         logger.info(f"Resuming from: {args.resume}")
         trainer.load_checkpoint(args.resume)
-        # Recreate LR scheduler synced to resumed step so cosine curve continues correctly
+        # Reset optimizer LRs to base values so CosineAnnealingLR reads correct base_lrs.
+        # (Checkpoint may have saved LR=0 if the previous cosine cycle completed.)
+        optimizer.param_groups[0]["lr"] = args.lr_backbone
+        optimizer.param_groups[1]["lr"] = args.lr_head
+        # Step scheduler from scratch to get the correct cosine position at global_step.
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.total_iters, last_epoch=trainer.global_step,
+            optimizer, T_max=args.total_iters, last_epoch=-1,
         )
+        for _ in range(trainer.global_step):
+            lr_scheduler.step()
         logger.info(
             f"Resumed at global_step={trainer.global_step}  "
-            f"remaining={args.total_iters - trainer.global_step} iters"
+            f"remaining={args.total_iters - trainer.global_step} iters  "
+            f"lr={optimizer.param_groups[-1]['lr']:.2e}"
         )
     else:
         # --- Baseline eval (only on fresh run) ---

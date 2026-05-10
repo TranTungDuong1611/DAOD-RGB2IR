@@ -9,12 +9,17 @@ All teacher forward passes run under torch.no_grad() — callers must not wrap
 this module in no_grad() since the student path needs gradients.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 
 from config import LossConfig
+
+# Global or per-class confidence threshold
+ThreshType = Union[float, Dict[int, float]]
+
+_DEFAULT_THRESH = 0.7   # fallback for classes absent from per-class dict
 
 
 # ---------------------------------------------------------------------------
@@ -23,7 +28,7 @@ from config import LossConfig
 
 def filter_pseudo_labels(
     predictions: List[Dict[str, torch.Tensor]],
-    conf_thresh: float = 0.7,
+    conf_thresh: ThreshType = 0.7,
 ) -> List[Dict[str, torch.Tensor]]:
     """
     Filter teacher predictions by confidence score.
@@ -31,7 +36,9 @@ def filter_pseudo_labels(
     Args:
         predictions : output of model(images) in inference mode
                       each dict has "boxes" [N,4], "labels" [N], "scores" [N]
-        conf_thresh : minimum score to keep a box
+        conf_thresh : float  — global threshold applied to all classes
+                      Dict[int, float] — per-class threshold; classes absent
+                      from the dict fall back to _DEFAULT_THRESH (0.7)
 
     Returns:
         filtered list of dicts (same length as predictions, empty dicts possible)
@@ -47,7 +54,17 @@ def filter_pseudo_labels(
             })
             continue
 
-        keep = scores >= conf_thresh
+        if isinstance(conf_thresh, dict):
+            labels = pred["labels"]
+            keep = torch.tensor(
+                [scores[i].item() >= conf_thresh.get(int(labels[i].item()), _DEFAULT_THRESH)
+                 for i in range(len(scores))],
+                dtype=torch.bool,
+                device=scores.device,
+            )
+        else:
+            keep = scores >= conf_thresh
+
         pseudo.append({
             "boxes":  pred["boxes"][keep],
             "labels": pred["labels"][keep],
@@ -71,7 +88,7 @@ def compute_rgb_loss(
     gt_targets: List[Dict[str, torch.Tensor]],
     rgb_teacher: Optional[nn.Module] = None,
     config: Optional[LossConfig] = None,
-    conf_thresh: float = 0.7,
+    conf_thresh: ThreshType = 0.7,
     teacher_images: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
@@ -128,7 +145,7 @@ def compute_mid_loss(
     ir_teacher: nn.Module,
     gt_targets: Optional[List[Dict[str, torch.Tensor]]] = None,
     config: Optional[LossConfig] = None,
-    conf_thresh: float = 0.7,
+    conf_thresh: ThreshType = 0.7,
     teacher_source: str = "both",                          # "rgb" | "ir" | "both"
     rgb_weight_override: Optional[float] = None,
     ir_weight_override: Optional[float] = None,
@@ -208,7 +225,7 @@ def compute_ir_loss(
     ir_images: torch.Tensor,
     ir_teacher: nn.Module,
     config: Optional[LossConfig] = None,
-    conf_thresh: float = 0.7,
+    conf_thresh: ThreshType = 0.7,
     teacher_images: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """

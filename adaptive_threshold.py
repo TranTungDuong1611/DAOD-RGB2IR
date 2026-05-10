@@ -17,9 +17,12 @@ Each teacher can have an independent threshold since:
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Dict, Optional, Union
 
 from scheduler import Phase
+
+# Union type for global or class-wise threshold
+ThreshType = Union[float, Dict[int, float]]
 
 
 # ---------------------------------------------------------------------------
@@ -28,14 +31,21 @@ from scheduler import Phase
 
 @dataclass
 class TeacherThresholds:
-    """Confidence thresholds per phase for a single teacher model."""
-    phase1: float = 0.90   # RGB warmup
-    phase2: float = 0.75   # RGB + mid_near_rgb
-    phase3: float = 0.60   # full intermediate
-    phase4: float = 0.50   # mid_near_ir + IR
-    phase5: float = 0.45   # full IR — teacher most reliable
+    """
+    Confidence thresholds per phase for a single teacher model.
 
-    def get(self, phase: Phase) -> float:
+    Each phase value can be:
+      - float              : global threshold applied to all classes
+      - Dict[int, float]   : per-class threshold, e.g. {0: 0.6, 1: 0.7, 2: 0.8}
+                             Classes absent from the dict fall back to 0.7.
+    """
+    phase1: ThreshType = 0.90
+    phase2: ThreshType = 0.75
+    phase3: ThreshType = 0.60
+    phase4: ThreshType = 0.50
+    phase5: ThreshType = 0.45
+
+    def get(self, phase: Phase) -> ThreshType:
         mapping = {
             Phase.PHASE1_RGB_WARMUP:   self.phase1,
             Phase.PHASE2_RGB_NEAR_RGB: self.phase2,
@@ -82,25 +92,30 @@ class AdaptiveThresholdScheduler:
     def __init__(self, config: Optional[AdaptiveThresholdConfig] = None) -> None:
         self.config = config or AdaptiveThresholdConfig()
 
-    def rgb_teacher(self, phase: Phase) -> float:
+    def rgb_teacher(self, phase: Phase) -> ThreshType:
         """Threshold for filtering rgb_teacher pseudo-labels."""
         return self.config.rgb_teacher.get(phase)
 
-    def ir_teacher(self, phase: Phase) -> float:
+    def ir_teacher(self, phase: Phase) -> ThreshType:
         """Threshold for filtering ir_teacher pseudo-labels."""
         return self.config.ir_teacher.get(phase)
 
-    def both(self, phase: Phase) -> float:
+    def both(self, phase: Phase) -> ThreshType:
         """
-        Single shared threshold (average of both teachers).
-        Use when you don't distinguish between teacher sources.
+        Shared threshold when teacher source is "both".
+        Returns the rgb_teacher threshold (lower = more permissive for early IR).
         """
-        return (self.rgb_teacher(phase) + self.ir_teacher(phase)) / 2.0
+        return self.config.rgb_teacher.get(phase)
 
     def summary(self) -> str:
+        def _fmt(v: ThreshType) -> str:
+            if isinstance(v, dict):
+                return "{" + ", ".join(f"{k}:{t:.2f}" for k, t in sorted(v.items())) + "}"
+            return f"{v:.2f}"
+
         lines = ["AdaptiveThresholdScheduler:"]
         for p in Phase:
             rt = self.rgb_teacher(p)
             it = self.ir_teacher(p)
-            lines.append(f"  {p.name:<25s}  rgb_teacher={rt:.2f}  ir_teacher={it:.2f}")
+            lines.append(f"  {p.name:<25s}  rgb_teacher={_fmt(rt)}  ir_teacher={_fmt(it)}")
         return "\n".join(lines)

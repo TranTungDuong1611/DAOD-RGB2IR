@@ -177,12 +177,15 @@ class CurriculumDomainAdaptationTrainer:
     # Adaptive threshold
     # ------------------------------------------------------------------
 
-    def _get_threshold(self, phase: Phase, teacher: str = "both") -> float:
+    def _get_threshold(self, phase: Phase, teacher: str = "both"):
         """
         Return current confidence threshold for pseudo-label filtering.
 
-        If threshold_scheduler is provided, use curriculum-based values.
-        Otherwise fall back to config.pseudo_label_conf_thresh (fixed).
+        Returns float (global) or Dict[int, float] (class-wise) depending on
+        what AdaptiveThresholdScheduler is configured with.
+
+        If threshold_scheduler is not provided, falls back to
+        config.pseudo_label_conf_thresh (fixed global float).
 
         Args:
             phase   : current curriculum phase
@@ -547,10 +550,12 @@ class CurriculumDomainAdaptationTrainer:
         log["phase"]       = phase.name
         log["global_step"] = self.global_step
 
-        # Adaptive threshold logging
+        # Adaptive threshold logging (min value when class-wise dict)
         if self.threshold_scheduler is not None:
-            log["thresh_rgb"] = self.threshold_scheduler.rgb_teacher(phase)
-            log["thresh_ir"]  = self.threshold_scheduler.ir_teacher(phase)
+            rt = self.threshold_scheduler.rgb_teacher(phase)
+            it = self.threshold_scheduler.ir_teacher(phase)
+            log["thresh_rgb"] = min(rt.values()) if isinstance(rt, dict) else rt
+            log["thresh_ir"]  = min(it.values()) if isinstance(it, dict) else it
 
         # Phase evaluation trigger
         if self.phase_evaluator is not None:
