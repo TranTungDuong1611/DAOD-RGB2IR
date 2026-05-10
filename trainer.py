@@ -456,6 +456,8 @@ class CurriculumDomainAdaptationTrainer:
             teacher_source=teacher_source,
             rgb_weight_override=rgb_w,
             ir_weight_override=ir_w,
+            use_kl=self.config.loss.use_kl_distillation,
+            kl_temperature=self.config.loss.kl_temperature,
         )
 
         loss.backward()
@@ -499,6 +501,8 @@ class CurriculumDomainAdaptationTrainer:
             config=self.config.loss,
             conf_thresh=self._get_threshold(phase, teacher="ir"),
             teacher_images=weak_images,
+            use_kl=self.config.loss.use_kl_distillation,
+            kl_temperature=self.config.loss.kl_temperature,
         )
 
         loss.backward()

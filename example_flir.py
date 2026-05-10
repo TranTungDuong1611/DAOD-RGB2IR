@@ -124,6 +124,8 @@ def make_training_config(device: str) -> TrainingConfig:
             mid_ir_weight=0.2,
             mid_gt_weight=1.0,
             ir_ir_teacher_weight=1.0,
+            use_kl_distillation=True,
+            kl_temperature=3.0,
         ),
         pseudo_label_conf_thresh=0.7,
         device=device,

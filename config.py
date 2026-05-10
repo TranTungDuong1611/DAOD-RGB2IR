@@ -109,12 +109,16 @@ class LossConfig:
     rgb_pseudo_weight: float = 0.0    # set > 0 to enable pseudo loss in RGB step
 
     # MID step (Phase 2/3: both teachers; Phase 4: ir_teacher only)
-    mid_rgb_weight: float = 0.5       # weight for rgb_teacher pseudo-labels (Phase 2/3)
-    mid_ir_weight: float = 0.5        # weight for ir_teacher  pseudo-labels
+    mid_rgb_weight: float = 0.5       # weight for rgb_teacher pseudo-labels / KL (Phase 2/3)
+    mid_ir_weight: float = 0.5        # weight for ir_teacher  pseudo-labels / KL
     mid_gt_weight: float = 1.0        # weight for GT loss on MID
 
     # IR step (Phase 4/5: ir_teacher only, no GT)
     ir_ir_teacher_weight: float = 1.0
+
+    # KL distillation — replaces hard pseudo-label loss in MID and IR steps
+    use_kl_distillation: bool = False  # True = KL distillation, False = hard pseudo-labels
+    kl_temperature: float = 1.0        # > 1 softens teacher distribution (range: 1.0–4.0)
 
 
 @dataclass
