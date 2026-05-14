@@ -109,10 +109,10 @@ def make_training_config(device: str) -> TrainingConfig:
             contrast_mag=0.2,
         ),
         curriculum=CurriculumConfig(
-            phase1_end=6_000,    # RGB warmup
-            phase2_end=8_000,    # RGB + mid_near_rgb
-            phase3_end=10_000,   # full mid_intermediate
-            phase4_end=12_000,   # mid_near_ir + IR
+            phase1_end=10_000,    # RGB warmup
+            phase2_end=13_000,    # RGB + mid_near_rgb
+            phase3_end=16_000,   # full mid_intermediate
+            phase4_end=20_000,   # mid_near_ir + IR
             # Phase 5: full IR until total_iters
             phase2_rgb_ratio=0.67,
             phase4_mid_ratio=0.67,
