@@ -131,7 +131,7 @@ def _ir_stem_to_rgb_filename(stem: str) -> str:
 
 
 def _read_split_file(split_file: Path) -> List[str]:
-    """Read ImageSets/Main/*.txt — one stem per line, ignoring blank lines."""
+    """Read align_train.txt / align_validation.txt — one stem per line, ignoring blank lines."""
     with open(split_file, "r") as f:
         return [line.strip() for line in f if line.strip()]
 
@@ -183,7 +183,7 @@ class FLIRRGBDataset(Dataset):
         self.transform = transform or _default_rgb_transform()
         self.min_area  = min_area
 
-        split_file = self.root / "ImageSets" / "Main" / f"align_{split}.txt"
+        split_file = self.root / f"align_{split}.txt"
         self.stems = _read_split_file(split_file)
 
         # Filter to stems where the RGB image actually exists
@@ -231,7 +231,7 @@ class FLIRIRDataset(Dataset):
         self.root      = Path(root)
         self.transform = transform or _default_ir_transform()
 
-        split_file = self.root / "ImageSets" / "Main" / f"align_{split}.txt"
+        split_file = self.root / f"align_{split}.txt"
         all_stems  = _read_split_file(split_file)
 
         self.ir_paths = [
@@ -274,7 +274,7 @@ class FLIRIRValDataset(Dataset):
         self.transform = transform or _default_ir_transform()
         self.min_area  = min_area
 
-        split_file = self.root / "ImageSets" / "Main" / f"align_{split}.txt"
+        split_file = self.root / f"align_{split}.txt"
         all_stems  = _read_split_file(split_file)
 
         # Keep only stems where both image and annotation exist
