@@ -138,18 +138,18 @@ def make_adaptive_threshold() -> AdaptiveThresholdScheduler:
     # bicycle: small, rare → lower threshold
     return AdaptiveThresholdScheduler(AdaptiveThresholdConfig(
         rgb_teacher=TeacherThresholds(
-            phase1={0: 0.70, 1: 0.70, 2: 0.70},
-            phase2={0: 0.70, 1: 0.70, 2: 0.70},
-            phase3={0: 0.70, 1: 0.70, 2: 0.70},
-            phase4={0: 0.62, 1: 0.68, 2: 0.60},
-            phase5={0: 0.58, 1: 0.65, 2: 0.55},
+            phase1={0: 0.70, 1: 0.70, 2: 0.65},
+            phase2={0: 0.70, 1: 0.70, 2: 0.65},
+            phase3={0: 0.70, 1: 0.70, 2: 0.65},
+            phase4={0: 0.70, 1: 0.75, 2: 0.65},
+            phase5={0: 0.70, 1: 0.80, 2: 0.65},
         ),
         ir_teacher=TeacherThresholds(
-            phase1={0: 0.70, 1: 0.70, 2: 0.70},
-            phase2={0: 0.70, 1: 0.70, 2: 0.70},
-            phase3={0: 0.70, 1: 0.70, 2: 0.70},
-            phase4={0: 0.62, 1: 0.68, 2: 0.60},
-            phase5={0: 0.58, 1: 0.65, 2: 0.55},
+            phase1={0: 0.70, 1: 0.70, 2: 0.65},
+            phase2={0: 0.70, 1: 0.70, 2: 0.65},
+            phase3={0: 0.70, 1: 0.70, 2: 0.65},
+            phase4={0: 0.70, 1: 0.75, 2: 0.65},
+            phase5={0: 0.70, 1: 0.80, 2: 0.65},
         ),
     ))
 
