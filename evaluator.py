@@ -293,9 +293,11 @@ class PhaseEvaluator:
         vis_score_thresh: float = 0.3,
         class_names:     Optional[List[str]] = None,
         thresh_scheduler: Optional[AdaptiveThresholdScheduler] = None,
-        # Teacher models for comparison visualization (optional)
-        rgb_teacher: Optional["torch.nn.Module"] = None,
-        ir_teacher:  Optional["torch.nn.Module"] = None,
+        # Teachers — when provided, visualization draws a side-by-side comparison
+        # grid of student + teachers via visualize_compare_models. Otherwise only
+        # the student is visualized.
+        rgb_teacher:     Optional["torch.nn.Module"] = None,
+        ir_teacher:      Optional["torch.nn.Module"] = None,
     ) -> None:
         self.evaluator      = evaluator
         self.ir_val_loader  = ir_val_loader
@@ -570,9 +572,9 @@ class PhaseEvaluator:
         else:
             score_thresh = self.vis_score_thresh
 
+        # If teachers are registered, draw a side-by-side comparison grid.
         if self.rgb_teacher is not None or self.ir_teacher is not None:
-            # Comparison grid: student + available teachers
-            models = {"student": model}
+            models: Dict[str, "torch.nn.Module"] = {"student": model}
             if self.rgb_teacher is not None:
                 models["rgb_teacher"] = self.rgb_teacher
             if self.ir_teacher is not None:
@@ -587,14 +589,15 @@ class PhaseEvaluator:
                 class_names=self.class_names,
                 title=title,
             )
-        else:
-            visualize_eval_samples(
-                model=model,
-                val_loader=self.ir_val_loader,
-                device=self.device,
-                save_path=save_path,
-                num_samples=self.vis_num_samples,
-                score_thresh=score_thresh,
-                class_names=self.class_names,
-                title=title,
-            )
+            return
+
+        visualize_eval_samples(
+            model=model,
+            val_loader=self.ir_val_loader,
+            device=self.device,
+            save_path=save_path,
+            num_samples=self.vis_num_samples,
+            score_thresh=score_thresh,
+            class_names=self.class_names,
+            title=title,
+        )

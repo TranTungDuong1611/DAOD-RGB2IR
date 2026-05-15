@@ -61,7 +61,15 @@ class FasterRCNNDetector(nn.Module):
             # 0-indexed → 1-indexed for Faster RCNN
             rcnn_targets = [{**t, "labels": t["labels"] + 1} for t in targets]
             return self.model(image_list, rcnn_targets)
-        preds = self.model(image_list)
+        # No targets → inference. Torchvision GeneralizedRCNN gates on
+        # self.training, so force eval for this call regardless of caller state.
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            preds = self.model(image_list)
+        finally:
+            if was_training:
+                self.model.train()
         return [self._to_0indexed(p) for p in preds]
 
     # ------------------------------------------------------------------

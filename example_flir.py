@@ -90,14 +90,14 @@ def make_training_config(device: str) -> TrainingConfig:
         mid_routing=MidRoutingConfig(
             # Phase 2: mid_near_rgb — both teachers, EMA → rgb_teacher
             near_rgb_teacher_source="both",  near_rgb_ema_target="rgb",
-            near_rgb_rgb_weight=0.2,         near_rgb_ir_weight=0.0,
+            near_rgb_rgb_weight=0.4,         near_rgb_ir_weight=0.0,
             # Phase 3: mid_intermediate — both teachers, EMA → ir_teacher (slow)
             intermediate_teacher_source="both", intermediate_ema_target="ir",
-            intermediate_ema_alpha=0.9998,
-            intermediate_rgb_weight=0.2,     intermediate_ir_weight=0.2,
+            intermediate_ema_alpha=0.9996,
+            intermediate_rgb_weight=0.1,     intermediate_ir_weight=0.4,
             # Phase 4: mid_near_ir — both teachers, EMA → ir_teacher
             near_ir_teacher_source="both",     near_ir_ema_target="ir",
-            near_ir_rgb_weight=0.0,          near_ir_ir_weight=0.2,
+            near_ir_rgb_weight=0.1,          near_ir_ir_weight=0.4,
         ),
         aug=AugConfig(
             hflip_prob=0.5,
@@ -253,7 +253,7 @@ def main(args):
         rgb_val_loader=rgb_val_loader,
         vis_dir=os.path.join(args.output_dir, "vis"),
         vis_every_n=args.vis_every,
-        vis_num_samples=8,
+        vis_num_samples=16,
         class_names=FLIR_CLASSES,
         thresh_scheduler=thresh,
         rgb_teacher=rgb_teacher,
