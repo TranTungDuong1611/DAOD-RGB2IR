@@ -41,6 +41,7 @@ from config import (
     AugConfig,
     CurriculumConfig,
     EMAConfig,
+    HarmonyConfig,
     LossConfig,
     MidRoutingConfig,
     SAGAConfig,
@@ -94,7 +95,7 @@ def make_training_config(device: str) -> TrainingConfig:
             # Phase 3: mid_intermediate — both teachers, EMA → ir_teacher (slow)
             intermediate_teacher_source="both", intermediate_ema_target="ir",
             intermediate_ema_alpha=0.9996,
-            intermediate_rgb_weight=0.1,     intermediate_ir_weight=0.4,
+            intermediate_rgb_weight=0.2,     intermediate_ir_weight=0.4,
             # Phase 4: mid_near_ir — both teachers, EMA → ir_teacher
             near_ir_teacher_source="both",     near_ir_ema_target="ir",
             near_ir_rgb_weight=0.1,          near_ir_ir_weight=0.4,
@@ -124,6 +125,14 @@ def make_training_config(device: str) -> TrainingConfig:
             mid_ir_weight=0.2,
             mid_gt_weight=1.0,
             ir_ir_teacher_weight=1.0,
+            harmony=HarmonyConfig(
+                use_harmony_weight=True,
+                beta=0.5,               # h = sqrt(p * u)
+                min_threshold=None,     # reweight only, no hard filter
+                neg_proposal_weight=0.0,
+                use_rpn_pseudo=True,
+                rpn_pseudo_factor=0.5,
+            ),
         ),
         pseudo_label_conf_thresh=0.7,
         device=device,
@@ -216,6 +225,7 @@ def main(args):
     )
     if args.model == "faster_rcnn":
         student, rgb_teacher, ir_teacher = build_faster_rcnn_trio(**_trio_kwargs)
+        student.enable_harmony(neg_proposal_weight=0.0)
     else:
         student, rgb_teacher, ir_teacher = build_fcos_trio(**_trio_kwargs)
     copy_student_to_teacher(rgb_teacher, student)

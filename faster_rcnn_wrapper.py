@@ -20,14 +20,176 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision.models.detection import FasterRCNN, fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.models.detection.roi_heads import RoIHeads, fastrcnn_loss
 
 try:
     from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights
     _HAS_NEW_WEIGHTS_API = True
 except ImportError:
     _HAS_NEW_WEIGHTS_API = False
+
+
+# ---------------------------------------------------------------------------
+# Harmony-weighted loss helpers
+# ---------------------------------------------------------------------------
+
+def weighted_fastrcnn_loss(
+    class_logits: torch.Tensor,
+    box_regression: torch.Tensor,
+    labels: List[torch.Tensor],
+    regression_targets: List[torch.Tensor],
+    proposal_harmony_weights: List[torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Like torchvision's fastrcnn_loss but multiplies each proposal's loss by its
+    harmony weight.  Background proposals get neg_proposal_weight (set in
+    _build_proposal_harmony_weights before calling here).
+
+    Normalisation matches the standard: classification loss is mean over all
+    sampled proposals; box loss is sum-over-positives / total-sampled.
+    This keeps the gradient scale comparable to the unweighted baseline.
+    """
+    labels_cat = torch.cat(labels, dim=0)
+    regression_targets_cat = torch.cat(regression_targets, dim=0)
+    hw_cat = torch.cat(proposal_harmony_weights, dim=0)  # [N_sampled]
+
+    # --- Classification loss (all sampled proposals) ---
+    log_p = F.log_softmax(class_logits, dim=-1)
+    nll = -log_p[torch.arange(len(labels_cat), device=labels_cat.device), labels_cat]
+    classification_loss = (hw_cat * nll).mean()
+
+    # --- Box regression loss (positive proposals only) ---
+    sampled_pos = torch.where(labels_cat > 0)[0]
+    if sampled_pos.numel() == 0:
+        box_loss = class_logits.sum() * 0.0
+    else:
+        labels_pos = labels_cat[sampled_pos]
+        N = class_logits.shape[0]
+        box_regression = box_regression.reshape(N, box_regression.size(-1) // 4, 4)
+        pos_hw = hw_cat[sampled_pos]  # [N_pos]
+        per_box = F.smooth_l1_loss(
+            box_regression[sampled_pos, labels_pos],
+            regression_targets_cat[sampled_pos],
+            beta=1.0 / 9,
+            reduction="none",
+        ).sum(dim=-1)   # [N_pos] — sum over 4 coords, mirrors torchvision reduction="sum"
+        box_loss = (pos_hw * per_box).sum() / labels_cat.numel()
+
+    return classification_loss, box_loss
+
+
+# ---------------------------------------------------------------------------
+# Harmony-aware RoI head
+# ---------------------------------------------------------------------------
+
+class HarmonyRoIHeads(RoIHeads):
+    """
+    Drop-in replacement for torchvision's RoIHeads that supports per-box
+    harmony weights in the pseudo-label loss.
+
+    Install via FasterRCNNDetector.enable_harmony() — this changes the
+    roi_heads __class__ in-place (all weights are preserved).
+
+    How it works
+    ------------
+    During training, if any target dict contains "harmony_weights" [N_gt]:
+      1. Strip "harmony_weights" from targets before select_training_samples.
+      2. Use matched_idxs (after fg/bg sampling) to look up the harmony weight
+         for each sampled proposal from its matched GT box.
+      3. Replace fastrcnn_loss with weighted_fastrcnn_loss.
+    If no target has "harmony_weights", falls back to standard fastrcnn_loss.
+    GT supervised targets never contain "harmony_weights", so the GT branch
+    is completely unaffected.
+    """
+
+    neg_proposal_weight: float = 0.0  # set by enable_harmony()
+
+    def forward(self, features, proposals, image_shapes, targets=None):
+        # ---- Training path ------------------------------------------------
+        if self.training:
+            # Extract harmony weights before mutating targets
+            harmony_weights_list: Optional[List[Optional[torch.Tensor]]] = None
+            if targets is not None:
+                if any("harmony_weights" in t for t in targets):
+                    harmony_weights_list = [t.get("harmony_weights", None)
+                                            for t in targets]
+                    # Strip so torchvision internals see only boxes/labels
+                    targets = [{k: v for k, v in t.items() if k != "harmony_weights"}
+                               for t in targets]
+
+            proposals, matched_idxs, labels, regression_targets = \
+                self.select_training_samples(proposals, targets)
+
+            box_features = self.box_roi_pool(features, proposals, image_shapes)
+            box_features = self.box_head(box_features)
+            class_logits, box_regression = self.box_predictor(box_features)
+
+            if harmony_weights_list is not None:
+                proposal_hw = self._build_proposal_harmony_weights(
+                    harmony_weights_list, matched_idxs, labels
+                )
+                loss_cls, loss_box = weighted_fastrcnn_loss(
+                    class_logits, box_regression, labels,
+                    regression_targets, proposal_hw,
+                )
+            else:
+                loss_cls, loss_box = fastrcnn_loss(
+                    class_logits, box_regression, labels, regression_targets
+                )
+
+            return [], {"loss_classifier": loss_cls, "loss_box_reg": loss_box}
+
+        # ---- Inference path (unchanged) -----------------------------------
+        box_features = self.box_roi_pool(features, proposals, image_shapes)
+        box_features = self.box_head(box_features)
+        class_logits, box_regression = self.box_predictor(box_features)
+
+        boxes, scores, labels = self.postprocess_detections(
+            class_logits, box_regression, proposals, image_shapes
+        )
+        result = [{"boxes": b, "labels": l, "scores": s}
+                  for b, l, s in zip(boxes, labels, scores)]
+        return result, {}
+
+    def _build_proposal_harmony_weights(
+        self,
+        harmony_weights_list: List[Optional[torch.Tensor]],
+        matched_idxs: List[torch.Tensor],
+        labels: List[torch.Tensor],
+    ) -> List[torch.Tensor]:
+        """
+        Build per-proposal harmony weight tensors.
+
+        matched_idxs[i] : [N_sampled_i] — GT-box index for each sampled proposal
+                           (clamped to [0, N_gt-1] by select_training_samples).
+        labels[i]        : [N_sampled_i] — 0=background, >0=foreground class.
+        """
+        out = []
+        for hw, midxs, lbls in zip(harmony_weights_list, matched_idxs, labels):
+            device = midxs.device
+            fg_mask = lbls > 0
+
+            if hw is None or hw.numel() == 0:
+                # No per-box weights: fg→1.0, bg→neg_proposal_weight
+                w = torch.where(
+                    fg_mask,
+                    torch.ones(len(lbls), device=device),
+                    torch.full((len(lbls),), self.neg_proposal_weight, device=device),
+                )
+            else:
+                hw = hw.to(device)
+                # Look up harmony weight for each proposal via its matched GT index
+                per_prop = hw[midxs.clamp(0, len(hw) - 1)]
+                w = torch.where(
+                    fg_mask,
+                    per_prop,
+                    torch.full_like(per_prop, self.neg_proposal_weight),
+                )
+            out.append(w)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +254,32 @@ class FasterRCNNDetector(nn.Module):
         if self.ir_to_rgb and images.shape[1] == 1:
             images = images.expand(-1, 3, -1, -1)
         return list(images.unbind(dim=0))
+
+    # ------------------------------------------------------------------
+    # Harmony support
+    # ------------------------------------------------------------------
+
+    def enable_harmony(self, neg_proposal_weight: float = 0.0) -> "FasterRCNNDetector":
+        """
+        Replace the stock RoI head with HarmonyRoIHeads in-place.
+
+        This is a lightweight __class__ swap — all trained weights are
+        preserved.  Call once before training when use_harmony_weight=True.
+
+        Args:
+            neg_proposal_weight : harmony weight assigned to background
+                                  proposals in the pseudo-label ROI loss.
+                                  0.0 = ignore background (recommended).
+                                  0.25 = mild background supervision.
+
+        Returns self for chaining:
+            student = FasterRCNNDetector.from_scratch(...).enable_harmony()
+        """
+        roi = self.model.roi_heads
+        if not isinstance(roi, HarmonyRoIHeads):
+            roi.__class__ = HarmonyRoIHeads
+        roi.neg_proposal_weight = neg_proposal_weight
+        return self
 
     # ------------------------------------------------------------------
     # Factory helpers

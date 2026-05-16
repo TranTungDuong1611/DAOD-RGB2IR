@@ -5,6 +5,7 @@ Training flow:  RGB → MID(SAGA) → IR
 """
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +103,40 @@ class CurriculumConfig:
 
 
 @dataclass
+class HarmonyConfig:
+    """
+    Harmony reweighting for pseudo-label loss (Harmonious Teacher, Eq. 5 & 9).
+
+    h_i = p_i^beta * u_i^(1-beta)
+
+    p_i  = teacher confidence score for pseudo-box i
+    u_i  = localization quality proxy:
+           • Supervised  (GT available): max IoU(pseudo_box_i, GT_boxes)      [exact]
+           • Unsupervised (no GT):       max_{j≠i} IoU(pseudo_box_i, box_j)   [paper Eq.9]
+
+    h_i is used ONLY as a per-proposal loss weight — class labels and box
+    regression targets are unchanged.
+
+    Ablation presets
+    ----------------
+    Baseline (no harmony):
+        use_harmony_weight=False, conf_thresh=0.7
+    Harmony safe:
+        use_harmony_weight=True, conf_thresh=0.5
+    Harmony aggressive:
+        use_harmony_weight=True, conf_thresh=0.3, min_threshold=0.4
+    """
+    use_harmony_weight: bool = False
+    beta: float = 0.5               # blend: 1.0 → h=p only, 0.0 → h=u only
+    min_threshold: Optional[float] = None  # discard pseudo-box if h_i < min_threshold
+    max_boxes_per_image: Optional[int] = None  # keep top-N by h_i (None = no limit)
+    neg_proposal_weight: float = 0.0  # weight for bg ROI proposals in pseudo loss
+    # RPN pseudo loss control
+    use_rpn_pseudo: bool = True       # include RPN losses in pseudo-label loss
+    rpn_pseudo_factor: float = 0.5    # relative weight of RPN pseudo vs ROI pseudo
+
+
+@dataclass
 class LossConfig:
     """Loss weights for each domain step."""
     # RGB step
@@ -115,6 +150,9 @@ class LossConfig:
 
     # IR step (Phase 4/5: ir_teacher only, no GT)
     ir_ir_teacher_weight: float = 1.0
+
+    # Harmony reweighting (applied to all pseudo-label losses)
+    harmony: HarmonyConfig = field(default_factory=HarmonyConfig)
 
 
 @dataclass
