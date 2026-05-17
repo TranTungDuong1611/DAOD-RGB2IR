@@ -6,19 +6,21 @@ Orchestrates the full RGB → MID(SAGA) → IR curriculum training loop.
 Architecture:
   - 1 student   (trained by gradient descent, has optimizer)
   - 2 teachers:
-      rgb_teacher  (EMA of student, updated in RGB step)
-      ir_teacher   (EMA of student, updated in IR  step)
+      rgb_teacher  (EMA of student, updated in RGB and MID steps)
+      ir_teacher   (EMA of student, updated in MID and IR  steps)
   Teachers are ALWAYS in eval mode and require no grad.
 
 Training flow per iteration:
   scheduler.get_next_step(global_step) → "rgb" | "mid" | "ir"
   dispatch to train_rgb_step / train_mid_step / train_ir_step
+
+Phase 2 (MID): SAGA applied 100%, both teachers infer and receive EMA updates.
 """
 
 import logging
 import os
 import random
-from typing import Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional
 
 import torch
 import torch.nn as nn
@@ -29,8 +31,12 @@ from batch_types import IRBatch, MidBatch, RGBBatch
 from config import TrainingConfig
 from ema import ema_update
 from losses import compute_ir_loss, compute_mid_loss, compute_rgb_loss
-from saga import SemanticAwareGrayAugmentation, SoftSAGA
+from saga import SemanticAwareGrayAugmentation
 from scheduler import CurriculumScheduler, DomainStep, Phase
+
+if TYPE_CHECKING:
+    from adaptive_threshold import AdaptiveThresholdScheduler
+    from evaluator import PhaseEvaluator
 
 try:
     import torchvision.transforms as T
@@ -38,14 +44,6 @@ try:
     _HAS_TF = True
 except ImportError:
     _HAS_TF = False
-
-# Optional — imported only when provided at runtime
-try:
-    from adaptive_threshold import AdaptiveThresholdScheduler
-    from evaluator import PhaseEvaluator
-except ImportError:
-    AdaptiveThresholdScheduler = None  # type: ignore
-    PhaseEvaluator = None              # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -88,15 +86,14 @@ class CurriculumDomainAdaptationTrainer:
         self.threshold_scheduler = threshold_scheduler
         self.phase_evaluator     = phase_evaluator
         # phase_best_paths: maps phase name → path of best checkpoint for that phase
-        # Used to initialise teachers at phase transitions.
         self.phase_best_paths: Dict[str, str] = {}
         if phase1_best_path:
             self.phase_best_paths["PHASE1_RGB_WARMUP"] = phase1_best_path
 
         self._setup_models()
 
+        # SAGA always applied at 100% (apply_prob=1.0) in MID phase
         self.saga      = SemanticAwareGrayAugmentation(apply_prob=config.saga.apply_prob)
-        self.soft_saga = SoftSAGA()
         self.scheduler = CurriculumScheduler(config.curriculum)
 
         # Infinite data iterators — never exhaust
@@ -130,20 +127,15 @@ class CurriculumDomainAdaptationTrainer:
         """
         Called exactly once when the curriculum phase changes.
 
-        Phase 1 → Phase 2  (RGB warmup → RGB+MID):
-          Neither teacher was updated during Phase 1 (EMA skipped in warmup phase).
-          Copy student → rgb_teacher AND student → ir_teacher so both teachers
-          start Phase 2 from the exact pretrained weights.
-
-        Phase 2 → Phase 3  (RGB+MID → MID+IR):
-          ir_teacher has been partially updated (if mid_update_ir_teacher=True)
-          or still needs a sync. Copy student → ir_teacher for a fresh start.
+        Phase 1 → Phase 2  (RGB warmup → MID):
+          Copy student → rgb_teacher AND ir_teacher from best Phase 1 checkpoint
+          (or current student if no checkpoint), so both teachers start Phase 2
+          from the exact pretrained RGB weights.
         """
         if from_phase is None:
             return  # initial call, no transition
 
-        if from_phase == Phase.PHASE1_RGB_WARMUP and to_phase == Phase.PHASE2_RGB_NEAR_RGB:
-            # Init both teachers from best Phase 1 checkpoint (or current student)
+        if from_phase == Phase.PHASE1_RGB_WARMUP and to_phase == Phase.PHASE2_MID:
             self._init_teachers_from_checkpoint(
                 "PHASE1_RGB_WARMUP", teachers=["rgb", "ir"],
                 fallback_msg="PHASE1→PHASE2: no best checkpoint, using current student",
@@ -186,10 +178,6 @@ class CurriculumDomainAdaptationTrainer:
 
         If threshold_scheduler is not provided, falls back to
         config.pseudo_label_conf_thresh (fixed global float).
-
-        Args:
-            phase   : current curriculum phase
-            teacher : "rgb" | "ir" | "both"
         """
         if self.threshold_scheduler is None:
             return self.config.pseudo_label_conf_thresh
@@ -225,18 +213,11 @@ class CurriculumDomainAdaptationTrainer:
         images = raw[0] if isinstance(raw, (list, tuple)) else raw
         return IRBatch(images=images.to(self.device))
 
-    def _next_mid(self, mid_level: DomainStep = "mid_near_rgb") -> MidBatch:
-        """Pull an RGB batch and apply SoftSAGA with the alpha for mid_level."""
+    def _next_mid(self) -> MidBatch:
+        """Pull an RGB batch and apply hard SAGA at 100% (apply_prob from config)."""
         rgb = self._next_rgb()
         boxes_list = [t["boxes"] for t in rgb.targets]
-
-        alpha_map = {
-            "mid_near_rgb":    self.config.soft_saga.alpha_near_rgb,
-            "mid_intermediate": self.config.soft_saga.alpha_intermediate,
-            "mid_near_ir":     self.config.soft_saga.alpha_near_ir,
-        }
-        alpha = alpha_map.get(mid_level, self.config.soft_saga.alpha_near_rgb)
-        mid_images = self.soft_saga.apply_to_batch(rgb.images, boxes_list, alpha)
+        mid_images = self.saga.apply_to_batch(rgb.images, boxes_list)
         return MidBatch(
             images=mid_images,
             targets=rgb.targets,
@@ -377,8 +358,6 @@ class CurriculumDomainAdaptationTrainer:
         log["grad_norm"] = grad_norm
 
         # EMA update rgb_teacher — but NOT during Phase 1 (pretrain).
-        # Phase 1 is pure supervised pretrain; teachers are initialized from
-        # student via init_teachers_from_student() at the Phase 1→2 transition.
         if self.config.teacher_update.rgb_update_rgb_teacher and phase != Phase.PHASE1_RGB_WARMUP:
             ema_update(
                 teacher=self.rgb_teacher,
@@ -390,48 +369,20 @@ class CurriculumDomainAdaptationTrainer:
         log["domain"] = "rgb"
         return log
 
-    def train_mid_step(
-        self,
-        phase: Phase = Phase.PHASE2_RGB_NEAR_RGB,
-        mid_level: DomainStep = "mid_near_rgb",
-    ) -> Dict:
+    def train_mid_step(self, phase: Phase = Phase.PHASE2_MID) -> Dict:
         """
-        MID step — SoftSAGA images, MidRoutingConfig-based teacher routing.
+        MID step — SAGA images (100%), both teachers infer, both teachers EMA updated.
 
-        Routing (teacher_source, ema_target, weights) is read from
-        self.config.mid_routing per mid_level, not hardcoded by phase.
+        Teacher: weak aug (hflip only)  → stable pseudo-label generation
+        Student: strong aug (hflip + photometric) → robust feature learning
+
+        Loss:   L_rgb_teacher(MID)  +  L_ir_teacher(MID)  +  optional L_gt
+        Update: EMA(rgb_teacher ← student)  +  EMA(ir_teacher ← student)
         """
         self.student.train()
-        batch = self._next_mid(mid_level)
+        batch = self._next_mid()
 
         self.optimizer.zero_grad()
-
-        # Routing from MidRoutingConfig — keyed by mid_level
-        rt = self.config.mid_routing
-        level_cfg = {
-            "mid_near_rgb": (
-                rt.near_rgb_teacher_source,
-                rt.near_rgb_ema_target,
-                self.config.ema.alpha,
-                rt.near_rgb_rgb_weight,
-                rt.near_rgb_ir_weight,
-            ),
-            "mid_intermediate": (
-                rt.intermediate_teacher_source,
-                rt.intermediate_ema_target,
-                rt.intermediate_ema_alpha,
-                rt.intermediate_rgb_weight,
-                rt.intermediate_ir_weight,
-            ),
-            "mid_near_ir": (
-                rt.near_ir_teacher_source,
-                rt.near_ir_ema_target,
-                self.config.ema.alpha,
-                rt.near_ir_rgb_weight,
-                rt.near_ir_ir_weight,
-            ),
-        }
-        teacher_source, ema_target, ema_alpha, rgb_w, ir_w = level_cfg[mid_level]
 
         gt_for_mid = (
             batch.targets
@@ -439,44 +390,37 @@ class CurriculumDomainAdaptationTrainer:
             else None
         )
 
-        # Teacher: weak aug (hflip only) — stable pseudo-label generation
-        # Student: same flipped base + photometric — spatial structure stays aligned
+        # Teacher: weak aug (hflip only) — spatial structure preserved for box alignment
+        # Student: same flipped base + photometric — strong perturbation
         weak_images, _, _ = self._weak_aug(batch.images, None)
         strong_images = self._photometric_aug(weak_images.clone())
 
         loss, log = compute_mid_loss(
             student=self.student,
             mid_images=strong_images,
-            teacher_images=weak_images,
             rgb_teacher=self.rgb_teacher,
             ir_teacher=self.ir_teacher,
             gt_targets=gt_for_mid,
             config=self.config.loss,
-            conf_thresh=self._get_threshold(phase, teacher=teacher_source),
-            teacher_source=teacher_source,
-            rgb_weight_override=rgb_w,
-            ir_weight_override=ir_w,
+            conf_thresh=self._get_threshold(phase, teacher="both"),
+            teacher_images=weak_images,
         )
 
         loss.backward()
         grad_norm = self._clip_and_step()
         log["grad_norm"] = grad_norm
-        log["mid_level"] = mid_level
 
-        if ema_target != "none":
-            ema_kwargs = dict(
-                alpha=ema_alpha,
-                global_step=self.global_step if self.config.ema.use_warmup else None,
-            )
-            if ema_target == "rgb":
-                ema_update(teacher=self.rgb_teacher, student=self.student, **ema_kwargs)
-            elif ema_target == "ir":
-                ema_update(teacher=self.ir_teacher,  student=self.student, **ema_kwargs)
+        ema_kwargs = dict(
+            alpha=self.config.ema.alpha,
+            global_step=self.global_step if self.config.ema.use_warmup else None,
+        )
+        ema_update(teacher=self.rgb_teacher, student=self.student, **ema_kwargs)
+        ema_update(teacher=self.ir_teacher,  student=self.student, **ema_kwargs)
 
-        log["domain"] = mid_level
+        log["domain"] = "mid"
         return log
 
-    def train_ir_step(self, phase: Phase = Phase.PHASE4_NEAR_IR_MIX) -> Dict:
+    def train_ir_step(self, phase: Phase = Phase.PHASE3_IR_FOCUS) -> Dict:
         """
         IR step — unsupervised on unlabeled IR data, ir_teacher pseudo-labels only.
 
@@ -524,7 +468,7 @@ class CurriculumDomainAdaptationTrainer:
         Execute one training iteration.
 
         1. Ask the scheduler which domain to train (rgb/mid/ir).
-        2. Dispatch to the corresponding step (uses adaptive threshold if set).
+        2. Dispatch to the corresponding step.
         3. Trigger PhaseEvaluator if set.
         4. Log if needed.
         5. Increment global_step.
@@ -540,8 +484,8 @@ class CurriculumDomainAdaptationTrainer:
 
         if step == "rgb":
             log = self.train_rgb_step(phase=phase)
-        elif step in ("mid_near_rgb", "mid_intermediate", "mid_near_ir"):
-            log = self.train_mid_step(phase=phase, mid_level=step)
+        elif step == "mid":
+            log = self.train_mid_step(phase=phase)
         elif step == "ir":
             log = self.train_ir_step(phase=phase)
         else:

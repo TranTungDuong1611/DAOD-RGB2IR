@@ -99,10 +99,6 @@ def compute_rgb_loss(
     teacher_images: if provided, teacher infers on this (weak aug);
                     student trains on images (strong aug).
                     If None, both use images.
-
-    Returns:
-        total_loss : scalar tensor with grad
-        log_dict   : float-valued metrics for logging
     """
     if config is None:
         config = LossConfig()
@@ -146,68 +142,51 @@ def compute_mid_loss(
     gt_targets: Optional[List[Dict[str, torch.Tensor]]] = None,
     config: Optional[LossConfig] = None,
     conf_thresh: ThreshType = 0.7,
-    teacher_source: str = "both",                          # "rgb" | "ir" | "both"
-    rgb_weight_override: Optional[float] = None,
-    ir_weight_override: Optional[float] = None,
     teacher_images: Optional[torch.Tensor] = None,         # teacher sees this (weak aug)
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
-    MID (intermediate domain) step:
-      - student receives SAGA-transformed images
-      - learns from rgb_teacher pseudo-labels (mid_rgb_weight)
-      - learns from ir_teacher  pseudo-labels (mid_ir_weight)
-      - optional: GT loss if gt_targets provided  (mid_gt_weight)
+    MID (intermediate domain) step — both teachers always active.
+
+    - rgb_teacher infers on weak aug → student trains on strong aug (mid_rgb_weight)
+    - ir_teacher  infers on weak aug → student trains on strong aug (mid_ir_weight)
+    - optional GT loss if gt_targets provided (mid_gt_weight)
 
     Both teacher forward passes run under no_grad.
     Student forward passes require grad.
-
-    Returns:
-        total_loss : scalar tensor with grad
-        log_dict   : float-valued metrics for logging
     """
     if config is None:
         config = LossConfig()
 
+    t_images = teacher_images if teacher_images is not None else mid_images
+
     components: List[torch.Tensor] = []
     log: Dict[str, float] = {}
 
-    rgb_w = rgb_weight_override if rgb_weight_override is not None else config.mid_rgb_weight
-    ir_w  = ir_weight_override  if ir_weight_override  is not None else config.mid_ir_weight
-
-    # Teacher infers on weak images; student trains on strong images
-    t_images = teacher_images if teacher_images is not None else mid_images
-
     # --- rgb_teacher pseudo-labels (weak) → student loss (strong) ---
-    if teacher_source in ("rgb", "both") and rgb_w > 0.0:
+    if config.mid_rgb_weight > 0.0:
         with torch.no_grad():
             rgb_preds = rgb_teacher(t_images)
         rgb_pseudo = filter_pseudo_labels(rgb_preds, conf_thresh)
-
-        loss_dict = student(mid_images, rgb_pseudo)
-        loss = _sum_loss_dict(loss_dict) * rgb_w
+        loss = _sum_loss_dict(student(mid_images, rgb_pseudo)) * config.mid_rgb_weight
         components.append(loss)
         log["mid_rgb_teacher_loss"] = loss.item()
 
     # --- ir_teacher pseudo-labels (weak) → student loss (strong) ---
-    if teacher_source in ("ir", "both") and ir_w > 0.0:
+    if config.mid_ir_weight > 0.0:
         with torch.no_grad():
             ir_preds = ir_teacher(t_images)
         ir_pseudo = filter_pseudo_labels(ir_preds, conf_thresh)
-
-        loss_dict = student(mid_images, ir_pseudo)
-        loss = _sum_loss_dict(loss_dict) * ir_w
+        loss = _sum_loss_dict(student(mid_images, ir_pseudo)) * config.mid_ir_weight
         components.append(loss)
         log["mid_ir_teacher_loss"] = loss.item()
 
-    # --- Optional GT loss (uses original RGB GT mapped to MID space) ---
+    # --- Optional GT loss ---
     if gt_targets is not None and config.mid_gt_weight > 0.0:
-        loss_dict = student(mid_images, gt_targets)
-        loss = _sum_loss_dict(loss_dict) * config.mid_gt_weight
+        loss = _sum_loss_dict(student(mid_images, gt_targets)) * config.mid_gt_weight
         components.append(loss)
         log["mid_gt_loss"] = loss.item()
 
     if not components:
-        # Safety: all weights are zero — return a zero-grad loss
         total_loss = mid_images.sum() * 0.0
     else:
         total_loss = sum(components)
@@ -234,10 +213,6 @@ def compute_ir_loss(
     teacher_images: if provided, teacher infers on this (weak aug);
                     student trains on ir_images (strong aug).
                     If None, both use ir_images.
-
-    Returns:
-        total_loss : scalar tensor with grad
-        log_dict   : float-valued metrics for logging
     """
     if config is None:
         config = LossConfig()

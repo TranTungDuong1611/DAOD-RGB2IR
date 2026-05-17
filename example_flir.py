@@ -42,9 +42,7 @@ from config import (
     CurriculumConfig,
     EMAConfig,
     LossConfig,
-    MidRoutingConfig,
     SAGAConfig,
-    SoftSAGAConfig,
     TeacherUpdateConfig,
     TrainingConfig,
 )
@@ -81,24 +79,7 @@ logger = logging.getLogger(__name__)
 def make_training_config(device: str) -> TrainingConfig:
     return TrainingConfig(
         ema=EMAConfig(alpha=0.9996, use_warmup=True),
-        saga=SAGAConfig(apply_prob=0.8),
-        soft_saga=SoftSAGAConfig(
-            alpha_near_rgb=0.70,
-            alpha_intermediate=0.50,
-            alpha_near_ir=0.25,
-        ),
-        mid_routing=MidRoutingConfig(
-            # Phase 2: mid_near_rgb — both teachers, EMA → rgb_teacher
-            near_rgb_teacher_source="both",  near_rgb_ema_target="rgb",
-            near_rgb_rgb_weight=0.4,         near_rgb_ir_weight=0.0,
-            # Phase 3: mid_intermediate — both teachers, EMA → ir_teacher (slow)
-            intermediate_teacher_source="both", intermediate_ema_target="ir",
-            intermediate_ema_alpha=0.9996,
-            intermediate_rgb_weight=0.1,     intermediate_ir_weight=0.4,
-            # Phase 4: mid_near_ir — both teachers, EMA → ir_teacher
-            near_ir_teacher_source="both",     near_ir_ema_target="ir",
-            near_ir_rgb_weight=0.1,          near_ir_ir_weight=0.4,
-        ),
+        saga=SAGAConfig(apply_prob=1.0),   # SAGA applied 100% in MID phase
         aug=AugConfig(
             hflip_prob=0.5,
             blur_prob=0.5,
@@ -110,12 +91,8 @@ def make_training_config(device: str) -> TrainingConfig:
         ),
         curriculum=CurriculumConfig(
             phase1_end=10_000,    # RGB warmup
-            phase2_end=13_000,    # RGB + mid_near_rgb
-            phase3_end=16_000,   # full mid_intermediate
-            phase4_end=20_000,   # mid_near_ir + IR
-            # Phase 5: full IR until total_iters
-            phase2_rgb_ratio=0.67,
-            phase4_mid_ratio=0.67,
+            phase2_end=20_000,    # MID (SAGA 100%, both teachers)
+            # Phase 3: IR focus until total_iters
         ),
         loss=LossConfig(
             rgb_gt_weight=1.0,
@@ -139,17 +116,13 @@ def make_adaptive_threshold() -> AdaptiveThresholdScheduler:
     return AdaptiveThresholdScheduler(AdaptiveThresholdConfig(
         rgb_teacher=TeacherThresholds(
             phase1={0: 0.70, 1: 0.70, 2: 0.65},
-            phase2={0: 0.70, 1: 0.70, 2: 0.65},
-            phase3={0: 0.70, 1: 0.70, 2: 0.65},
-            phase4={0: 0.70, 1: 0.75, 2: 0.65},
-            phase5={0: 0.70, 1: 0.80, 2: 0.65},
+            phase2={0: 0.65, 1: 0.70, 2: 0.60},
+            phase3={0: 0.60, 1: 0.70, 2: 0.55},
         ),
         ir_teacher=TeacherThresholds(
             phase1={0: 0.70, 1: 0.70, 2: 0.65},
-            phase2={0: 0.70, 1: 0.70, 2: 0.65},
-            phase3={0: 0.70, 1: 0.70, 2: 0.65},
-            phase4={0: 0.70, 1: 0.75, 2: 0.65},
-            phase5={0: 0.70, 1: 0.80, 2: 0.65},
+            phase2={0: 0.65, 1: 0.70, 2: 0.60},
+            phase3={0: 0.60, 1: 0.75, 2: 0.55},
         ),
     ))
 
@@ -308,10 +281,8 @@ def main(args):
         logger.info(f"Resuming from: {args.resume}")
         trainer.load_checkpoint(args.resume)
         # Reset optimizer LRs to base values so CosineAnnealingLR reads correct base_lrs.
-        # (Checkpoint may have saved LR=0 if the previous cosine cycle completed.)
         optimizer.param_groups[0]["lr"] = args.lr_backbone
         optimizer.param_groups[1]["lr"] = args.lr_head
-        # Step scheduler from scratch to get the correct cosine position at global_step.
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=args.total_iters, last_epoch=-1,
         )
@@ -362,7 +333,7 @@ def main(args):
     # --- Final eval + summary ---
     logger.info("\nFinal evaluation ...")
     phase_eval.evaluate(student, global_step=trainer.global_step,
-                        current_phase=Phase.PHASE5_IR_FOCUS,
+                        current_phase=Phase.PHASE3_IR_FOCUS,
                         trigger_reason="final")
     phase_eval.print_history()
 
@@ -380,7 +351,7 @@ def parse_args():
     p.add_argument("--data_root",   required=True,
                    help="Path to align/ directory (contains JPEGImages/, Annotations/, ImageSets/)")
     p.add_argument("--output_dir",  default="./output")
-    p.add_argument("--total_iters", type=int,   default=20_000)
+    p.add_argument("--total_iters", type=int,   default=25_000)
     p.add_argument("--batch_size",  type=int,   default=4)
     p.add_argument("--workers",     type=int,   default=4)
     p.add_argument("--lr_backbone", type=float, default=5e-5)
