@@ -84,7 +84,7 @@ class FCOSDetector(nn.Module):
         if self._harmony_enabled:
             if self.training and targets is not None:
                 return self._forward_train_harmony(image_list, targets)
-            if not self.training:
+            if not self.training or targets is None:
                 return self._forward_eval_harmony(image_list)
 
         return self.model(image_list, targets)
