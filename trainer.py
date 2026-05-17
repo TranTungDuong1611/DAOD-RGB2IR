@@ -135,7 +135,7 @@ class CurriculumDomainAdaptationTrainer:
         if from_phase is None:
             return  # initial call, no transition
 
-        if from_phase == Phase.PHASE1_RGB_WARMUP and to_phase == Phase.PHASE2_MID:
+        if from_phase == Phase.PHASE1_RGB_WARMUP and to_phase == Phase.PHASE2_RGB_MID:
             self._init_teachers_from_checkpoint(
                 "PHASE1_RGB_WARMUP", teachers=["rgb", "ir"],
                 fallback_msg="PHASE1→PHASE2: no best checkpoint, using current student",
@@ -369,15 +369,15 @@ class CurriculumDomainAdaptationTrainer:
         log["domain"] = "rgb"
         return log
 
-    def train_mid_step(self, phase: Phase = Phase.PHASE2_MID) -> Dict:
+    def train_mid_step(self, phase: Phase = Phase.PHASE2_RGB_MID) -> Dict:
         """
-        MID step — SAGA images (100%), both teachers infer, both teachers EMA updated.
+        MID step — SAGA images (100%), both teachers infer, only ir_teacher EMA updated.
 
         Teacher: weak aug (hflip only)  → stable pseudo-label generation
         Student: strong aug (hflip + photometric) → robust feature learning
 
         Loss:   L_rgb_teacher(MID)  +  L_ir_teacher(MID)  +  optional L_gt
-        Update: EMA(rgb_teacher ← student)  +  EMA(ir_teacher ← student)
+        Update: EMA(ir_teacher ← student)   [rgb_teacher NOT updated in MID step]
         """
         self.student.train()
         batch = self._next_mid()
@@ -410,12 +410,14 @@ class CurriculumDomainAdaptationTrainer:
         grad_norm = self._clip_and_step()
         log["grad_norm"] = grad_norm
 
-        ema_kwargs = dict(
+        # MID step: only ir_teacher is updated.
+        # rgb_teacher is updated exclusively in the RGB step (same phase).
+        ema_update(
+            teacher=self.ir_teacher,
+            student=self.student,
             alpha=self.config.ema.alpha,
             global_step=self.global_step if self.config.ema.use_warmup else None,
         )
-        ema_update(teacher=self.rgb_teacher, student=self.student, **ema_kwargs)
-        ema_update(teacher=self.ir_teacher,  student=self.student, **ema_kwargs)
 
         log["domain"] = "mid"
         return log

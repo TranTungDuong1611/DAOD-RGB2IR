@@ -49,12 +49,18 @@ class CurriculumConfig:
     """
     Phase boundaries (in global iterations).
 
-    Phase 1: [0,           phase1_end)  → RGB only            (supervised warmup)
-    Phase 2: [phase1_end,  phase2_end)  → MID SAGA 100%       (both teachers)
-    Phase 3: [phase2_end,  ∞)           → IR only              (IR focus)
+    Phase 1: [0,           phase1_end)  → RGB only             (supervised warmup)
+    Phase 2: [phase1_end,  phase2_end)  → RGB + MID alternating (rgb→rgb_teacher, mid→ir_teacher)
+    Phase 3: [phase2_end,  ∞)           → IR only               (IR focus)
+
+    phase2_rgb_ratio: fraction of Phase 2 steps that are RGB (rest = MID).
+      0.5  → equal split  (rgb, mid, rgb, mid, ...)
+      0.67 → more RGB     (rgb, rgb, mid, ...)
     """
     phase1_end: int = 3_000
     phase2_end: int = 17_000
+
+    phase2_rgb_ratio: float = 0.5
 
 
 @dataclass

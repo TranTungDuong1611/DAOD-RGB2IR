@@ -41,7 +41,7 @@ class TeacherThresholds:
     def get(self, phase: Phase) -> ThreshType:
         mapping = {
             Phase.PHASE1_RGB_WARMUP: self.phase1,
-            Phase.PHASE2_MID:        self.phase2,
+            Phase.PHASE2_RGB_MID:    self.phase2,
             Phase.PHASE3_IR_FOCUS:   self.phase3,
         }
         return mapping.get(phase, 0.7)
