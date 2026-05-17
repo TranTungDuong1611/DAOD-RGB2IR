@@ -158,9 +158,17 @@ def filter_pseudo_labels_with_harmony(
             continue
 
         # ── Step 2: localization quality u_i ─────────────────────────────
-        gt_boxes = gt_targets[idx]["boxes"] if gt_targets is not None else None
-        u = compute_localization_quality_u(boxes_f, scores_f, gt_boxes=gt_boxes)
-        h = compute_harmony_score(scores_f, u, beta=harmony_cfg.beta)
+        gt_boxes   = gt_targets[idx]["boxes"] if gt_targets is not None else None
+        pre_nms    = pred.get("pre_nms_boxes", None)
+        u = compute_localization_quality_u(
+            boxes_f, scores_f, gt_boxes=gt_boxes, pre_nms_boxes=pre_nms
+        )
+        h = compute_harmony_score(
+            scores_f, u,
+            alpha=harmony_cfg.alpha,
+            beta=harmony_cfg.beta,
+            reg_alpha=harmony_cfg.reg_alpha,
+        )
 
         all_h.append(h);  all_p.append(scores_f.float());  all_u.append(u)
 
@@ -254,22 +262,28 @@ def _box_iou_safe(boxes_a: torch.Tensor, boxes_b: torch.Tensor) -> torch.Tensor:
 
 
 def compute_localization_quality_u(
-    boxes: torch.Tensor,                          # [N, 4] post-NMS teacher boxes
-    scores: torch.Tensor,                         # [N]   teacher confidence
-    gt_boxes: Optional[torch.Tensor] = None,      # [M, 4] GT boxes, if available
+    boxes: torch.Tensor,                           # [N, 4] post-NMS teacher boxes
+    scores: torch.Tensor,                          # [N]   teacher confidence
+    gt_boxes: Optional[torch.Tensor] = None,       # [M, 4] GT boxes, if available
+    pre_nms_boxes: Optional[torch.Tensor] = None,  # [K, 4] pre-NMS boxes (FCOS only)
 ) -> torch.Tensor:
     """
     Localization quality proxy u_i (Harmonious Teacher, Eq. 5 & 9).
 
-    Supervised path  (gt_boxes provided):
+    Supervised path (gt_boxes provided — priority 1):
         u_i = max_j IoU(pseudo_box_i, gt_box_j)
-        Exact IoU against annotation — reflects true localization quality.
+        Exact IoU against annotation.
 
-    Unsupervised path (gt_boxes=None, paper Eq. 9):
-        u_i = max_{j≠i} IoU(pseudo_box_i, pseudo_box_j)
-        A predicted box that overlaps with other predicted boxes is more
-        likely to be on a real object than an isolated spurious detection.
-        Fallback: single-box image → u_i = p_i (confidence).
+    FCOS pre-NMS path (pre_nms_boxes provided — priority 2):
+        u_i = second-max IoU(post_nms_box_i, pre_nms_boxes)
+        post-NMS box IS one of the pre-NMS boxes (IoU≈1.0 with self),
+        so second-max = max overlap with other dense pre-NMS predictions.
+        A post-NMS box surrounded by many pre-NMS predictions → real object → high u_i.
+        This is a faithful Eq.9 adaptation using FCOS dense predictions.
+
+    Post-NMS fallback (Faster R-CNN, priority 3):
+        u_i = max_{j≠i} IoU(box_i, box_j)
+        Limited because NMS already removed overlapping boxes.
 
     Returns u: Tensor[N] in [0, 1], float32, detached.
     """
@@ -278,37 +292,64 @@ def compute_localization_quality_u(
         return boxes.new_zeros(0)
 
     if gt_boxes is not None and gt_boxes.numel() > 0:
-        # Supervised: exact IoU against GT
+        # Priority 1: supervised — exact IoU against GT
         ious = _box_iou_safe(boxes, gt_boxes.to(boxes.device))  # [N, M]
         u = ious.max(dim=1).values                               # [N]
+
+    elif pre_nms_boxes is not None and pre_nms_boxes.numel() > 0:
+        # Priority 2: FCOS pre-NMS Eq.9
+        # Each post-NMS box i is one of the pre-NMS boxes (same decoded coordinates).
+        # IoU matrix row i: max ≈ 1.0 (self-match), second-max = overlap with peers.
+        pnms = pre_nms_boxes.to(boxes.device)  # [K, 4]
+        ious = _box_iou_safe(boxes, pnms)       # [N, K]
+        k = pnms.shape[0]
+        if k >= 2:
+            top2 = ious.topk(2, dim=1).values   # [N, 2]
+            u = top2[:, 1]                       # second-highest = max with non-self
+        else:
+            u = scores.float().clamp(0.0, 1.0)
+
     elif N == 1:
-        # Single pseudo-box, no peers to compare against
+        # Single box, no peers
         u = scores.float().clamp(0.0, 1.0)
+
     else:
-        # Unsupervised heuristic (paper Eq. 9): max IoU with any other box
-        ious = _box_iou_safe(boxes, boxes)   # [N, N]
-        ious.fill_diagonal_(0.0)             # exclude self
-        u = ious.max(dim=1).values           # [N]
+        # Priority 3: post-NMS fallback (Faster R-CNN)
+        ious = _box_iou_safe(boxes, boxes)
+        ious.fill_diagonal_(0.0)
+        u = ious.max(dim=1).values
 
     return u.float().clamp(0.0, 1.0).detach()
 
 
 def compute_harmony_score(
-    scores: torch.Tensor,  # p_i [N]
-    u: torch.Tensor,       # u_i [N]
-    beta: float = 0.5,
+    scores: torch.Tensor,                   # p_i [N]
+    u: torch.Tensor,                        # u_i [N]
+    alpha: float = 0.5,                     # exponent for p
+    beta: float = 0.5,                      # exponent for u
+    reg_alpha: Optional[float] = 1.0,       # exp regularisation (HT: 1.0)
 ) -> torch.Tensor:
     """
-    h_i = p_i^beta * u_i^(1-beta)   (Harmonious Teacher, Eq. 5)
+    Harmonious Teacher loss weight (Eq. 5 + loss formulation).
 
-    beta=1.0 → h=p (confidence only)
-    beta=0.0 → h=u (localization quality only)
-    beta=0.5 → geometric mean sqrt(p * u)
+    Step 1 — harmony score:
+        h_i = p_i^alpha * u_i^beta          (HT Eq. 5, alpha=beta=0.5)
+
+    Step 2 — loss weight:
+        w_i = exp(-(1 - h_i) / reg_alpha)   (HT: reg_alpha=1.0)
+             ∈ [exp(-1/reg_alpha), 1.0]  — never zero, unlike direct h_i.
+
+    When reg_alpha=None: w_i = h_i  (direct, backward-compatible with original impl).
 
     Detached — no gradient flows through teacher outputs.
     """
-    h = scores.float().pow(beta) * u.pow(1.0 - beta)
-    return h.clamp(0.0, 1.0).detach()
+    h = scores.float().pow(alpha) * u.pow(beta)
+    h = h.clamp(0.0, 1.0)
+    if reg_alpha is not None:
+        w = torch.exp(-(1.0 - h) / reg_alpha)
+    else:
+        w = h
+    return w.detach()
 
 
 # ---------------------------------------------------------------------------

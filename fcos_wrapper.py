@@ -55,18 +55,24 @@ class FCOSDetector(nn.Module):
       targets : List[Dict] with "boxes" [N,4] and "labels" [N]
 
     Internally converts to List[Tensor] expected by torchvision.
+
+    Harmony support (call enable_harmony() to activate, matching HT paper):
+      Eval  mode: runs inference twice — once normally (post-NMS pseudo-labels),
+                  once with nms_thresh=1.0 (dense pre-NMS predictions for Eq.9).
+                  "pre_nms_boxes" key is added to each output dict so that
+                  compute_localization_quality_u() can compute meaningful u_i
+                  using dense overlapping FCOS predictions (as in the HT paper).
+      Train mode: strips "harmony_weights" from targets before passing to FCOS,
+                  then scales all loss components by the batch-mean harmony weight.
+                  (Batch-mean is an image-level approximation of HT's per-location
+                  weighting, which requires access to FCOS assignment internals.)
     """
 
     def __init__(self, fcos_model: FCOS, ir_to_rgb: bool = True) -> None:
-        """
-        Args:
-            fcos_model : a configured torchvision FCOS model
-            ir_to_rgb  : if True, 1-channel images are replicated to 3 channels
-                         before forwarding (needed when IR is stored as grayscale)
-        """
         super().__init__()
-        self.model = fcos_model
+        self.model    = fcos_model
         self.ir_to_rgb = ir_to_rgb
+        self._harmony_enabled: bool = False
 
     def forward(
         self,
@@ -74,7 +80,97 @@ class FCOSDetector(nn.Module):
         targets: Optional[List[Dict[str, torch.Tensor]]] = None,
     ) -> Union[Dict[str, torch.Tensor], List[Dict[str, torch.Tensor]]]:
         image_list = self._to_image_list(images)
+
+        if self._harmony_enabled:
+            if self.training and targets is not None:
+                return self._forward_train_harmony(image_list, targets)
+            if not self.training:
+                return self._forward_eval_harmony(image_list)
+
         return self.model(image_list, targets)
+
+    # ------------------------------------------------------------------
+    # Harmony helpers
+    # ------------------------------------------------------------------
+
+    def _forward_train_harmony(
+        self,
+        image_list: List[torch.Tensor],
+        targets: List[Dict[str, torch.Tensor]],
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Strip "harmony_weights" from targets (unknown key crashes FCOS), run
+        the standard FCOS loss, then scale every component by the batch-mean
+        harmony weight.
+
+        GT targets never carry "harmony_weights" → standard loss, no scaling.
+        Pseudo targets carry "harmony_weights" → scaled loss.
+        """
+        harmony_weights: List[Optional[torch.Tensor]] = []
+        clean_targets:   List[Dict[str, torch.Tensor]] = []
+        for t in targets:
+            hw = t.get("harmony_weights", None)
+            harmony_weights.append(hw)
+            clean_targets.append({k: v for k, v in t.items() if k != "harmony_weights"})
+
+        loss_dict: Dict[str, torch.Tensor] = self.model(image_list, clean_targets)
+
+        valid_hw = [hw for hw in harmony_weights if hw is not None and hw.numel() > 0]
+        if valid_hw:
+            mean_h = torch.cat(valid_hw).mean()
+            loss_dict = {k: v * mean_h for k, v in loss_dict.items()}
+
+        return loss_dict
+
+    def _forward_eval_harmony(
+        self,
+        image_list: List[torch.Tensor],
+    ) -> List[Dict[str, torch.Tensor]]:
+        """
+        Eval forward: post-NMS detections + pre-NMS boxes for Eq.9.
+
+        Runs FCOS twice:
+          1. Normal inference  (nms_thresh=0.6) → post-NMS pseudo-labels.
+          2. NMS suppressed    (nms_thresh=1.0) → all decoded boxes (pre-NMS).
+
+        "pre_nms_boxes" attached to each output dict for use in
+        compute_localization_quality_u().  The second pass is teacher-only
+        (eval+no_grad) so the overhead is one extra forward without backward.
+        """
+        post_nms: List[Dict[str, torch.Tensor]] = self.model(image_list)
+        pre_nms:  List[Dict[str, torch.Tensor]] = self._get_pre_nms_boxes(image_list)
+        for d, pnms in zip(post_nms, pre_nms):
+            d["pre_nms_boxes"]  = pnms["boxes"].detach()
+            d["pre_nms_scores"] = pnms["scores"].detach()
+        return post_nms
+
+    def _get_pre_nms_boxes(
+        self,
+        image_list: List[torch.Tensor],
+    ) -> List[Dict[str, torch.Tensor]]:
+        """Run FCOS with NMS disabled → all decoded boxes per image."""
+        orig_nms = self.model.nms_thresh
+        self.model.nms_thresh = 1.0
+        try:
+            result: List[Dict[str, torch.Tensor]] = self.model(image_list)
+        finally:
+            self.model.nms_thresh = orig_nms
+        return result
+
+    def enable_harmony(self) -> "FCOSDetector":
+        """
+        Activate harmony mode (call on student AND both teachers).
+
+        Student : scales pseudo-label loss by batch-mean harmony weight.
+        Teachers: return pre-NMS boxes alongside post-NMS pseudo-labels so
+                  that compute_localization_quality_u() can use dense FCOS
+                  predictions for Eq.9 — matching the Harmonious Teacher paper.
+
+        Returns self for chaining:
+            student = FCOSDetector.from_scratch(...).enable_harmony()
+        """
+        self._harmony_enabled = True
+        return self
 
     # ------------------------------------------------------------------
     # Helpers

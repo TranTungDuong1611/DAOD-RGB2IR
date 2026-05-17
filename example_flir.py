@@ -127,7 +127,9 @@ def make_training_config(device: str) -> TrainingConfig:
             ir_ir_teacher_weight=1.0,
             harmony=HarmonyConfig(
                 use_harmony_weight=True,
-                beta=0.5,               # h = sqrt(p * u)
+                alpha=0.5,              # HT default: p^0.5
+                beta=0.5,               # HT default: u^0.5
+                reg_alpha=1.0,          # HT UN_REGULAR_ALPHA: exp(-(1-h)/1.0)
                 min_threshold=None,     # reweight only, no hard filter
                 neg_proposal_weight=0.0,
                 use_rpn_pseudo=True,
@@ -228,6 +230,11 @@ def main(args):
         student.enable_harmony(neg_proposal_weight=0.0)
     else:
         student, rgb_teacher, ir_teacher = build_fcos_trio(**_trio_kwargs)
+        # Enable on student (scales pseudo loss by batch-mean h) AND teachers
+        # (teachers return pre-NMS boxes for faithful Eq.9 u_i computation).
+        student.enable_harmony()
+        rgb_teacher.enable_harmony()
+        ir_teacher.enable_harmony()
     copy_student_to_teacher(rgb_teacher, student)
     copy_student_to_teacher(ir_teacher,  student)
 
