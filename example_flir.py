@@ -130,7 +130,7 @@ def make_training_config(device: str) -> TrainingConfig:
                 alpha=0.5,              # HT default: p^0.5
                 beta=0.5,               # HT default: u^0.5
                 reg_alpha=1.0,          # HT UN_REGULAR_ALPHA: exp(-(1-h)/1.0)
-                min_threshold=None,     # reweight only, no hard filter
+                min_threshold=0.5,     # reweight only, no hard filter
                 neg_proposal_weight=0.0,
                 use_rpn_pseudo=True,
                 rpn_pseudo_factor=0.5,

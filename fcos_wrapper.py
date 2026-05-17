@@ -137,8 +137,15 @@ class FCOSDetector(nn.Module):
         compute_localization_quality_u().  The second pass is teacher-only
         (eval+no_grad) so the overhead is one extra forward without backward.
         """
-        post_nms: List[Dict[str, torch.Tensor]] = self.model(image_list)
-        pre_nms:  List[Dict[str, torch.Tensor]] = self._get_pre_nms_boxes(image_list)
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            with torch.no_grad():
+                post_nms: List[Dict[str, torch.Tensor]] = self.model(image_list)
+                pre_nms:  List[Dict[str, torch.Tensor]] = self._get_pre_nms_boxes(image_list)
+        finally:
+            if was_training:
+                self.model.train()
         for d, pnms in zip(post_nms, pre_nms):
             d["pre_nms_boxes"]  = pnms["boxes"].detach()
             d["pre_nms_scores"] = pnms["scores"].detach()
