@@ -162,7 +162,7 @@ class AdaptiveThresholdScheduler:
         ramp = self.config.phase3_ir_ramp
         if ramp.enabled:
             lines.append(
-                f"  Phase3 ir ramp: {ramp.start:.2f} → {ramp.end:.2f} "
+                f"  Phase3 ir ramp: {_fmt(ramp.start)} → {_fmt(ramp.end)} "
                 f"over {ramp.ramp_steps} steps"
             )
         return "\n".join(lines)
