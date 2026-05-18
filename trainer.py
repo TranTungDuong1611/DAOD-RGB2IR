@@ -228,6 +228,7 @@ class CurriculumDomainAdaptationTrainer:
         self,
         images: torch.Tensor,
         targets: Optional[List[Dict]] = None,
+        hflip_prob: float = 0.5,
     ):
         """
         Weak aug: stochastic horizontal flip only.
@@ -235,11 +236,10 @@ class CurriculumDomainAdaptationTrainer:
         Returns:
             aug_images  : [B, 3, H, W]
             aug_targets : boxes updated if flipped
-            did_flip    : bool — whether flip was applied (shared with student)
+            did_flip    : bool
         """
-        aug = self.config.aug
         W = images.shape[-1]
-        if random.random() < aug.hflip_prob:
+        if random.random() < hflip_prob:
             images = torch.flip(images, dims=[-1])
             if targets is not None:
                 new_targets = []
@@ -256,21 +256,19 @@ class CurriculumDomainAdaptationTrainer:
             return images, targets, True
         return images, targets, False
 
-    def _photometric_aug(self, images: torch.Tensor) -> torch.Tensor:
-        """Photometric aug: blur + brightness/contrast + color jitter. No geometric change."""
+    def _rgb_photometric_aug(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Strong photometric aug for RGB / MID (SAGA) images.
+        Gaussian blur → Color jitter → Random erasing.
+        """
         if not _HAS_TF:
             return images
-        aug = self.config.aug
+        aug = self.config.rgb_aug
+
         if random.random() < aug.blur_prob:
             sigma = random.uniform(0.1, aug.blur_sigma_max)
             images = TF.gaussian_blur(images, kernel_size=[3, 3], sigma=sigma)
-        if random.random() < aug.brightness_prob:
-            factor = 1.0 + random.uniform(-aug.brightness_mag, aug.brightness_mag)
-            images = torch.clamp(images * factor, 0.0, 1.0)
-        if random.random() < aug.contrast_prob:
-            mean = images.mean(dim=[-1, -2], keepdim=True)
-            factor = 1.0 + random.uniform(-aug.contrast_mag, aug.contrast_mag)
-            images = torch.clamp((images - mean) * factor + mean, 0.0, 1.0)
+
         if random.random() < aug.color_jitter_prob:
             jitter = T.ColorJitter(
                 brightness=aug.cj_brightness,
@@ -279,23 +277,43 @@ class CurriculumDomainAdaptationTrainer:
                 hue=aug.cj_hue,
             )
             images = torch.stack([jitter(img) for img in images])
+
+        if random.random() < aug.random_erasing_prob:
+            eraser = T.RandomErasing(
+                p=1.0,
+                scale=(aug.random_erasing_scale_min, aug.random_erasing_scale_max),
+                ratio=(aug.random_erasing_ratio_min, aug.random_erasing_ratio_max),
+                value=0,
+            )
+            images = torch.stack([eraser(img) for img in images])
+
         return images
 
-    def _student_aug(
-        self,
-        images: torch.Tensor,
-        targets: Optional[List[Dict]] = None,
-    ):
+    def _ir_photometric_aug(self, images: torch.Tensor) -> torch.Tensor:
         """
-        Strong aug: hflip (stochastic) + photometric (blur/brightness/contrast).
+        Strong photometric aug for IR (thermal) images.
+        Intensity shift → Contrast jitter → Gamma correction → Gaussian noise.
+        """
+        aug = self.config.ir_aug
 
-        Returns:
-            aug_images  : [B, 3, H, W]
-            aug_targets : boxes updated if flipped
-        """
-        images, targets, _ = self._weak_aug(images, targets)
-        images = self._photometric_aug(images)
-        return images, targets
+        if random.random() < aug.intensity_shift_prob:
+            shift = random.uniform(-aug.intensity_shift_mag, aug.intensity_shift_mag)
+            images = torch.clamp(images + shift, 0.0, 1.0)
+
+        if random.random() < aug.contrast_jitter_prob:
+            factor = 1.0 + random.uniform(-aug.contrast_jitter_mag, aug.contrast_jitter_mag)
+            mean = images.mean(dim=[-1, -2], keepdim=True)
+            images = torch.clamp((images - mean) * factor + mean, 0.0, 1.0)
+
+        if random.random() < aug.gamma_prob:
+            gamma = random.uniform(aug.gamma_min, aug.gamma_max)
+            images = torch.clamp(images, 1e-6, 1.0).pow(gamma)
+
+        if random.random() < aug.gaussian_noise_prob:
+            noise = torch.randn_like(images) * aug.gaussian_noise_std
+            images = torch.clamp(images + noise, 0.0, 1.0)
+
+        return images
 
     # ------------------------------------------------------------------
     # Gradient clip + optimizer step
@@ -334,14 +352,15 @@ class CurriculumDomainAdaptationTrainer:
             else None
         )
 
+        hflip = self.config.rgb_aug.hflip_prob
         if phase == Phase.PHASE1_RGB_WARMUP:
             # Phase 1: geometric only, no teacher
-            student_images, student_targets, _ = self._weak_aug(batch.images, batch.targets)
+            student_images, student_targets, _ = self._weak_aug(batch.images, batch.targets, hflip)
             teacher_images = None
         else:
-            # Phase 2+: teacher weak (geometric only), student strong (geometric + photometric)
-            teacher_images, student_targets, _ = self._weak_aug(batch.images, batch.targets)
-            student_images = self._photometric_aug(teacher_images.clone())
+            # Phase 2+: teacher weak (geometric only), student strong (geometric + RGB photometric)
+            teacher_images, student_targets, _ = self._weak_aug(batch.images, batch.targets, hflip)
+            student_images = self._rgb_photometric_aug(teacher_images.clone())
 
         loss, log = compute_rgb_loss(
             student=self.student,
@@ -391,9 +410,9 @@ class CurriculumDomainAdaptationTrainer:
         )
 
         # Teacher: weak aug (hflip only) — spatial structure preserved for box alignment
-        # Student: same flipped base + photometric — strong perturbation
-        weak_images, _, _ = self._weak_aug(batch.images, None)
-        strong_images = self._photometric_aug(weak_images.clone())
+        # Student: same flipped base + RGB photometric (SAGA images are RGB-derived)
+        weak_images, _, _ = self._weak_aug(batch.images, None, self.config.rgb_aug.hflip_prob)
+        strong_images = self._rgb_photometric_aug(weak_images.clone())
 
         loss, log = compute_mid_loss(
             student=self.student,
@@ -434,9 +453,9 @@ class CurriculumDomainAdaptationTrainer:
 
         self.optimizer.zero_grad()
 
-        # Teacher sees weak (hflip only), student sees strong (hflip + photometric)
-        weak_images, _, _ = self._weak_aug(batch.images, None)
-        strong_images = self._photometric_aug(weak_images.clone())
+        # Teacher sees weak (hflip only), student sees strong (hflip + IR photometric)
+        weak_images, _, _ = self._weak_aug(batch.images, None, self.config.ir_aug.hflip_prob)
+        strong_images = self._ir_photometric_aug(weak_images.clone())
 
         loss, log = compute_ir_loss(
             student=self.student,

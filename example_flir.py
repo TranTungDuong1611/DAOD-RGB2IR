@@ -38,10 +38,11 @@ from torch.utils.data import DataLoader
 
 from adaptive_threshold import AdaptiveThresholdConfig, AdaptiveThresholdScheduler, TeacherThresholds
 from config import (
-    AugConfig,
     CurriculumConfig,
     EMAConfig,
+    IRAugConfig,
     LossConfig,
+    RGBAugConfig,
     SAGAConfig,
     TeacherUpdateConfig,
     TrainingConfig,
@@ -80,14 +81,30 @@ def make_training_config(device: str) -> TrainingConfig:
     return TrainingConfig(
         ema=EMAConfig(alpha=0.9996, use_warmup=True),
         saga=SAGAConfig(apply_prob=1.0),   # SAGA applied 100% in MID phase
-        aug=AugConfig(
+        rgb_aug=RGBAugConfig(
             hflip_prob=0.5,
             blur_prob=0.5,
             blur_sigma_max=1.0,
-            brightness_prob=0.3,
-            brightness_mag=0.2,
-            contrast_prob=0.3,
-            contrast_mag=0.2,
+            color_jitter_prob=0.5,
+            cj_brightness=0.2,
+            cj_contrast=0.2,
+            cj_saturation=0.3,
+            cj_hue=0.05,
+            random_erasing_prob=0.3,
+            random_erasing_scale_min=0.02,
+            random_erasing_scale_max=0.10,
+        ),
+        ir_aug=IRAugConfig(
+            hflip_prob=0.5,
+            intensity_shift_prob=0.5,
+            intensity_shift_mag=0.1,
+            contrast_jitter_prob=0.5,
+            contrast_jitter_mag=0.2,
+            gamma_prob=0.3,
+            gamma_min=0.7,
+            gamma_max=1.3,
+            gaussian_noise_prob=0.3,
+            gaussian_noise_std=0.02,
         ),
         curriculum=CurriculumConfig(
             phase1_end=10_000,    # RGB warmup

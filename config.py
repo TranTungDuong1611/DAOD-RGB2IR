@@ -25,23 +25,52 @@ class SAGAConfig:
 
 
 @dataclass
-class AugConfig:
-    """Augmentation config for student (applied on top of DataLoader transforms)."""
-    # Geometric
-    hflip_prob:              float = 0.5   # horizontal flip
-    # Photometric
-    blur_prob:               float = 0.5
-    blur_sigma_max:          float = 1.0
-    brightness_prob:         float = 0.3
-    brightness_mag:          float = 0.2   # ±20% brightness
-    contrast_prob:           float = 0.3
-    contrast_mag:            float = 0.2   # ±20% contrast
-    # Color jitter (brightness + contrast + saturation + hue in one transform)
-    color_jitter_prob:       float = 0.5
-    cj_brightness:           float = 0.2
-    cj_contrast:             float = 0.2
-    cj_saturation:           float = 0.3
-    cj_hue:                  float = 0.05
+class RGBAugConfig:
+    """Strong augmentation for RGB and MID (SAGA) images — student only."""
+    # Geometric (shared with weak aug)
+    hflip_prob:                  float = 0.5
+
+    # Gaussian blur
+    blur_prob:                   float = 0.5
+    blur_sigma_max:              float = 1.0
+
+    # Color jitter (brightness + contrast + saturation + hue)
+    color_jitter_prob:           float = 0.5
+    cj_brightness:               float = 0.2
+    cj_contrast:                 float = 0.2
+    cj_saturation:               float = 0.3
+    cj_hue:                      float = 0.05
+
+    # Random erasing (occlusion simulation)
+    random_erasing_prob:         float = 0.3
+    random_erasing_scale_min:    float = 0.02
+    random_erasing_scale_max:    float = 0.10
+    random_erasing_ratio_min:    float = 0.3
+    random_erasing_ratio_max:    float = 3.3
+
+
+@dataclass
+class IRAugConfig:
+    """Strong augmentation for IR (thermal) images — student only."""
+    # Geometric (shared with weak aug)
+    hflip_prob:                  float = 0.5
+
+    # Intensity shift (simulate sensor calibration offset)
+    intensity_shift_prob:        float = 0.5
+    intensity_shift_mag:         float = 0.1   # ±10% additive shift
+
+    # Contrast jitter (scale around mean)
+    contrast_jitter_prob:        float = 0.5
+    contrast_jitter_mag:         float = 0.2   # ±20% contrast
+
+    # Gamma correction (non-linear brightness curve)
+    gamma_prob:                  float = 0.3
+    gamma_min:                   float = 0.7
+    gamma_max:                   float = 1.3
+
+    # Gaussian noise (sensor noise simulation)
+    gaussian_noise_prob:         float = 0.3
+    gaussian_noise_std:          float = 0.02
 
 
 @dataclass
@@ -100,7 +129,8 @@ class TrainingConfig:
     """Master config for CurriculumDomainAdaptationTrainer."""
     ema: EMAConfig = field(default_factory=EMAConfig)
     saga: SAGAConfig = field(default_factory=SAGAConfig)
-    aug: AugConfig = field(default_factory=AugConfig)
+    rgb_aug: RGBAugConfig = field(default_factory=RGBAugConfig)
+    ir_aug: IRAugConfig = field(default_factory=IRAugConfig)
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     teacher_update: TeacherUpdateConfig = field(default_factory=TeacherUpdateConfig)
