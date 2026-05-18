@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch
 from torch.utils.data import DataLoader
 
-from adaptive_threshold import AdaptiveThresholdConfig, AdaptiveThresholdScheduler, TeacherThresholds
+from adaptive_threshold import AdaptiveThresholdConfig, AdaptiveThresholdScheduler, TeacherThresholds, ThreshRampConfig
 from config import (
     CurriculumConfig,
     EMAConfig,
@@ -77,12 +77,16 @@ logger = logging.getLogger(__name__)
 # Configs
 # ---------------------------------------------------------------------------
 
-def make_training_config(device: str) -> TrainingConfig:
+def make_training_config(device: str, target_h: int = 512, target_w: int = 640) -> TrainingConfig:
     return TrainingConfig(
         ema=EMAConfig(alpha=0.9996, use_warmup=True),
         saga=SAGAConfig(apply_prob=1.0),   # SAGA applied 100% in MID phase
         rgb_aug=RGBAugConfig(
             hflip_prob=0.5,
+            multiscale_min=0.5,
+            multiscale_max=1.5,
+            multiscale_target_h=target_h,
+            multiscale_target_w=target_w,
             blur_prob=0.5,
             blur_sigma_max=1.0,
             color_jitter_prob=0.5,
@@ -96,6 +100,10 @@ def make_training_config(device: str) -> TrainingConfig:
         ),
         ir_aug=IRAugConfig(
             hflip_prob=0.5,
+            multiscale_min=0.5,
+            multiscale_max=1.5,
+            multiscale_target_h=target_h,
+            multiscale_target_w=target_w,
             intensity_shift_prob=0.5,
             intensity_shift_mag=0.1,
             contrast_jitter_prob=0.5,
@@ -133,13 +141,20 @@ def make_adaptive_threshold() -> AdaptiveThresholdScheduler:
     return AdaptiveThresholdScheduler(AdaptiveThresholdConfig(
         rgb_teacher=TeacherThresholds(
             phase1={0: 0.70, 1: 0.70, 2: 0.65},
-            phase2={0: 0.65, 1: 0.70, 2: 0.60},
-            phase3={0: 0.60, 1: 0.70, 2: 0.55},
+            phase2={0: 0.70, 1: 0.75, 2: 0.65},
+            phase3={0: 0.70, 1: 0.80, 2: 0.65},
         ),
         ir_teacher=TeacherThresholds(
             phase1={0: 0.70, 1: 0.70, 2: 0.65},
-            phase2={0: 0.65, 1: 0.70, 2: 0.60},
-            phase3={0: 0.60, 1: 0.75, 2: 0.55},
+            phase2={0: 0.70, 1: 0.75, 2: 0.65},
+            phase3={0: 0.70, 1: 0.80, 2: 0.65},   # base (overridden by ramp below)
+        ),
+        phase3_ir_ramp=ThreshRampConfig(
+            enabled=True,
+            # per-class: person(0) / car(1) / bicycle(2)
+            start={0: 0.70, 1: 0.80, 2: 0.65},  # threshold lúc vào Phase 3
+            end  ={0: 0.80, 1: 0.90, 2: 0.75},  # threshold tối đa sau ramp_steps
+            ramp_steps=10_000,
         ),
     ))
 
@@ -251,7 +266,7 @@ def main(args):
     )
 
     # --- Trainer ---
-    config = make_training_config(device_str)
+    config = make_training_config(device_str, target_h=args.min_size, target_w=args.max_size)
     trainer = CurriculumDomainAdaptationTrainer(
         student=student,
         rgb_teacher=rgb_teacher,

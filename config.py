@@ -26,22 +26,26 @@ class SAGAConfig:
 
 @dataclass
 class RGBAugConfig:
-    """Strong augmentation for RGB and MID (SAGA) images — student only."""
-    # Geometric (shared with weak aug)
+    """Augmentation for RGB and MID (SAGA) images."""
+    # --- Geometric (weak aug — applied to BOTH teacher and student) ---
     hflip_prob:                  float = 0.5
 
-    # Gaussian blur
+    # Multi-scale: resize to [scale_min, scale_max] × original, then crop/pad to fixed size
+    multiscale_min:              float = 0.5
+    multiscale_max:              float = 1.5
+    multiscale_target_h:         int   = 512
+    multiscale_target_w:         int   = 640
+
+    # --- Photometric (strong aug — applied to student only) ---
     blur_prob:                   float = 0.5
     blur_sigma_max:              float = 1.0
 
-    # Color jitter (brightness + contrast + saturation + hue)
     color_jitter_prob:           float = 0.5
     cj_brightness:               float = 0.2
     cj_contrast:                 float = 0.2
     cj_saturation:               float = 0.3
     cj_hue:                      float = 0.05
 
-    # Random erasing (occlusion simulation)
     random_erasing_prob:         float = 0.3
     random_erasing_scale_min:    float = 0.02
     random_erasing_scale_max:    float = 0.10
@@ -51,24 +55,27 @@ class RGBAugConfig:
 
 @dataclass
 class IRAugConfig:
-    """Strong augmentation for IR (thermal) images — student only."""
-    # Geometric (shared with weak aug)
+    """Augmentation for IR (thermal) images."""
+    # --- Geometric (weak aug — applied to BOTH teacher and student) ---
     hflip_prob:                  float = 0.5
 
-    # Intensity shift (simulate sensor calibration offset)
+    # Multi-scale
+    multiscale_min:              float = 0.5
+    multiscale_max:              float = 1.5
+    multiscale_target_h:         int   = 512
+    multiscale_target_w:         int   = 640
+
+    # --- Photometric (strong aug — applied to student only) ---
     intensity_shift_prob:        float = 0.5
-    intensity_shift_mag:         float = 0.1   # ±10% additive shift
+    intensity_shift_mag:         float = 0.1
 
-    # Contrast jitter (scale around mean)
     contrast_jitter_prob:        float = 0.5
-    contrast_jitter_mag:         float = 0.2   # ±20% contrast
+    contrast_jitter_mag:         float = 0.2
 
-    # Gamma correction (non-linear brightness curve)
     gamma_prob:                  float = 0.3
     gamma_min:                   float = 0.7
     gamma_max:                   float = 1.3
 
-    # Gaussian noise (sensor noise simulation)
     gaussian_noise_prob:         float = 0.3
     gaussian_noise_std:          float = 0.02
 

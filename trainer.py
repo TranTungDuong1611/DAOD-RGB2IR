@@ -173,19 +173,23 @@ class CurriculumDomainAdaptationTrainer:
         """
         Return current confidence threshold for pseudo-label filtering.
 
-        Returns float (global) or Dict[int, float] (class-wise) depending on
-        what AdaptiveThresholdScheduler is configured with.
-
-        If threshold_scheduler is not provided, falls back to
-        config.pseudo_label_conf_thresh (fixed global float).
+        For Phase 3 ir_teacher, passes steps_into_phase to enable linear ramp-up.
+        Falls back to config.pseudo_label_conf_thresh if no scheduler is set.
         """
         if self.threshold_scheduler is None:
             return self.config.pseudo_label_conf_thresh
+
+        steps_into_phase = (
+            max(0, self.global_step - self.config.curriculum.phase2_end)
+            if phase == Phase.PHASE3_IR_FOCUS
+            else 0
+        )
+
         if teacher == "rgb":
-            return self.threshold_scheduler.rgb_teacher(phase)
+            return self.threshold_scheduler.rgb_teacher(phase, steps_into_phase)
         if teacher == "ir":
-            return self.threshold_scheduler.ir_teacher(phase)
-        return self.threshold_scheduler.both(phase)
+            return self.threshold_scheduler.ir_teacher(phase, steps_into_phase)
+        return self.threshold_scheduler.both(phase, steps_into_phase)
 
     # ------------------------------------------------------------------
     # Infinite data utilities
@@ -224,37 +228,114 @@ class CurriculumDomainAdaptationTrainer:
             source_images=rgb.images,
         )
 
-    def _weak_aug(
+    def _geometric_aug(
         self,
         images: torch.Tensor,
-        targets: Optional[List[Dict]] = None,
-        hflip_prob: float = 0.5,
+        targets: Optional[List[Dict]],
+        aug,                            # RGBAugConfig or IRAugConfig
     ):
         """
-        Weak aug: stochastic horizontal flip only.
+        Geometric aug shared between teacher and student:
+          1. Random horizontal flip
+          2. Random scale in [multiscale_min, multiscale_max] × original size
+          3. Per-image random crop (if scaled > target) or zero-pad (if scaled < target)
+
+        Both teacher and student receive the SAME geometric transform.
+        Student additionally receives photometric aug on top.
 
         Returns:
-            aug_images  : [B, 3, H, W]
-            aug_targets : boxes updated if flipped
-            did_flip    : bool
+            aug_images  : [B, 3, target_h, target_w]
+            aug_targets : boxes updated for flip + scale + crop/pad (None if input was None)
         """
-        W = images.shape[-1]
-        if random.random() < hflip_prob:
+        B, C, H, W = images.shape
+
+        # 1. Horizontal flip
+        if random.random() < aug.hflip_prob:
             images = torch.flip(images, dims=[-1])
             if targets is not None:
-                new_targets = []
-                for t in targets:
-                    boxes = t["boxes"]
-                    if boxes.numel() > 0:
-                        flipped = boxes.clone()
-                        flipped[:, 0] = W - boxes[:, 2]
-                        flipped[:, 2] = W - boxes[:, 0]
-                        new_targets.append({**t, "boxes": flipped})
-                    else:
-                        new_targets.append(t)
-                targets = new_targets
-            return images, targets, True
-        return images, targets, False
+                targets = [self._flip_boxes(t, W) for t in targets]
+
+        # 2. Random scale (same factor for entire batch)
+        s = random.uniform(aug.multiscale_min, aug.multiscale_max)
+        new_h = max(1, int(H * s))
+        new_w = max(1, int(W * s))
+        images = torch.nn.functional.interpolate(
+            images, size=(new_h, new_w), mode="bilinear", align_corners=False
+        )
+        if targets is not None:
+            targets = [self._scale_boxes(t, s) for t in targets]
+
+        # 3. Per-image crop/pad to fixed size
+        out_imgs, out_tgts = [], []
+        for i in range(B):
+            img, tgt = self._crop_or_pad(
+                images[i],
+                targets[i] if targets is not None else None,
+                aug.multiscale_target_h,
+                aug.multiscale_target_w,
+            )
+            out_imgs.append(img)
+            out_tgts.append(tgt)
+
+        return torch.stack(out_imgs), (out_tgts if targets is not None else None)
+
+    # ------------------------------------------------------------------
+    # Geometric aug helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _flip_boxes(target: Dict, W: int) -> Dict:
+        boxes = target.get("boxes")
+        if boxes is None or boxes.numel() == 0:
+            return target
+        flipped = boxes.clone()
+        flipped[:, 0] = W - boxes[:, 2]
+        flipped[:, 2] = W - boxes[:, 0]
+        return {**target, "boxes": flipped}
+
+    @staticmethod
+    def _scale_boxes(target: Dict, s: float) -> Dict:
+        boxes = target.get("boxes")
+        if boxes is None or boxes.numel() == 0:
+            return target
+        return {**target, "boxes": boxes * s}
+
+    @staticmethod
+    def _crop_or_pad(
+        img: torch.Tensor,
+        target: Optional[Dict],
+        target_h: int,
+        target_w: int,
+    ):
+        """
+        Randomly crop to (target_h, target_w) if img is larger,
+        or zero-pad if smaller. Updates boxes accordingly.
+        """
+        C, H, W = img.shape
+
+        top  = random.randint(0, max(0, H - target_h))
+        left = random.randint(0, max(0, W - target_w))
+
+        img = img[:, top:top + min(H, target_h), left:left + min(W, target_w)]
+
+        pad_b = target_h - img.shape[1]
+        pad_r = target_w - img.shape[2]
+        if pad_b > 0 or pad_r > 0:
+            img = torch.nn.functional.pad(img, (0, pad_r, 0, pad_b), value=0.0)
+
+        if target is not None:
+            boxes = target.get("boxes")
+            if boxes is not None and boxes.numel() > 0:
+                offset = torch.tensor(
+                    [left, top, left, top], dtype=boxes.dtype, device=boxes.device
+                )
+                boxes = boxes - offset
+                boxes[:, 0::2].clamp_(0, target_w)
+                boxes[:, 1::2].clamp_(0, target_h)
+                keep = ((boxes[:, 2] - boxes[:, 0]) > 1) & ((boxes[:, 3] - boxes[:, 1]) > 1)
+                target = {**target, "boxes": boxes[keep], "labels": target["labels"][keep]}
+
+        return img, target
 
     def _rgb_photometric_aug(self, images: torch.Tensor) -> torch.Tensor:
         """
@@ -352,14 +433,18 @@ class CurriculumDomainAdaptationTrainer:
             else None
         )
 
-        hflip = self.config.rgb_aug.hflip_prob
+        aug = self.config.rgb_aug
         if phase == Phase.PHASE1_RGB_WARMUP:
-            # Phase 1: geometric only, no teacher
-            student_images, student_targets, _ = self._weak_aug(batch.images, batch.targets, hflip)
+            # Phase 1: geometric only (hflip + multiscale), no teacher
+            student_images, student_targets = self._geometric_aug(
+                batch.images, batch.targets, aug
+            )
             teacher_images = None
         else:
-            # Phase 2+: teacher weak (geometric only), student strong (geometric + RGB photometric)
-            teacher_images, student_targets, _ = self._weak_aug(batch.images, batch.targets, hflip)
+            # Phase 2+: teacher sees geometric aug, student sees same geometry + RGB photometric
+            teacher_images, student_targets = self._geometric_aug(
+                batch.images, batch.targets, aug
+            )
             student_images = self._rgb_photometric_aug(teacher_images.clone())
 
         loss, log = compute_rgb_loss(
@@ -403,15 +488,13 @@ class CurriculumDomainAdaptationTrainer:
 
         self.optimizer.zero_grad()
 
-        gt_for_mid = (
-            batch.targets
-            if self.config.loss.mid_gt_weight > 0.0
-            else None
-        )
+        # Geometric aug — teacher and student see same spatial transform.
+        # Pass targets so boxes are updated correctly after scale + crop/pad.
+        aug = self.config.rgb_aug
+        weak_images, aug_targets = self._geometric_aug(batch.images, batch.targets, aug)
+        gt_for_mid = aug_targets if self.config.loss.mid_gt_weight > 0.0 else None
 
-        # Teacher: weak aug (hflip only) — spatial structure preserved for box alignment
-        # Student: same flipped base + RGB photometric (SAGA images are RGB-derived)
-        weak_images, _, _ = self._weak_aug(batch.images, None, self.config.rgb_aug.hflip_prob)
+        # Student sees same geometric base + RGB photometric aug on top
         strong_images = self._rgb_photometric_aug(weak_images.clone())
 
         loss, log = compute_mid_loss(
@@ -453,8 +536,8 @@ class CurriculumDomainAdaptationTrainer:
 
         self.optimizer.zero_grad()
 
-        # Teacher sees weak (hflip only), student sees strong (hflip + IR photometric)
-        weak_images, _, _ = self._weak_aug(batch.images, None, self.config.ir_aug.hflip_prob)
+        # Teacher sees geometric aug, student sees same geometry + IR photometric aug
+        weak_images, _ = self._geometric_aug(batch.images, None, self.config.ir_aug)
         strong_images = self._ir_photometric_aug(weak_images.clone())
 
         loss, log = compute_ir_loss(
@@ -515,10 +598,10 @@ class CurriculumDomainAdaptationTrainer:
         log["phase"]       = phase.name
         log["global_step"] = self.global_step
 
-        # Adaptive threshold logging (min value when class-wise dict)
+        # Adaptive threshold logging (reuse _get_threshold so ramp is reflected)
         if self.threshold_scheduler is not None:
-            rt = self.threshold_scheduler.rgb_teacher(phase)
-            it = self.threshold_scheduler.ir_teacher(phase)
+            rt = self._get_threshold(phase, teacher="rgb")
+            it = self._get_threshold(phase, teacher="ir")
             log["thresh_rgb"] = min(rt.values()) if isinstance(rt, dict) else rt
             log["thresh_ir"]  = min(it.values()) if isinstance(it, dict) else it
 
