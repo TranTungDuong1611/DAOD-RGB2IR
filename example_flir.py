@@ -36,7 +36,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch
 from torch.utils.data import DataLoader
 
-from adaptive_threshold import AdaptiveThresholdConfig, AdaptiveThresholdScheduler, TeacherThresholds, ThreshRampConfig
+from adaptive_threshold import (
+    AdaptiveThresholdConfig,
+    AdaptiveThresholdScheduler,
+    TeacherThresholds,
+    ThreshRampConfig,
+)
 from config import (
     CurriculumConfig,
     EMAConfig,
@@ -115,17 +120,27 @@ def make_training_config(device: str, target_h: int = 512, target_w: int = 640) 
             gaussian_noise_std=0.02,
         ),
         curriculum=CurriculumConfig(
-            phase1_end=10_000,    # RGB warmup
-            phase2_end=20_000,    # MID (SAGA 100%, both teachers)
-            # Phase 3: IR focus until total_iters
+            phase1_end=15_000,    # RGB warmup
+            phase2_end=20_000,    # mixed [RGB | MID]
+            phase3_end=25_000,    # mixed [MID | IR]
+            # Phase 4: IR focus until total_iters
+            phase2_rgb_ratio=0.5, # 50% RGB + 50% MID per Phase-2 batch
+            phase3_mid_ratio=0.5, # 50% MID + 50% IR per Phase-3 batch
         ),
         loss=LossConfig(
-            rgb_gt_weight=1.0,
-            rgb_pseudo_weight=0.2,
-            mid_rgb_weight=0.2,
-            mid_ir_weight=0.2,
-            mid_gt_weight=1.0,
-            ir_ir_teacher_weight=1.0,
+            # Phase 1 — RGB warmup
+            p1_gt_weight=1.0,
+            p1_pseudo_weight=0.0,
+            # Phase 2 — mixed [RGB | MID]
+            p2_gt_weight=1.0,
+            p2_rgb_teacher_weight=0.4,
+            p2_ir_teacher_weight=0.1,
+            # Phase 3 — mixed [MID | IR]
+            p3_gt_weight=1.0,
+            p3_rgb_teacher_weight=0.1,
+            p3_ir_teacher_weight=0.4,
+            # Phase 4 — IR focus
+            p4_ir_teacher_weight=1.0,
         ),
         pseudo_label_conf_thresh=0.7,
         device=device,
@@ -142,18 +157,20 @@ def make_adaptive_threshold() -> AdaptiveThresholdScheduler:
         rgb_teacher=TeacherThresholds(
             phase1={0: 0.70, 1: 0.70, 2: 0.65},
             phase2={0: 0.70, 1: 0.75, 2: 0.65},
-            phase3={0: 0.70, 1: 0.80, 2: 0.65},
+            phase3={0: 0.70, 1: 0.75, 2: 0.65},
+            phase4={0: 0.75, 1: 0.75, 2: 0.70},
         ),
         ir_teacher=TeacherThresholds(
             phase1={0: 0.70, 1: 0.70, 2: 0.65},
             phase2={0: 0.70, 1: 0.75, 2: 0.65},
-            phase3={0: 0.70, 1: 0.80, 2: 0.65},   # base (overridden by ramp below)
+            phase3={0: 0.70, 1: 0.75, 2: 0.65},
+            phase4={0: 0.75, 1: 0.75, 2: 0.70},   # base (overridden by ramp below)
         ),
-        phase3_ir_ramp=ThreshRampConfig(
+        phase4_ir_ramp=ThreshRampConfig(
             enabled=True,
             # per-class: person(0) / car(1) / bicycle(2)
-            start={0: 0.70, 1: 0.80, 2: 0.65},  # threshold lúc vào Phase 3
-            end  ={0: 0.80, 1: 0.90, 2: 0.75},  # threshold tối đa sau ramp_steps
+            start={0: 0.75, 1: 0.75, 2: 0.70},  # threshold lúc vào Phase 4
+            end  ={0: 0.85, 1: 0.90, 2: 0.80},  # threshold tối đa sau ramp_steps
             ramp_steps=10_000,
         ),
     ))
@@ -365,7 +382,7 @@ def main(args):
     # --- Final eval + summary ---
     logger.info("\nFinal evaluation ...")
     phase_eval.evaluate(student, global_step=trainer.global_step,
-                        current_phase=Phase.PHASE3_IR_FOCUS,
+                        current_phase=Phase.PHASE4_IR_FOCUS,
                         trigger_reason="final")
     phase_eval.print_history()
 

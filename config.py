@@ -1,7 +1,12 @@
 """
 Configuration dataclasses for Curriculum Domain Adaptation framework.
 
-Training flow:  RGB → MID(SAGA 100%) → IR
+4-phase training flow with **mixed-batch** Phase 2 and Phase 3:
+
+    Phase 1  → RGB only            (supervised warmup)
+    Phase 2  → mixed batch [RGB | MID]   (rgb_part keeps RGB, mid_part = SAGA)
+    Phase 3  → mixed batch [MID | IR]    (mid_part = SAGA, ir_part = unlabeled IR)
+    Phase 4  → IR only             (IR focus, unsupervised)
 """
 
 from dataclasses import dataclass, field
@@ -83,48 +88,67 @@ class IRAugConfig:
 @dataclass
 class CurriculumConfig:
     """
-    Phase boundaries (in global iterations).
+    Phase boundaries (in global iterations) for the 4-phase curriculum.
 
-    Phase 1: [0,           phase1_end)  → RGB only             (supervised warmup)
-    Phase 2: [phase1_end,  phase2_end)  → RGB + MID alternating (rgb→rgb_teacher, mid→ir_teacher)
-    Phase 3: [phase2_end,  ∞)           → IR only               (IR focus)
+    Phase 1: [0,          phase1_end)  → RGB only           (supervised warmup)
+    Phase 2: [phase1_end, phase2_end)  → mixed [RGB | MID]  (in-batch split)
+    Phase 3: [phase2_end, phase3_end)  → mixed [MID | IR]   (in-batch split)
+    Phase 4: [phase3_end, ∞)           → IR only            (IR focus)
 
-    phase2_rgb_ratio: fraction of Phase 2 steps that are RGB (rest = MID).
-      0.5  → equal split  (rgb, mid, rgb, mid, ...)
-      0.67 → more RGB     (rgb, rgb, mid, ...)
+    In-batch split ratios:
+      phase2_rgb_ratio : fraction of each Phase-2 batch that's RGB (rest is MID).
+      phase3_mid_ratio : fraction of each Phase-3 batch that's MID (rest is IR).
+
+    Example (batch_size=8, phase2_rgb_ratio=0.5):
+      batch layout = [RGB, RGB, RGB, RGB | MID, MID, MID, MID]
     """
     phase1_end: int = 3_000
-    phase2_end: int = 17_000
+    phase2_end: int = 10_000
+    phase3_end: int = 17_000
 
     phase2_rgb_ratio: float = 0.5
+    phase3_mid_ratio: float = 0.5
 
 
 @dataclass
 class LossConfig:
-    """Loss weights for each domain step."""
-    # RGB step
-    rgb_gt_weight: float = 1.0
-    rgb_pseudo_weight: float = 0.0    # set > 0 to enable pseudo loss in RGB step
+    """Loss weights per phase."""
+    # Phase 1 — RGB warmup (no teacher pseudo in pure warmup)
+    p1_gt_weight:           float = 1.0
+    p1_pseudo_weight:       float = 0.0   # optional rgb_teacher pseudo on RGB (kept 0 in warmup)
 
-    # MID step — both teachers always active
-    mid_rgb_weight: float = 0.5       # weight for rgb_teacher pseudo-labels
-    mid_ir_weight:  float = 0.5       # weight for ir_teacher  pseudo-labels
-    mid_gt_weight:  float = 1.0       # weight for GT loss on MID (set 0 to disable)
+    # Phase 2 — mixed [RGB | MID]; GT applies to whole batch (both halves have GT)
+    p2_gt_weight:           float = 1.0
+    p2_rgb_teacher_weight:  float = 0.5
+    p2_ir_teacher_weight:   float = 0.5
 
-    # IR step
-    ir_ir_teacher_weight: float = 1.0
+    # Phase 3 — mixed [MID | IR]; GT applies to MID slice ONLY (IR has no GT)
+    p3_gt_weight:           float = 1.0
+    p3_rgb_teacher_weight:  float = 0.5
+    p3_ir_teacher_weight:   float = 0.5
+
+    # Phase 4 — IR focus (unsupervised, ir_teacher only)
+    p4_ir_teacher_weight:   float = 1.0
 
 
 @dataclass
 class TeacherUpdateConfig:
-    """Which teachers to update in each step."""
-    # RGB step: update rgb_teacher (not during Phase 1)
-    rgb_update_rgb_teacher: bool = True
+    """
+    Which teachers to EMA-update in each phase step.
 
-    # IR step: update ir_teacher
-    ir_update_ir_teacher: bool = True
+    Selected policy: only the "specialist" teacher updates per phase.
+      Phase 1 (rgb step)      : no EMA update (warmup)
+      Phase 2 (rgb_mid step)  : rgb_teacher only
+      Phase 3 (mid_ir step)   : ir_teacher  only
+      Phase 4 (ir step)       : ir_teacher  only
+    """
+    p2_update_rgb_teacher: bool = True
+    p2_update_ir_teacher:  bool = False
 
-    # MID step: always updates both teachers (not configurable)
+    p3_update_rgb_teacher: bool = False
+    p3_update_ir_teacher:  bool = True
+
+    p4_update_ir_teacher:  bool = True
 
 
 # ---------------------------------------------------------------------------

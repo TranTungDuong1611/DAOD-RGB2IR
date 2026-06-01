@@ -293,6 +293,7 @@ class PhaseEvaluator:
         vis_score_thresh: float = 0.3,
         class_names:     Optional[List[str]] = None,
         thresh_scheduler: Optional[AdaptiveThresholdScheduler] = None,
+        phase2_end:      int = 0,   # curriculum.phase2_end — needed for Phase 3 ramp
         # Teachers — when provided, visualization draws a side-by-side comparison
         # grid of student + teachers via visualize_compare_models. Otherwise only
         # the student is visualized.
@@ -321,6 +322,7 @@ class PhaseEvaluator:
         self.vis_score_thresh  = vis_score_thresh
         self.class_names       = class_names
         self.thresh_scheduler  = thresh_scheduler
+        self.phase2_end        = phase2_end
         self.rgb_teacher       = rgb_teacher
         self.ir_teacher        = ir_teacher
 
@@ -568,7 +570,14 @@ class PhaseEvaluator:
             f"trigger={trigger_reason}  mAP@0.5={map50:.4f}"
         )
         if self.thresh_scheduler is not None:
-            score_thresh = self.thresh_scheduler.ir_teacher(current_phase)
+            steps_into_phase = (
+                max(0, global_step - self.phase2_end)
+                if current_phase.name == "PHASE3_IR_FOCUS"
+                else 0
+            )
+            thresh = self.thresh_scheduler.ir_teacher(current_phase, steps_into_phase)
+            # thresh có thể là float hoặc Dict[int, float] — lấy min để filter an toàn
+            score_thresh = min(thresh.values()) if isinstance(thresh, dict) else thresh
         else:
             score_thresh = self.vis_score_thresh
 
