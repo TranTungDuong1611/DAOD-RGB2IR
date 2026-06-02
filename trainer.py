@@ -29,6 +29,12 @@ from torch.utils.data import DataLoader
 
 from batch_types import IRBatch, MidIrBatch, RGBBatch, RgbMidBatch
 from config import TrainingConfig
+from discriminator import (
+    DomainDiscriminator,
+    GradientReversal,
+    compute_adv_loss,
+    grl_lambda_schedule,
+)
 from ema import ema_update
 from losses import (
     compute_ir_loss,
@@ -79,6 +85,9 @@ class CurriculumDomainAdaptationTrainer:
         threshold_scheduler: Optional["AdaptiveThresholdScheduler"] = None,
         phase_evaluator: Optional["PhaseEvaluator"] = None,
         phase1_best_path: Optional[str] = None,
+        disc_rgb: Optional[nn.Module] = None,
+        disc_ir:  Optional[nn.Module] = None,
+        disc_optimizer: Optional[Optimizer] = None,
     ) -> None:
         self.student = student
         self.rgb_teacher = rgb_teacher
@@ -86,6 +95,12 @@ class CurriculumDomainAdaptationTrainer:
         self.optimizer = optimizer
         self.config = config
         self.device = torch.device(config.device)
+
+        # Adversarial components (None = disabled)
+        self.disc_rgb       = disc_rgb
+        self.disc_ir        = disc_ir
+        self.disc_optimizer = disc_optimizer
+        self._grl           = GradientReversal(lambda_=1.0) if (disc_rgb or disc_ir) else None
 
         # Optional extensions
         self.threshold_scheduler = threshold_scheduler
@@ -112,7 +127,7 @@ class CurriculumDomainAdaptationTrainer:
     # ------------------------------------------------------------------
 
     def _setup_models(self) -> None:
-        """Move models to device; freeze & eval teachers."""
+        """Move models to device; freeze & eval teachers; move discriminators."""
         for model in (self.student, self.rgb_teacher, self.ir_teacher):
             model.to(self.device)
 
@@ -120,6 +135,10 @@ class CurriculumDomainAdaptationTrainer:
             for p in teacher.parameters():
                 p.requires_grad = False
             teacher.eval()
+
+        for disc in (self.disc_rgb, self.disc_ir):
+            if disc is not None:
+                disc.to(self.device)
 
     # ------------------------------------------------------------------
     # Phase transition handler
@@ -192,6 +211,22 @@ class CurriculumDomainAdaptationTrainer:
         if teacher == "ir":
             return self.threshold_scheduler.ir_teacher(phase, steps_into_phase)
         return self.threshold_scheduler.both(phase, steps_into_phase)
+
+    def _get_grl_lambda(self, phase: Phase) -> float:
+        """Return GRL lambda for the current step (fixed or DANN schedule)."""
+        adv = self.config.adv
+        if not adv.use_schedule:
+            return adv.grl_lambda
+        cur = self.config.curriculum
+        if phase == Phase.PHASE2_RGB_MID:
+            return grl_lambda_schedule(
+                self.global_step, cur.phase1_end, cur.phase2_end, adv.grl_lambda
+            )
+        if phase == Phase.PHASE3_MID_IR:
+            return grl_lambda_schedule(
+                self.global_step, cur.phase2_end, cur.phase3_end, adv.grl_lambda
+            )
+        return adv.grl_lambda
 
     # ------------------------------------------------------------------
     # Infinite data utilities
@@ -518,13 +553,15 @@ class CurriculumDomainAdaptationTrainer:
         self.student.train()
         mixed = self._next_rgb_mid()
         self.optimizer.zero_grad()
+        if self.disc_optimizer is not None:
+            self.disc_optimizer.zero_grad()
 
         weak_images, aug_targets = self._geometric_aug(
             mixed.images, mixed.targets, self.config.rgb_aug
         )
         strong_images = self._rgb_photometric_aug(weak_images.clone())
 
-        loss, log = compute_rgb_mid_loss(
+        det_loss, log = compute_rgb_mid_loss(
             student=self.student,
             mixed_images=strong_images,
             gt_targets=aug_targets,
@@ -536,8 +573,23 @@ class CurriculumDomainAdaptationTrainer:
             teacher_images=weak_images,
         )
 
-        loss.backward()
+        # Adversarial alignment: disc_rgb distinguishes RGB (0) vs MID (1)
+        total_loss = det_loss
+        if self.disc_rgb is not None and self.config.adv.p2_adv_weight > 0.0:
+            features  = self.student.get_backbone_features(strong_images)
+            self._grl.set_lambda(self._get_grl_lambda(phase))
+            adv_loss, adv_log = compute_adv_loss(
+                features, self.disc_rgb, self._grl, n_a=mixed.n_rgb
+            )
+            total_loss = det_loss + self.config.adv.p2_adv_weight * adv_loss
+            log["p2_adv_loss"]  = adv_log["adv_loss"]
+            log["p2_disc_acc"]  = adv_log["disc_acc"]
+            log["p2_grl_lambda"] = self._grl.lambda_
+
+        total_loss.backward()
         log["grad_norm"] = self._clip_and_step()
+        if self.disc_optimizer is not None:
+            self.disc_optimizer.step()
 
         if self.config.teacher_update.p2_update_rgb_teacher:
             ema_update(
@@ -574,6 +626,8 @@ class CurriculumDomainAdaptationTrainer:
         self.student.train()
         mixed = self._next_mid_ir()
         self.optimizer.zero_grad()
+        if self.disc_optimizer is not None:
+            self.disc_optimizer.zero_grad()
 
         # Per-slice geometric aug (raw → target shape)
         if mixed.n_mid > 0:
@@ -606,7 +660,7 @@ class CurriculumDomainAdaptationTrainer:
             weak_images, strong_images = weak_ir, strong_ir
             n_mid_aug = 0
 
-        loss, log = compute_mid_ir_loss(
+        det_loss, log = compute_mid_ir_loss(
             student=self.student,
             mixed_images=strong_images,
             mid_targets=aug_mid_targets,
@@ -618,8 +672,23 @@ class CurriculumDomainAdaptationTrainer:
             teacher_images=weak_images,
         )
 
-        loss.backward()
+        # Adversarial alignment: disc_ir distinguishes MID (0) vs IR (1)
+        total_loss = det_loss
+        if self.disc_ir is not None and self.config.adv.p3_adv_weight > 0.0:
+            features  = self.student.get_backbone_features(strong_images)
+            self._grl.set_lambda(self._get_grl_lambda(phase))
+            adv_loss, adv_log = compute_adv_loss(
+                features, self.disc_ir, self._grl, n_a=n_mid_aug
+            )
+            total_loss = det_loss + self.config.adv.p3_adv_weight * adv_loss
+            log["p3_adv_loss"]   = adv_log["adv_loss"]
+            log["p3_disc_acc"]   = adv_log["disc_acc"]
+            log["p3_grl_lambda"] = self._grl.lambda_
+
+        total_loss.backward()
         log["grad_norm"] = self._clip_and_step()
+        if self.disc_optimizer is not None:
+            self.disc_optimizer.step()
 
         if self.config.teacher_update.p3_update_rgb_teacher:
             ema_update(
@@ -737,16 +806,20 @@ class CurriculumDomainAdaptationTrainer:
     # ------------------------------------------------------------------
 
     def save_checkpoint(self, path: str) -> None:
-        torch.save(
-            {
-                "global_step":   self.global_step,
-                "student":       self.student.state_dict(),
-                "rgb_teacher":   self.rgb_teacher.state_dict(),
-                "ir_teacher":    self.ir_teacher.state_dict(),
-                "optimizer":     self.optimizer.state_dict(),
-            },
-            path,
-        )
+        ckpt = {
+            "global_step": self.global_step,
+            "student":     self.student.state_dict(),
+            "rgb_teacher": self.rgb_teacher.state_dict(),
+            "ir_teacher":  self.ir_teacher.state_dict(),
+            "optimizer":   self.optimizer.state_dict(),
+        }
+        if self.disc_rgb is not None:
+            ckpt["disc_rgb"] = self.disc_rgb.state_dict()
+        if self.disc_ir is not None:
+            ckpt["disc_ir"] = self.disc_ir.state_dict()
+        if self.disc_optimizer is not None:
+            ckpt["disc_optimizer"] = self.disc_optimizer.state_dict()
+        torch.save(ckpt, path)
         logger.info(f"Checkpoint saved → {path}  (step {self.global_step})")
 
     def load_checkpoint(self, path: str) -> None:
@@ -756,6 +829,12 @@ class CurriculumDomainAdaptationTrainer:
         self.rgb_teacher.load_state_dict(ckpt["rgb_teacher"])
         self.ir_teacher.load_state_dict(ckpt["ir_teacher"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
+        if self.disc_rgb is not None and "disc_rgb" in ckpt:
+            self.disc_rgb.load_state_dict(ckpt["disc_rgb"])
+        if self.disc_ir is not None and "disc_ir" in ckpt:
+            self.disc_ir.load_state_dict(ckpt["disc_ir"])
+        if self.disc_optimizer is not None and "disc_optimizer" in ckpt:
+            self.disc_optimizer.load_state_dict(ckpt["disc_optimizer"])
         logger.info(f"Checkpoint loaded ← {path}  (step {self.global_step})")
 
     # ------------------------------------------------------------------

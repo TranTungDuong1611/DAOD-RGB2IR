@@ -183,6 +183,18 @@ class FasterRCNNDetector(nn.Module):
             "scores": pred["scores"][fg],
         }
 
+    def get_backbone_features(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Return [B, backbone_dim] globally-pooled ResNet layer4 features.
+        Used for adversarial domain alignment (GRL + DomainDiscriminator).
+        Runs backbone only — no FPN, no RPN, no RoI head.
+        """
+        img_list       = self._to_image_list(images)
+        transformed, _ = self.model.transform(img_list)
+        body_out       = self.model.backbone.body(transformed.tensors)
+        layer4         = list(body_out.values())[-1]          # [B, 2048, H/32, W/32]
+        return F.adaptive_avg_pool2d(layer4, 1).flatten(1)    # [B, 2048]
+
     def _to_image_list(self, images: torch.Tensor) -> List[torch.Tensor]:
         if images.dim() != 4:
             raise ValueError(f"Expected 4-D tensor [B,C,H,W], got shape {tuple(images.shape)}")

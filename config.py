@@ -132,6 +132,25 @@ class LossConfig:
 
 
 @dataclass
+class AdvConfig:
+    """
+    Adversarial domain alignment via Gradient Reversal Layer (DANN-style).
+
+    Phase 2: disc_rgb distinguishes RGB (0) vs MID (1)
+    Phase 3: disc_ir  distinguishes MID (0) vs IR  (1)
+
+    Set p2_adv_weight / p3_adv_weight = 0 to disable per-phase.
+    """
+    p2_adv_weight: float = 0.1    # adversarial loss weight in Phase 2
+    p3_adv_weight: float = 0.1    # adversarial loss weight in Phase 3
+    backbone_dim:  int   = 2048   # ResNet50 layer4 channels (input to discriminator)
+    disc_hidden:   int   = 1024   # discriminator hidden units
+    disc_lr:       float = 1e-3   # discriminator optimizer LR (AdamW)
+    grl_lambda:    float = 1.0    # max / fixed lambda for GRL
+    use_schedule:  bool  = True   # True = DANN progressive schedule; False = fixed lambda
+
+
+@dataclass
 class TeacherUpdateConfig:
     """
     Which teachers to EMA-update in each phase step.
@@ -165,6 +184,7 @@ class TrainingConfig:
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     teacher_update: TeacherUpdateConfig = field(default_factory=TeacherUpdateConfig)
+    adv: AdvConfig = field(default_factory=AdvConfig)
 
     pseudo_label_conf_thresh: float = 0.7   # min score to keep a pseudo-label box
     grad_clip: float = 10.0                 # max gradient norm (0 = disabled)

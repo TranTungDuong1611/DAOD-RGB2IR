@@ -43,6 +43,7 @@ from adaptive_threshold import (
     ThreshRampConfig,
 )
 from config import (
+    AdvConfig,
     CurriculumConfig,
     EMAConfig,
     IRAugConfig,
@@ -52,6 +53,7 @@ from config import (
     TeacherUpdateConfig,
     TrainingConfig,
 )
+from discriminator import DomainDiscriminator
 from datasets import (
     FLIR_CLASSES,
     FLIR_TO_COCO_IDX,
@@ -283,8 +285,44 @@ def main(args):
         ir_teacher=ir_teacher,
     )
 
-    # --- Trainer ---
+    # --- Config ---
     config = make_training_config(device_str, target_h=args.min_size, target_w=args.max_size)
+    config.adv = AdvConfig(
+        p2_adv_weight=args.adv_weight,
+        p3_adv_weight=args.adv_weight,
+        disc_hidden=1024,
+        backbone_dim=2048,
+        disc_lr=args.disc_lr,
+        grl_lambda=args.grl_lambda,
+        use_schedule=not args.no_grl_schedule,
+    )
+
+    # --- Adversarial discriminators (None when adv_weight=0) ---
+    disc_rgb = disc_ir = disc_optimizer = None
+    if args.adv_weight > 0.0:
+        disc_rgb = DomainDiscriminator(
+            in_features=config.adv.backbone_dim,
+            hidden=config.adv.disc_hidden,
+        )
+        disc_ir = DomainDiscriminator(
+            in_features=config.adv.backbone_dim,
+            hidden=config.adv.disc_hidden,
+        )
+        disc_optimizer = torch.optim.AdamW(
+            list(disc_rgb.parameters()) + list(disc_ir.parameters()),
+            lr=config.adv.disc_lr,
+            weight_decay=1e-4,
+        )
+        logger.info(
+            f"Adversarial training ON  "
+            f"adv_weight={args.adv_weight}  "
+            f"grl_lambda={args.grl_lambda}  "
+            f"schedule={'DANN' if not args.no_grl_schedule else 'fixed'}"
+        )
+    else:
+        logger.info("Adversarial training OFF  (--adv_weight 0)")
+
+    # --- Trainer ---
     trainer = CurriculumDomainAdaptationTrainer(
         student=student,
         rgb_teacher=rgb_teacher,
@@ -296,6 +334,9 @@ def main(args):
         threshold_scheduler=thresh,
         phase_evaluator=phase_eval,
         phase1_best_path=os.path.join(args.output_dir, "best_PHASE1_RGB_WARMUP.pt"),
+        disc_rgb=disc_rgb,
+        disc_ir=disc_ir,
+        disc_optimizer=disc_optimizer,
     )
 
     # --- Best checkpoint callbacks ---
@@ -418,6 +459,14 @@ def parse_args():
                    help="Init head from COCO pretrained weights (91-class → replace head)")
     p.add_argument("--focal_gamma", type=float, default=2.0,
                    help="Focal loss gamma for faster_rcnn classifier (default 2.0, 0=cross-entropy)")
+    p.add_argument("--adv_weight",      type=float, default=0.1,
+                   help="Adversarial alignment loss weight for Phase 2/3 (default 0.1, 0=disabled)")
+    p.add_argument("--disc_lr",         type=float, default=1e-3,
+                   help="Discriminator optimizer LR (default 1e-3)")
+    p.add_argument("--grl_lambda",      type=float, default=1.0,
+                   help="Max GRL lambda (default 1.0)")
+    p.add_argument("--no_grl_schedule", action="store_true",
+                   help="Use fixed GRL lambda instead of DANN progressive schedule")
     p.add_argument("--resume",      default=None,
                    help="Path to checkpoint to resume from (e.g. output/best_PHASE1_RGB_WARMUP.pt)")
     p.add_argument("--device",      default="cuda",

@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision.models.detection import FCOS, fcos_resnet50_fpn
 from torchvision.models.detection.fcos import FCOSClassificationHead
 
@@ -79,6 +80,18 @@ class FCOSDetector(nn.Module):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def get_backbone_features(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Return [B, backbone_dim] globally-pooled ResNet layer4 features.
+        Used for adversarial domain alignment (GRL + DomainDiscriminator).
+        Runs backbone only — no FPN, no detection head.
+        """
+        img_list    = self._to_image_list(images)
+        transformed, _ = self.model.transform(img_list)
+        body_out    = self.model.backbone.body(transformed.tensors)
+        layer4      = list(body_out.values())[-1]          # [B, 2048, H/32, W/32]
+        return F.adaptive_avg_pool2d(layer4, 1).flatten(1) # [B, 2048]
 
     def _to_image_list(self, images: torch.Tensor) -> List[torch.Tensor]:
         """
