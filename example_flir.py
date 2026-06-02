@@ -235,6 +235,7 @@ def main(args):
         ir_to_rgb=True,
         from_coco=args.from_coco,
         coco_src_indices=FLIR_TO_COCO_IDX if args.from_coco else None,
+        focal_gamma=args.focal_gamma,
     )
     if args.model == "faster_rcnn":
         student, rgb_teacher, ir_teacher = build_faster_rcnn_trio(**_trio_kwargs)
@@ -415,6 +416,8 @@ def parse_args():
                    help="Detector backbone (default: fcos)")
     p.add_argument("--from_coco",   action="store_true",
                    help="Init head from COCO pretrained weights (91-class → replace head)")
+    p.add_argument("--focal_gamma", type=float, default=2.0,
+                   help="Focal loss gamma for faster_rcnn classifier (default 2.0, 0=cross-entropy)")
     p.add_argument("--resume",      default=None,
                    help="Path to checkpoint to resume from (e.g. output/best_PHASE1_RGB_WARMUP.pt)")
     p.add_argument("--device",      default="cuda",
