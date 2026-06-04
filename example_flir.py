@@ -459,10 +459,10 @@ def parse_args():
                    help="Init head from COCO pretrained weights (91-class → replace head)")
     p.add_argument("--focal_gamma", type=float, default=2.0,
                    help="Focal loss gamma for faster_rcnn classifier (default 2.0, 0=cross-entropy)")
-    p.add_argument("--adv_weight",      type=float, default=0.1,
-                   help="Adversarial alignment loss weight for Phase 2/3 (default 0.1, 0=disabled)")
-    p.add_argument("--disc_lr",         type=float, default=1e-3,
-                   help="Discriminator optimizer LR (default 1e-3)")
+    p.add_argument("--adv_weight",      type=float, default=0.2,
+                   help="Adversarial alignment loss weight for Phase 2/3 (default 0.2, 0=disabled)")
+    p.add_argument("--disc_lr",         type=float, default=1e-4,
+                   help="Discriminator optimizer LR (default 1e-4)")
     p.add_argument("--grl_lambda",      type=float, default=1.0,
                    help="Max GRL lambda (default 1.0)")
     p.add_argument("--no_grl_schedule", action="store_true",

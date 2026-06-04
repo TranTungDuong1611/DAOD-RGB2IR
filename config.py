@@ -141,13 +141,14 @@ class AdvConfig:
 
     Set p2_adv_weight / p3_adv_weight = 0 to disable per-phase.
     """
-    p2_adv_weight: float = 0.1    # adversarial loss weight in Phase 2
-    p3_adv_weight: float = 0.1    # adversarial loss weight in Phase 3
-    backbone_dim:  int   = 2048   # ResNet50 layer4 channels (input to discriminator)
-    disc_hidden:   int   = 1024   # discriminator hidden units
-    disc_lr:       float = 1e-3   # discriminator optimizer LR (AdamW)
-    grl_lambda:    float = 1.0    # max / fixed lambda for GRL
-    use_schedule:  bool  = True   # True = DANN progressive schedule; False = fixed lambda
+    p2_adv_weight:   float = 0.2    # adversarial loss weight in Phase 2
+    p3_adv_weight:   float = 0.2    # adversarial loss weight in Phase 3
+    backbone_dim:    int   = 2048   # ResNet50 layer4 channels (input to discriminator)
+    disc_hidden:     int   = 256    # discriminator hidden units (lightweight)
+    disc_lr:         float = 1e-4   # discriminator optimizer LR (AdamW)
+    label_smoothing: float = 0.1    # CrossEntropy label smoothing for discriminator
+    grl_lambda:      float = 1.0    # max / fixed lambda for GRL
+    use_schedule:    bool  = True   # True = DANN progressive schedule; False = fixed lambda
 
 
 @dataclass

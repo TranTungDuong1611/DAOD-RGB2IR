@@ -55,28 +55,26 @@ class GradientReversal(nn.Module):
 
 class DomainDiscriminator(nn.Module):
     """
-    3-layer MLP binary domain classifier.
+    2-layer MLP domain classifier (2 classes).
 
     Input  : [B, in_features] globally-pooled backbone features.
-    Output : [B] raw logits (use F.binary_cross_entropy_with_logits).
+    Output : [B, 2] raw logits (use F.cross_entropy).
 
     Label convention: domain A → 0, domain B → 1.
+    Architecture: in_features → hidden → 2  (one hidden layer, lightweight).
     """
 
-    def __init__(self, in_features: int = 2048, hidden: int = 1024) -> None:
+    def __init__(self, in_features: int = 2048, hidden: int = 256) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_features, hidden),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(hidden, 1),
+            nn.Linear(hidden, 2),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(1)  # [B]
+        return self.net(x)  # [B, 2]
 
 
 # ---------------------------------------------------------------------------
@@ -107,19 +105,23 @@ def grl_lambda_schedule(
 # ---------------------------------------------------------------------------
 
 def compute_adv_loss(
-    features:      torch.Tensor,
-    discriminator: DomainDiscriminator,
-    grl:           GradientReversal,
-    n_a:           int,
+    features:       torch.Tensor,
+    discriminator:  DomainDiscriminator,
+    grl:            GradientReversal,
+    n_a:            int,
+    label_smoothing: float = 0.1,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Adversarial alignment loss for a mixed-domain batch.
 
     Args:
-        features      : [B, D] globally-pooled backbone features WITH gradient.
-        discriminator : binary domain classifier.
-        grl           : GradientReversal (lambda already set by caller).
-        n_a           : samples from domain A (label=0); rest are domain B (label=1).
+        features        : [B, D] globally-pooled backbone features WITH gradient.
+        discriminator   : 2-class domain classifier.
+        grl             : GradientReversal (lambda already set by caller).
+        n_a             : samples from domain A (label=0); rest are domain B (label=1).
+        label_smoothing : smoothing ε for CrossEntropyLoss (default 0.1).
+                          Prevents discriminator from becoming over-confident,
+                          keeping gradients alive even when acc is high.
 
     Returns:
         loss     : scalar tensor (unscaled; caller applies adv_weight).
@@ -133,14 +135,14 @@ def compute_adv_loss(
     B      = features.shape[0]
 
     domain_labels = torch.cat([
-        torch.zeros(n_a,     dtype=torch.float32, device=device),
-        torch.ones( B - n_a, dtype=torch.float32, device=device),
+        torch.zeros(n_a,     dtype=torch.long, device=device),
+        torch.ones( B - n_a, dtype=torch.long, device=device),
     ])
 
-    logits = discriminator(grl(features))                              # [B]
-    loss   = F.binary_cross_entropy_with_logits(logits, domain_labels)
+    logits = discriminator(grl(features))                              # [B, 2]
+    loss   = F.cross_entropy(logits, domain_labels, label_smoothing=label_smoothing)
 
     with torch.no_grad():
-        acc = ((logits.sigmoid() > 0.5).float() == domain_labels).float().mean().item()
+        acc = (logits.argmax(dim=1) == domain_labels).float().mean().item()
 
     return loss, {"adv_loss": loss.item(), "disc_acc": acc}

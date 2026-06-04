@@ -579,7 +579,8 @@ class CurriculumDomainAdaptationTrainer:
             features  = self.student.get_backbone_features(strong_images)
             self._grl.set_lambda(self._get_grl_lambda(phase))
             adv_loss, adv_log = compute_adv_loss(
-                features, self.disc_rgb, self._grl, n_a=mixed.n_rgb
+                features, self.disc_rgb, self._grl, n_a=mixed.n_rgb,
+                label_smoothing=self.config.adv.label_smoothing,
             )
             total_loss = det_loss + self.config.adv.p2_adv_weight * adv_loss
             log["p2_adv_loss"]  = adv_log["adv_loss"]
@@ -678,7 +679,8 @@ class CurriculumDomainAdaptationTrainer:
             features  = self.student.get_backbone_features(strong_images)
             self._grl.set_lambda(self._get_grl_lambda(phase))
             adv_loss, adv_log = compute_adv_loss(
-                features, self.disc_ir, self._grl, n_a=n_mid_aug
+                features, self.disc_ir, self._grl, n_a=n_mid_aug,
+                label_smoothing=self.config.adv.label_smoothing,
             )
             total_loss = det_loss + self.config.adv.p3_adv_weight * adv_loss
             log["p3_adv_loss"]   = adv_log["adv_loss"]
