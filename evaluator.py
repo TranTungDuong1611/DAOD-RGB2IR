@@ -293,7 +293,7 @@ class PhaseEvaluator:
         vis_score_thresh: float = 0.3,
         class_names:     Optional[List[str]] = None,
         thresh_scheduler: Optional[AdaptiveThresholdScheduler] = None,
-        phase2_end:      int = 0,   # curriculum.phase2_end — needed for Phase 3 ramp
+        phase3_end:      int = 0,   # curriculum.phase3_end — start of Phase 4 IR focus ramp
         # Teachers — when provided, visualization draws a side-by-side comparison
         # grid of student + teachers via visualize_compare_models. Otherwise only
         # the student is visualized.
@@ -322,7 +322,7 @@ class PhaseEvaluator:
         self.vis_score_thresh  = vis_score_thresh
         self.class_names       = class_names
         self.thresh_scheduler  = thresh_scheduler
-        self.phase2_end        = phase2_end
+        self.phase3_end        = phase3_end
         self.rgb_teacher       = rgb_teacher
         self.ir_teacher        = ir_teacher
 
@@ -569,17 +569,18 @@ class PhaseEvaluator:
             f"step={global_step}  phase={current_phase.name}  "
             f"trigger={trigger_reason}  mAP@0.5={map50:.4f}"
         )
+        # Phase 4 ramp: steps_into_phase measured from phase3_end (start of Phase 4)
+        steps_into_phase = (
+            max(0, global_step - self.phase3_end)
+            if current_phase.name == "PHASE4_IR_FOCUS"
+            else 0
+        )
+
         if self.thresh_scheduler is not None:
-            steps_into_phase = (
-                max(0, global_step - self.phase2_end)
-                if current_phase.name == "PHASE3_IR_FOCUS"
-                else 0
-            )
-            thresh = self.thresh_scheduler.ir_teacher(current_phase, steps_into_phase)
-            # thresh có thể là float hoặc Dict[int, float] — lấy min để filter an toàn
-            score_thresh = min(thresh.values()) if isinstance(thresh, dict) else thresh
+            rgb_thresh = self.thresh_scheduler.rgb_teacher(current_phase, steps_into_phase)
+            ir_thresh  = self.thresh_scheduler.ir_teacher( current_phase, steps_into_phase)
         else:
-            score_thresh = self.vis_score_thresh
+            rgb_thresh = ir_thresh = self.vis_score_thresh
 
         # If teachers are registered, draw a side-by-side comparison grid.
         if self.rgb_teacher is not None or self.ir_teacher is not None:
@@ -588,25 +589,35 @@ class PhaseEvaluator:
                 models["rgb_teacher"] = self.rgb_teacher
             if self.ir_teacher is not None:
                 models["ir_teacher"] = self.ir_teacher
+
+            # student → show all boxes (thresh=0.0)
+            # teachers → per-class threshold from adaptive scheduler
+            per_model_thresh: Dict[str, object] = {"student": 0.0}
+            if self.rgb_teacher is not None:
+                per_model_thresh["rgb_teacher"] = rgb_thresh
+            if self.ir_teacher is not None:
+                per_model_thresh["ir_teacher"] = ir_thresh
+
             visualize_compare_models(
                 models=models,
                 val_loader=self.ir_val_loader,
                 device=self.device,
                 save_path=save_path,
                 num_samples=self.vis_num_samples,
-                score_thresh=score_thresh,
+                per_model_thresh=per_model_thresh,
                 class_names=self.class_names,
                 title=title,
             )
             return
 
+        # No teachers — student only, show all boxes
         visualize_eval_samples(
             model=model,
             val_loader=self.ir_val_loader,
             device=self.device,
             save_path=save_path,
             num_samples=self.vis_num_samples,
-            score_thresh=score_thresh,
+            score_thresh=0.0,
             class_names=self.class_names,
             title=title,
         )

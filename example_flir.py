@@ -270,6 +270,7 @@ def main(args):
         class_names=FLIR_CLASSES,
         iou_thresholds=[0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
     )
+    _cfg = make_training_config(device_str, target_h=args.min_size, target_w=args.max_size)
     phase_eval = PhaseEvaluator(
         evaluator=evaluator,
         ir_val_loader=ir_val_loader,
@@ -281,12 +282,13 @@ def main(args):
         vis_num_samples=16,
         class_names=FLIR_CLASSES,
         thresh_scheduler=thresh,
+        phase3_end=_cfg.curriculum.phase3_end,
         rgb_teacher=rgb_teacher,
         ir_teacher=ir_teacher,
     )
 
-    # --- Config ---
-    config = make_training_config(device_str, target_h=args.min_size, target_w=args.max_size)
+    # --- Config (reuse _cfg built above for PhaseEvaluator) ---
+    config = _cfg
     config.adv = AdvConfig(
         p2_adv_weight=args.adv_weight,
         p3_adv_weight=args.adv_weight,
