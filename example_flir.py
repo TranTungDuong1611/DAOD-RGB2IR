@@ -36,18 +36,24 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch
 from torch.utils.data import DataLoader
 
-from adaptive_threshold import AdaptiveThresholdConfig, AdaptiveThresholdScheduler, TeacherThresholds
+from adaptive_threshold import (
+    AdaptiveThresholdConfig,
+    AdaptiveThresholdScheduler,
+    TeacherThresholds,
+    ThreshRampConfig,
+)
 from config import (
-    AugConfig,
+    AdvConfig,
     CurriculumConfig,
     EMAConfig,
+    IRAugConfig,
     LossConfig,
-    MidRoutingConfig,
+    RGBAugConfig,
     SAGAConfig,
-    SoftSAGAConfig,
     TeacherUpdateConfig,
     TrainingConfig,
 )
+from discriminator import DomainDiscriminator
 from datasets import (
     FLIR_CLASSES,
     FLIR_TO_COCO_IDX,
@@ -78,52 +84,65 @@ logger = logging.getLogger(__name__)
 # Configs
 # ---------------------------------------------------------------------------
 
-def make_training_config(device: str) -> TrainingConfig:
+def make_training_config(device: str, target_h: int = 512, target_w: int = 640) -> TrainingConfig:
     return TrainingConfig(
         ema=EMAConfig(alpha=0.9996, use_warmup=True),
-        saga=SAGAConfig(apply_prob=0.8),
-        soft_saga=SoftSAGAConfig(
-            alpha_near_rgb=0.70,
-            alpha_intermediate=0.50,
-            alpha_near_ir=0.25,
-        ),
-        mid_routing=MidRoutingConfig(
-            # Phase 2: mid_near_rgb — both teachers, EMA → rgb_teacher
-            near_rgb_teacher_source="both",  near_rgb_ema_target="rgb",
-            near_rgb_rgb_weight=0.4,         near_rgb_ir_weight=0.0,
-            # Phase 3: mid_intermediate — both teachers, EMA → ir_teacher (slow)
-            intermediate_teacher_source="both", intermediate_ema_target="ir",
-            intermediate_ema_alpha=0.9996,
-            intermediate_rgb_weight=0.1,     intermediate_ir_weight=0.4,
-            # Phase 4: mid_near_ir — both teachers, EMA → ir_teacher
-            near_ir_teacher_source="both",     near_ir_ema_target="ir",
-            near_ir_rgb_weight=0.1,          near_ir_ir_weight=0.4,
-        ),
-        aug=AugConfig(
+        saga=SAGAConfig(apply_prob=1.0),   # SAGA applied 100% in MID phase
+        rgb_aug=RGBAugConfig(
             hflip_prob=0.5,
+            multiscale_min=0.5,
+            multiscale_max=1.5,
+            multiscale_target_h=target_h,
+            multiscale_target_w=target_w,
             blur_prob=0.5,
             blur_sigma_max=1.0,
-            brightness_prob=0.3,
-            brightness_mag=0.2,
-            contrast_prob=0.3,
-            contrast_mag=0.2,
+            color_jitter_prob=0.5,
+            cj_brightness=0.2,
+            cj_contrast=0.2,
+            cj_saturation=0.3,
+            cj_hue=0.05,
+            random_erasing_prob=0.3,
+            random_erasing_scale_min=0.02,
+            random_erasing_scale_max=0.10,
+        ),
+        ir_aug=IRAugConfig(
+            hflip_prob=0.5,
+            multiscale_min=0.5,
+            multiscale_max=1.5,
+            multiscale_target_h=target_h,
+            multiscale_target_w=target_w,
+            intensity_shift_prob=0.5,
+            intensity_shift_mag=0.1,
+            contrast_jitter_prob=0.5,
+            contrast_jitter_mag=0.2,
+            gamma_prob=0.3,
+            gamma_min=0.7,
+            gamma_max=1.3,
+            gaussian_noise_prob=0.3,
+            gaussian_noise_std=0.02,
         ),
         curriculum=CurriculumConfig(
-            phase1_end=10_000,    # RGB warmup
-            phase2_end=13_000,    # RGB + mid_near_rgb
-            phase3_end=16_000,   # full mid_intermediate
-            phase4_end=20_000,   # mid_near_ir + IR
-            # Phase 5: full IR until total_iters
-            phase2_rgb_ratio=0.67,
-            phase4_mid_ratio=0.67,
+            phase1_end=15_000,    # RGB warmup
+            phase2_end=20_000,    # mixed [RGB | MID]
+            phase3_end=25_000,    # mixed [MID | IR]
+            # Phase 4: IR focus until total_iters
+            phase2_rgb_ratio=0.5, # 50% RGB + 50% MID per Phase-2 batch
+            phase3_mid_ratio=0.5, # 50% MID + 50% IR per Phase-3 batch
         ),
         loss=LossConfig(
-            rgb_gt_weight=1.0,
-            rgb_pseudo_weight=0.2,
-            mid_rgb_weight=0.2,
-            mid_ir_weight=0.2,
-            mid_gt_weight=1.0,
-            ir_ir_teacher_weight=1.0,
+            # Phase 1 — RGB warmup
+            p1_gt_weight=1.0,
+            p1_pseudo_weight=0.0,
+            # Phase 2 — mixed [RGB | MID]
+            p2_gt_weight=1.0,
+            p2_rgb_teacher_weight=0.4,
+            p2_ir_teacher_weight=0.1,
+            # Phase 3 — mixed [MID | IR]
+            p3_gt_weight=1.0,
+            p3_rgb_teacher_weight=0.1,
+            p3_ir_teacher_weight=0.4,
+            # Phase 4 — IR focus
+            p4_ir_teacher_weight=1.0,
         ),
         pseudo_label_conf_thresh=0.7,
         device=device,
@@ -139,17 +158,22 @@ def make_adaptive_threshold() -> AdaptiveThresholdScheduler:
     return AdaptiveThresholdScheduler(AdaptiveThresholdConfig(
         rgb_teacher=TeacherThresholds(
             phase1={0: 0.70, 1: 0.70, 2: 0.65},
-            phase2={0: 0.70, 1: 0.70, 2: 0.65},
-            phase3={0: 0.70, 1: 0.70, 2: 0.65},
-            phase4={0: 0.70, 1: 0.75, 2: 0.65},
-            phase5={0: 0.70, 1: 0.80, 2: 0.65},
+            phase2={0: 0.70, 1: 0.75, 2: 0.65},
+            phase3={0: 0.70, 1: 0.75, 2: 0.65},
+            phase4={0: 0.75, 1: 0.75, 2: 0.70},
         ),
         ir_teacher=TeacherThresholds(
             phase1={0: 0.70, 1: 0.70, 2: 0.65},
-            phase2={0: 0.70, 1: 0.70, 2: 0.65},
-            phase3={0: 0.70, 1: 0.70, 2: 0.65},
-            phase4={0: 0.70, 1: 0.75, 2: 0.65},
-            phase5={0: 0.70, 1: 0.80, 2: 0.65},
+            phase2={0: 0.70, 1: 0.75, 2: 0.65},
+            phase3={0: 0.70, 1: 0.75, 2: 0.65},
+            phase4={0: 0.75, 1: 0.75, 2: 0.70},   # base (overridden by ramp below)
+        ),
+        phase4_ir_ramp=ThreshRampConfig(
+            enabled=True,
+            # per-class: person(0) / car(1) / bicycle(2)
+            start={0: 0.75, 1: 0.75, 2: 0.70},  # threshold lúc vào Phase 4
+            end  ={0: 0.85, 1: 0.90, 2: 0.80},  # threshold tối đa sau ramp_steps
+            ramp_steps=10_000,
         ),
     ))
 
@@ -213,6 +237,7 @@ def main(args):
         ir_to_rgb=True,
         from_coco=args.from_coco,
         coco_src_indices=FLIR_TO_COCO_IDX if args.from_coco else None,
+        focal_gamma=args.focal_gamma,
     )
     if args.model == "faster_rcnn":
         student, rgb_teacher, ir_teacher = build_faster_rcnn_trio(**_trio_kwargs)
@@ -245,6 +270,7 @@ def main(args):
         class_names=FLIR_CLASSES,
         iou_thresholds=[0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
     )
+    _cfg = make_training_config(device_str, target_h=args.min_size, target_w=args.max_size)
     phase_eval = PhaseEvaluator(
         evaluator=evaluator,
         ir_val_loader=ir_val_loader,
@@ -256,12 +282,49 @@ def main(args):
         vis_num_samples=16,
         class_names=FLIR_CLASSES,
         thresh_scheduler=thresh,
+        phase3_end=_cfg.curriculum.phase3_end,
         rgb_teacher=rgb_teacher,
         ir_teacher=ir_teacher,
     )
 
+    # --- Config (reuse _cfg built above for PhaseEvaluator) ---
+    config = _cfg
+    config.adv = AdvConfig(
+        p2_adv_weight=args.adv_weight,
+        p3_adv_weight=args.adv_weight,
+        disc_hidden=1024,
+        backbone_dim=2048,
+        disc_lr=args.disc_lr,
+        grl_lambda=args.grl_lambda,
+        use_schedule=not args.no_grl_schedule,
+    )
+
+    # --- Adversarial discriminators (None when adv_weight=0) ---
+    disc_rgb = disc_ir = disc_optimizer = None
+    if args.adv_weight > 0.0:
+        disc_rgb = DomainDiscriminator(
+            in_features=config.adv.backbone_dim,
+            hidden=config.adv.disc_hidden,
+        )
+        disc_ir = DomainDiscriminator(
+            in_features=config.adv.backbone_dim,
+            hidden=config.adv.disc_hidden,
+        )
+        disc_optimizer = torch.optim.AdamW(
+            list(disc_rgb.parameters()) + list(disc_ir.parameters()),
+            lr=config.adv.disc_lr,
+            weight_decay=1e-4,
+        )
+        logger.info(
+            f"Adversarial training ON  "
+            f"adv_weight={args.adv_weight}  "
+            f"grl_lambda={args.grl_lambda}  "
+            f"schedule={'DANN' if not args.no_grl_schedule else 'fixed'}"
+        )
+    else:
+        logger.info("Adversarial training OFF  (--adv_weight 0)")
+
     # --- Trainer ---
-    config = make_training_config(device_str)
     trainer = CurriculumDomainAdaptationTrainer(
         student=student,
         rgb_teacher=rgb_teacher,
@@ -273,6 +336,9 @@ def main(args):
         threshold_scheduler=thresh,
         phase_evaluator=phase_eval,
         phase1_best_path=os.path.join(args.output_dir, "best_PHASE1_RGB_WARMUP.pt"),
+        disc_rgb=disc_rgb,
+        disc_ir=disc_ir,
+        disc_optimizer=disc_optimizer,
     )
 
     # --- Best checkpoint callbacks ---
@@ -308,10 +374,8 @@ def main(args):
         logger.info(f"Resuming from: {args.resume}")
         trainer.load_checkpoint(args.resume)
         # Reset optimizer LRs to base values so CosineAnnealingLR reads correct base_lrs.
-        # (Checkpoint may have saved LR=0 if the previous cosine cycle completed.)
         optimizer.param_groups[0]["lr"] = args.lr_backbone
         optimizer.param_groups[1]["lr"] = args.lr_head
-        # Step scheduler from scratch to get the correct cosine position at global_step.
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=args.total_iters, last_epoch=-1,
         )
@@ -362,7 +426,7 @@ def main(args):
     # --- Final eval + summary ---
     logger.info("\nFinal evaluation ...")
     phase_eval.evaluate(student, global_step=trainer.global_step,
-                        current_phase=Phase.PHASE5_IR_FOCUS,
+                        current_phase=Phase.PHASE4_IR_FOCUS,
                         trigger_reason="final")
     phase_eval.print_history()
 
@@ -380,7 +444,7 @@ def parse_args():
     p.add_argument("--data_root",   required=True,
                    help="Path to align/ directory (contains JPEGImages/, Annotations/, ImageSets/)")
     p.add_argument("--output_dir",  default="./output")
-    p.add_argument("--total_iters", type=int,   default=20_000)
+    p.add_argument("--total_iters", type=int,   default=25_000)
     p.add_argument("--batch_size",  type=int,   default=4)
     p.add_argument("--workers",     type=int,   default=4)
     p.add_argument("--lr_backbone", type=float, default=5e-5)
@@ -395,6 +459,16 @@ def parse_args():
                    help="Detector backbone (default: fcos)")
     p.add_argument("--from_coco",   action="store_true",
                    help="Init head from COCO pretrained weights (91-class → replace head)")
+    p.add_argument("--focal_gamma", type=float, default=2.0,
+                   help="Focal loss gamma for faster_rcnn classifier (default 2.0, 0=cross-entropy)")
+    p.add_argument("--adv_weight",      type=float, default=0.2,
+                   help="Adversarial alignment loss weight for Phase 2/3 (default 0.2, 0=disabled)")
+    p.add_argument("--disc_lr",         type=float, default=1e-4,
+                   help="Discriminator optimizer LR (default 1e-4)")
+    p.add_argument("--grl_lambda",      type=float, default=1.0,
+                   help="Max GRL lambda (default 1.0)")
+    p.add_argument("--no_grl_schedule", action="store_true",
+                   help="Use fixed GRL lambda instead of DANN progressive schedule")
     p.add_argument("--resume",      default=None,
                    help="Path to checkpoint to resume from (e.g. output/best_PHASE1_RGB_WARMUP.pt)")
     p.add_argument("--device",      default="cuda",

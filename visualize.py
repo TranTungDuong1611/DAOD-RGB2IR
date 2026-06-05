@@ -208,6 +208,7 @@ def visualize_compare_models(
     save_path: str,
     num_samples: int = 8,
     score_thresh: ThreshType = 0.3,
+    per_model_thresh: Optional[Dict[str, ThreshType]] = None,
     class_names: Optional[List[str]] = None,
     title: str = "",
 ) -> None:
@@ -218,14 +219,17 @@ def visualize_compare_models(
     Column headers = model names, row labels = sample index.
 
     Args:
-        models       : OrderedDict {name: model}, e.g. {"student": m1, "rgb_teacher": m2, ...}
-        val_loader   : yields (images [B,3,H,W], targets List[Dict])
-        device       : inference device
-        save_path    : output PNG path
-        num_samples  : number of images
-        score_thresh : minimum confidence to draw a predicted box
-        class_names  : class name strings
-        title        : figure suptitle
+        models           : OrderedDict {name: model}, e.g. {"student": m1, "rgb_teacher": m2, ...}
+        val_loader       : yields (images [B,3,H,W], targets List[Dict])
+        device           : inference device
+        save_path        : output PNG path
+        num_samples      : number of images
+        score_thresh     : fallback threshold when per_model_thresh not set for a model
+        per_model_thresh : optional {model_name: ThreshType} — per-model threshold.
+                           Use 0.0 for student (show all boxes), per-class Dict for teachers.
+                           Models absent from this dict fall back to score_thresh.
+        class_names      : class name strings
+        title            : figure suptitle
     """
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -290,6 +294,11 @@ def visualize_compare_models(
         tgt = samples_targets[row]
         for col, name in enumerate(model_names):
             pred = all_preds[name][row]
+            model_thresh = (
+                per_model_thresh[name]
+                if per_model_thresh is not None and name in per_model_thresh
+                else score_thresh
+            )
             draw_boxes_on_ax(
                 ax=axes[row][col],
                 image=samples_images[row],
@@ -299,7 +308,7 @@ def visualize_compare_models(
                 pred_labels=pred.get("labels"),
                 pred_scores=pred.get("scores"),
                 class_names=class_names,
-                score_thresh=score_thresh,
+                score_thresh=model_thresh,
                 title="",
             )
         axes[row][0].set_ylabel(f"img {row}", fontsize=7, rotation=0,
@@ -308,7 +317,8 @@ def visualize_compare_models(
     legend_handles = [
         patches.Patch(edgecolor=_GT_COLOR,       facecolor="none", label="GT"),
         patches.Patch(edgecolor=_PRED_COLORS[0], facecolor="none", linestyle="--",
-                      label=f"pred (thresh={_fmt_thresh(score_thresh)})"),
+                      label="student: all boxes  |  teachers: per-class thresh"
+                            if per_model_thresh else f"pred (thresh={_fmt_thresh(score_thresh)})"),
     ]
     fig.legend(handles=legend_handles, loc="lower center", ncol=2,
                fontsize=8, frameon=True, bbox_to_anchor=(0.5, 0.0))

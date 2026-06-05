@@ -1,7 +1,12 @@
 """
 Configuration dataclasses for Curriculum Domain Adaptation framework.
 
-Training flow:  RGB → MID(SAGA) → IR
+4-phase training flow with **mixed-batch** Phase 2 and Phase 3:
+
+    Phase 1  → RGB only            (supervised warmup)
+    Phase 2  → mixed batch [RGB | MID]   (rgb_part keeps RGB, mid_part = SAGA)
+    Phase 3  → mixed batch [MID | IR]    (mid_part = SAGA, ir_part = unlabeled IR)
+    Phase 4  → IR only             (IR focus, unsupervised)
 """
 
 from dataclasses import dataclass, field
@@ -20,115 +25,150 @@ class EMAConfig:
 
 @dataclass
 class SAGAConfig:
-    """SemanticAwareGrayAugmentation settings (hard SAGA, legacy)."""
-    apply_prob: float = 0.5       # probability of applying SAGA per image
+    """SemanticAwareGrayAugmentation settings — always applied (apply_prob=1.0)."""
+    apply_prob: float = 1.0       # 1.0 = deterministic, always apply SAGA
 
 
 @dataclass
-class SoftSAGAConfig:
-    """SoftSAGA alpha per MID level (1.0=pure RGB, 0.0=pure gray)."""
-    alpha_near_rgb:     float = 0.70   # objects mostly RGB
-    alpha_intermediate: float = 0.50   # half RGB, half gray
-    alpha_near_ir:      float = 0.25   # objects mostly gray
+class RGBAugConfig:
+    """Augmentation for RGB and MID (SAGA) images."""
+    # --- Geometric (weak aug — applied to BOTH teacher and student) ---
+    hflip_prob:                  float = 0.5
+
+    # Multi-scale: resize to [scale_min, scale_max] × original, then crop/pad to fixed size
+    multiscale_min:              float = 0.5
+    multiscale_max:              float = 1.5
+    multiscale_target_h:         int   = 512
+    multiscale_target_w:         int   = 640
+
+    # --- Photometric (strong aug — applied to student only) ---
+    blur_prob:                   float = 0.5
+    blur_sigma_max:              float = 1.0
+
+    color_jitter_prob:           float = 0.5
+    cj_brightness:               float = 0.2
+    cj_contrast:                 float = 0.2
+    cj_saturation:               float = 0.3
+    cj_hue:                      float = 0.05
+
+    random_erasing_prob:         float = 0.3
+    random_erasing_scale_min:    float = 0.02
+    random_erasing_scale_max:    float = 0.10
+    random_erasing_ratio_min:    float = 0.3
+    random_erasing_ratio_max:    float = 3.3
 
 
 @dataclass
-class MidRoutingConfig:
-    """
-    Per-MID-level routing: which teacher generates pseudo-labels and
-    which teacher receives the EMA update.
+class IRAugConfig:
+    """Augmentation for IR (thermal) images."""
+    # --- Geometric (weak aug — applied to BOTH teacher and student) ---
+    hflip_prob:                  float = 0.5
 
-    teacher_source: "rgb" | "ir" | "both"
-    ema_target:     "rgb" | "ir" | "none"
-    """
-    near_rgb_teacher_source:      str   = "rgb"    # rgb_teacher infers
-    near_rgb_ema_target:          str   = "rgb"    # rgb_teacher updated
-    near_rgb_rgb_weight:          float = 1.0
-    near_rgb_ir_weight:           float = 0.0
+    # Multi-scale
+    multiscale_min:              float = 0.5
+    multiscale_max:              float = 1.5
+    multiscale_target_h:         int   = 512
+    multiscale_target_w:         int   = 640
 
-    intermediate_teacher_source:  str   = "both"
-    intermediate_ema_target:      str   = "ir"     # ir_teacher updated (lighter)
-    intermediate_ema_alpha:       float = 0.9998   # slower EMA for gentle start
-    intermediate_rgb_weight:      float = 0.5
-    intermediate_ir_weight:       float = 0.5
+    # --- Photometric (strong aug — applied to student only) ---
+    intensity_shift_prob:        float = 0.5
+    intensity_shift_mag:         float = 0.1
 
-    near_ir_teacher_source:       str   = "ir"     # ir_teacher infers
-    near_ir_ema_target:           str   = "ir"     # ir_teacher updated
-    near_ir_rgb_weight:           float = 0.0
-    near_ir_ir_weight:            float = 1.0
+    contrast_jitter_prob:        float = 0.5
+    contrast_jitter_mag:         float = 0.2
 
+    gamma_prob:                  float = 0.3
+    gamma_min:                   float = 0.7
+    gamma_max:                   float = 1.3
 
-@dataclass
-class AugConfig:
-    """Augmentation config for student (applied on top of DataLoader transforms)."""
-    # Geometric
-    hflip_prob:              float = 0.5   # horizontal flip
-    # Photometric
-    blur_prob:               float = 0.5
-    blur_sigma_max:          float = 1.0
-    brightness_prob:         float = 0.3
-    brightness_mag:          float = 0.2   # ±20% brightness
-    contrast_prob:           float = 0.3
-    contrast_mag:            float = 0.2   # ±20% contrast
-    # Color jitter (brightness + contrast + saturation + hue in one transform)
-    color_jitter_prob:       float = 0.5
-    cj_brightness:           float = 0.2
-    cj_contrast:             float = 0.2
-    cj_saturation:           float = 0.3
-    cj_hue:                  float = 0.05
+    gaussian_noise_prob:         float = 0.3
+    gaussian_noise_std:          float = 0.02
 
 
 @dataclass
 class CurriculumConfig:
     """
-    Phase boundaries (in global iterations) and within-phase ratios.
+    Phase boundaries (in global iterations) for the 4-phase curriculum.
 
-    Phase 1: [0,           phase1_end)   → RGB only            (supervised warmup)
-    Phase 2: [phase1_end,  phase2_end)   → RGB + mid_near_rgb  (bridge starts)
-    Phase 3: [phase2_end,  phase3_end)   → mid_intermediate     (full bridge)
-    Phase 4: [phase3_end,  phase4_end)   → mid_near_ir + IR    (IR adaptation)
-    Phase 5: [phase4_end,  ∞)            → IR only             (IR focus)
+    Phase 1: [0,          phase1_end)  → RGB only           (supervised warmup)
+    Phase 2: [phase1_end, phase2_end)  → mixed [RGB | MID]  (in-batch split)
+    Phase 3: [phase2_end, phase3_end)  → mixed [MID | IR]   (in-batch split)
+    Phase 4: [phase3_end, ∞)           → IR only            (IR focus)
+
+    In-batch split ratios:
+      phase2_rgb_ratio : fraction of each Phase-2 batch that's RGB (rest is MID).
+      phase3_mid_ratio : fraction of each Phase-3 batch that's MID (rest is IR).
+
+    Example (batch_size=8, phase2_rgb_ratio=0.5):
+      batch layout = [RGB, RGB, RGB, RGB | MID, MID, MID, MID]
     """
     phase1_end: int = 3_000
-    phase2_end: int = 7_000
-    phase3_end: int = 12_000
-    phase4_end: int = 17_000
+    phase2_end: int = 10_000
+    phase3_end: int = 17_000
 
-    # Ratio of RGB steps in Phase 2  (rest = mid_near_rgb)
-    phase2_rgb_ratio: float = 0.67
-
-    # Ratio of mid_near_ir steps in Phase 4  (rest = IR)
-    phase4_mid_ratio: float = 0.67
+    phase2_rgb_ratio: float = 0.5
+    phase3_mid_ratio: float = 0.5
 
 
 @dataclass
 class LossConfig:
-    """Loss weights for each domain step."""
-    # RGB step
-    rgb_gt_weight: float = 1.0
-    rgb_pseudo_weight: float = 0.0    # set > 0 to enable pseudo loss in RGB step
+    """Loss weights per phase."""
+    # Phase 1 — RGB warmup (no teacher pseudo in pure warmup)
+    p1_gt_weight:           float = 1.0
+    p1_pseudo_weight:       float = 0.0   # optional rgb_teacher pseudo on RGB (kept 0 in warmup)
 
-    # MID step (Phase 2/3: both teachers; Phase 4: ir_teacher only)
-    mid_rgb_weight: float = 0.5       # weight for rgb_teacher pseudo-labels (Phase 2/3)
-    mid_ir_weight: float = 0.5        # weight for ir_teacher  pseudo-labels
-    mid_gt_weight: float = 1.0        # weight for GT loss on MID
+    # Phase 2 — mixed [RGB | MID]; GT applies to whole batch (both halves have GT)
+    p2_gt_weight:           float = 1.0
+    p2_rgb_teacher_weight:  float = 0.5
+    p2_ir_teacher_weight:   float = 0.5
 
-    # IR step (Phase 4/5: ir_teacher only, no GT)
-    ir_ir_teacher_weight: float = 1.0
+    # Phase 3 — mixed [MID | IR]; GT applies to MID slice ONLY (IR has no GT)
+    p3_gt_weight:           float = 1.0
+    p3_rgb_teacher_weight:  float = 0.5
+    p3_ir_teacher_weight:   float = 0.5
+
+    # Phase 4 — IR focus (unsupervised, ir_teacher only)
+    p4_ir_teacher_weight:   float = 1.0
+
+
+@dataclass
+class AdvConfig:
+    """
+    Adversarial domain alignment via Gradient Reversal Layer (DANN-style).
+
+    Phase 2: disc_rgb distinguishes RGB (0) vs MID (1)
+    Phase 3: disc_ir  distinguishes MID (0) vs IR  (1)
+
+    Set p2_adv_weight / p3_adv_weight = 0 to disable per-phase.
+    """
+    p2_adv_weight:   float = 0.2    # adversarial loss weight in Phase 2
+    p3_adv_weight:   float = 0.2    # adversarial loss weight in Phase 3
+    backbone_dim:    int   = 2048   # ResNet50 layer4 channels (input to discriminator)
+    disc_hidden:     int   = 256    # discriminator hidden units (lightweight)
+    disc_lr:         float = 1e-4   # discriminator optimizer LR (AdamW)
+    label_smoothing: float = 0.1    # CrossEntropy label smoothing for discriminator
+    grl_lambda:      float = 1.0    # max / fixed lambda for GRL
+    use_schedule:    bool  = True   # True = DANN progressive schedule; False = fixed lambda
 
 
 @dataclass
 class TeacherUpdateConfig:
-    """Which teachers to update in each step (default = D3T-style)."""
-    # RGB step: always update rgb_teacher
-    rgb_update_rgb_teacher: bool = True
+    """
+    Which teachers to EMA-update in each phase step.
 
-    # MID step: configurable
-    mid_update_rgb_teacher: bool = False
-    mid_update_ir_teacher: bool = False
+    Selected policy: only the "specialist" teacher updates per phase.
+      Phase 1 (rgb step)      : no EMA update (warmup)
+      Phase 2 (rgb_mid step)  : rgb_teacher only
+      Phase 3 (mid_ir step)   : ir_teacher  only
+      Phase 4 (ir step)       : ir_teacher  only
+    """
+    p2_update_rgb_teacher: bool = True
+    p2_update_ir_teacher:  bool = False
 
-    # IR step: always update ir_teacher
-    ir_update_ir_teacher: bool = True
+    p3_update_rgb_teacher: bool = False
+    p3_update_ir_teacher:  bool = True
+
+    p4_update_ir_teacher:  bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -140,12 +180,12 @@ class TrainingConfig:
     """Master config for CurriculumDomainAdaptationTrainer."""
     ema: EMAConfig = field(default_factory=EMAConfig)
     saga: SAGAConfig = field(default_factory=SAGAConfig)
-    soft_saga: SoftSAGAConfig = field(default_factory=SoftSAGAConfig)
-    mid_routing: MidRoutingConfig = field(default_factory=MidRoutingConfig)
-    aug: AugConfig = field(default_factory=AugConfig)
+    rgb_aug: RGBAugConfig = field(default_factory=RGBAugConfig)
+    ir_aug: IRAugConfig = field(default_factory=IRAugConfig)
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     teacher_update: TeacherUpdateConfig = field(default_factory=TeacherUpdateConfig)
+    adv: AdvConfig = field(default_factory=AdvConfig)
 
     pseudo_label_conf_thresh: float = 0.7   # min score to keep a pseudo-label box
     grad_clip: float = 10.0                 # max gradient norm (0 = disabled)
