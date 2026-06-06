@@ -591,7 +591,7 @@ class CurriculumDomainAdaptationTrainer:
                 label_smoothing=self.config.adv.label_smoothing,
             )
             total_loss = det_loss + self.config.adv.p2_adv_weight * adv_loss
-            log["p2_adv_loss"]  = adv_log["adv_loss"]
+            log["p2_adv_loss"]  = adv_log["adv_loss"] * self.config.adv.p2_adv_weight
             log["p2_disc_acc"]  = adv_log["disc_acc"]
             log["p2_grl_lambda"] = self._grl.lambda_
 
@@ -707,7 +707,7 @@ class CurriculumDomainAdaptationTrainer:
                 label_smoothing=self.config.adv.label_smoothing,
             )
             total_loss = det_loss + self.config.adv.p3_adv_weight * adv_loss
-            log["p3_adv_loss"]   = adv_log["adv_loss"]
+            log["p3_adv_loss"]   = adv_log["adv_loss"] * self.config.adv.p3_adv_weight
             log["p3_disc_acc"]   = adv_log["disc_acc"]
             log["p3_grl_lambda"] = self._grl.lambda_
 

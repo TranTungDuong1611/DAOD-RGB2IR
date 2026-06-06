@@ -249,5 +249,5 @@ def compute_contrastive_loss(
     t_obj = F.normalize(t_obj, dim=1)
 
     con_loss = supcon(s_obj, t_obj, labels)
-    log["con_loss"] = con_loss.item()
+    log["con_loss"] = (weight * con_loss).item()
     return weight * con_loss, log
