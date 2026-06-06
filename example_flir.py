@@ -44,6 +44,7 @@ from adaptive_threshold import (
 )
 from config import (
     AdvConfig,
+    ContrastiveConfig,
     CurriculumConfig,
     EMAConfig,
     IRAugConfig,
@@ -84,7 +85,13 @@ logger = logging.getLogger(__name__)
 # Configs
 # ---------------------------------------------------------------------------
 
-def make_training_config(device: str, target_h: int = 512, target_w: int = 640) -> TrainingConfig:
+def make_training_config(
+    device: str,
+    target_h: int = 512,
+    target_w: int = 640,
+    contrastive: bool = False,
+    con_weight: float = 0.05,
+) -> TrainingConfig:
     return TrainingConfig(
         ema=EMAConfig(alpha=0.9996, use_warmup=True),
         saga=SAGAConfig(apply_prob=1.0),   # SAGA applied 100% in MID phase
@@ -123,8 +130,8 @@ def make_training_config(device: str, target_h: int = 512, target_w: int = 640) 
         ),
         curriculum=CurriculumConfig(
             phase1_end=15_000,    # RGB warmup
-            phase2_end=20_000,    # mixed [RGB | MID]
-            phase3_end=25_000,    # mixed [MID | IR]
+            phase2_end=25_000,    # mixed [RGB | MID]
+            phase3_end=40_000,    # mixed [MID | IR]
             # Phase 4: IR focus until total_iters
             phase2_rgb_ratio=0.5, # 50% RGB + 50% MID per Phase-2 batch
             phase3_mid_ratio=0.5, # 50% MID + 50% IR per Phase-3 batch
@@ -147,6 +154,15 @@ def make_training_config(device: str, target_h: int = 512, target_w: int = 640) 
         pseudo_label_conf_thresh=0.7,
         device=device,
         log_interval=100,
+        contrastive=ContrastiveConfig(
+            enabled=contrastive,
+            temperature=0.07,
+            conf_thresh=0.90,
+            p2_weight=con_weight,
+            p3_mid_weight=con_weight,
+            p3_ir_weight=con_weight,
+            p3_ir_start_offset=1_000,
+        ),
     )
 
 
@@ -157,16 +173,16 @@ def make_adaptive_threshold() -> AdaptiveThresholdScheduler:
     # bicycle: small, rare → lower threshold
     return AdaptiveThresholdScheduler(AdaptiveThresholdConfig(
         rgb_teacher=TeacherThresholds(
-            phase1={0: 0.70, 1: 0.70, 2: 0.65},
-            phase2={0: 0.70, 1: 0.75, 2: 0.65},
-            phase3={0: 0.70, 1: 0.75, 2: 0.65},
-            phase4={0: 0.75, 1: 0.75, 2: 0.70},
+            phase1={0: 0.70, 1: 0.70, 2: 0.70},
+            phase2={0: 0.70, 1: 0.75, 2: 0.70},
+            phase3={0: 0.75, 1: 0.80, 2: 0.75},
+            phase4={0: 0.75, 1: 0.80, 2: 0.70},
         ),
         ir_teacher=TeacherThresholds(
-            phase1={0: 0.70, 1: 0.70, 2: 0.65},
-            phase2={0: 0.70, 1: 0.75, 2: 0.65},
-            phase3={0: 0.70, 1: 0.75, 2: 0.65},
-            phase4={0: 0.75, 1: 0.75, 2: 0.70},   # base (overridden by ramp below)
+            phase1={0: 0.70, 1: 0.70, 2: 0.70},
+            phase2={0: 0.70, 1: 0.75, 2: 0.70},
+            phase3={0: 0.75, 1: 0.80, 2: 0.75},
+            phase4={0: 0.75, 1: 0.80, 2: 0.70},
         ),
         phase4_ir_ramp=ThreshRampConfig(
             enabled=True,
@@ -270,7 +286,13 @@ def main(args):
         class_names=FLIR_CLASSES,
         iou_thresholds=[0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
     )
-    _cfg = make_training_config(device_str, target_h=args.min_size, target_w=args.max_size)
+    _cfg = make_training_config(
+        device_str,
+        target_h=args.min_size,
+        target_w=args.max_size,
+        contrastive=args.contrastive,
+        con_weight=args.con_weight,
+    )
     phase_eval = PhaseEvaluator(
         evaluator=evaluator,
         ir_val_loader=ir_val_loader,
@@ -469,6 +491,10 @@ def parse_args():
                    help="Max GRL lambda (default 1.0)")
     p.add_argument("--no_grl_schedule", action="store_true",
                    help="Use fixed GRL lambda instead of DANN progressive schedule")
+    p.add_argument("--contrastive",  action="store_true",
+                   help="Enable object-level supervised contrastive loss (CMT-style)")
+    p.add_argument("--con_weight",   type=float, default=0.1,
+                   help="Contrastive loss weight for Phase 2 and Phase 3 (default 0.05)")
     p.add_argument("--resume",      default=None,
                    help="Path to checkpoint to resume from (e.g. output/best_PHASE1_RGB_WARMUP.pt)")
     p.add_argument("--device",      default="cuda",

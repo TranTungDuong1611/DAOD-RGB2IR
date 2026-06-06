@@ -171,6 +171,47 @@ class TeacherUpdateConfig:
     p4_update_ir_teacher:  bool = True
 
 
+@dataclass
+class ContrastiveConfig:
+    """
+    Object-level supervised contrastive loss (CMT-style).
+
+    Applied in two places:
+      Phase 2 : student (strong RGB/MID) vs rgb_teacher (weak RGB/MID), GT labels
+      Phase 3 : student (strong MID)     vs rgb_teacher (weak MID),     GT labels
+                student (strong IR)      vs ir_teacher  (weak IR),      pseudo-labels
+
+    Contrastive uses a HIGHER confidence threshold than detection to limit
+    false-positive contamination of the feature-space structure.
+
+    p3_ir_start_offset: number of Phase-3 steps to skip before enabling the
+    IR contrastive — gives ir_teacher time to adapt to IR before its features
+    are used as contrastive anchors.
+
+    feature_levels: FPN output keys to use for multi-scale object features.
+      FCOS          : "0" = P3 (stride 8), "1" = P4 (stride 16), "2" = P5 (stride 32)
+      Faster R-CNN  : same key convention
+    """
+    enabled: bool = False
+
+    temperature: float = 0.07
+
+    # Threshold for selecting pseudo-label boxes used in contrastive (IR slice, Phase 3).
+    # Should be higher than pseudo_label_conf_thresh to keep only reliable labels.
+    conf_thresh: float = 0.90
+
+    # Loss weights per context
+    p2_weight:     float = 0.05   # Phase 2 full batch (GT labels)
+    p3_mid_weight: float = 0.05   # Phase 3 MID slice  (GT labels)
+    p3_ir_weight:  float = 0.05   # Phase 3 IR  slice  (pseudo-labels)
+
+    # Delay IR contrastive N steps into Phase 3 to let ir_teacher stabilise on IR
+    p3_ir_start_offset: int = 1_000
+
+    # FPN levels to compute contrastive loss on (multi-scale)
+    feature_levels: tuple = ("0", "1", "2")
+
+
 # ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
@@ -186,6 +227,7 @@ class TrainingConfig:
     loss: LossConfig = field(default_factory=LossConfig)
     teacher_update: TeacherUpdateConfig = field(default_factory=TeacherUpdateConfig)
     adv: AdvConfig = field(default_factory=AdvConfig)
+    contrastive: ContrastiveConfig = field(default_factory=ContrastiveConfig)
 
     pseudo_label_conf_thresh: float = 0.7   # min score to keep a pseudo-label box
     grad_clip: float = 10.0                 # max gradient norm (0 = disabled)

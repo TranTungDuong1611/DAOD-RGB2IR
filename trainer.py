@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader
 
 from batch_types import IRBatch, MidIrBatch, RGBBatch, RgbMidBatch
 from config import TrainingConfig
+from contrastive import SupConLoss, compute_contrastive_loss, filter_pseudo_labels
 from discriminator import (
     DomainDiscriminator,
     GradientReversal,
@@ -113,6 +114,13 @@ class CurriculumDomainAdaptationTrainer:
 
         self.saga      = SemanticAwareGrayAugmentation(apply_prob=config.saga.apply_prob)
         self.scheduler = CurriculumScheduler(config.curriculum)
+
+        # Contrastive loss (optional — disabled by default in ContrastiveConfig)
+        self.supcon = (
+            SupConLoss(temperature=config.contrastive.temperature)
+            if config.contrastive.enabled
+            else None
+        )
 
         # Infinite data iterators — never exhaust
         self._rgb_iter: Iterator = self._infinite(rgb_loader)
@@ -587,6 +595,21 @@ class CurriculumDomainAdaptationTrainer:
             log["p2_disc_acc"]  = adv_log["disc_acc"]
             log["p2_grl_lambda"] = self._grl.lambda_
 
+        # Contrastive alignment — full mixed batch with GT labels, rgb_teacher as anchor
+        if self.supcon is not None and self.config.contrastive.p2_weight > 0.0:
+            con_loss, con_log = compute_contrastive_loss(
+                student=self.student,
+                teacher=self.rgb_teacher,
+                student_images=strong_images,
+                teacher_images=weak_images,
+                targets=aug_targets,
+                supcon=self.supcon,
+                weight=self.config.contrastive.p2_weight,
+                levels=self.config.contrastive.feature_levels,
+            )
+            total_loss = total_loss + con_loss
+            log.update({f"p2_{k}": v for k, v in con_log.items()})
+
         total_loss.backward()
         log["grad_norm"] = self._clip_and_step()
         if self.disc_optimizer is not None:
@@ -686,6 +709,47 @@ class CurriculumDomainAdaptationTrainer:
             log["p3_adv_loss"]   = adv_log["adv_loss"]
             log["p3_disc_acc"]   = adv_log["disc_acc"]
             log["p3_grl_lambda"] = self._grl.lambda_
+
+        # Contrastive — MID slice (GT labels, rgb_teacher)
+        if (self.supcon is not None
+                and self.config.contrastive.p3_mid_weight > 0.0
+                and weak_mid is not None
+                and aug_mid_targets):
+            mid_con_loss, mid_con_log = compute_contrastive_loss(
+                student=self.student,
+                teacher=self.rgb_teacher,
+                student_images=strong_mid,
+                teacher_images=weak_mid,
+                targets=aug_mid_targets,
+                supcon=self.supcon,
+                weight=self.config.contrastive.p3_mid_weight,
+                levels=self.config.contrastive.feature_levels,
+            )
+            total_loss = total_loss + mid_con_loss
+            log.update({f"p3_mid_{k}": v for k, v in mid_con_log.items()})
+
+        # Contrastive — IR slice (pseudo-labels, ir_teacher)
+        # Delayed by p3_ir_start_offset steps to let ir_teacher adapt to IR first.
+        steps_into_p3 = self.global_step - self.config.curriculum.phase2_end
+        if (self.supcon is not None
+                and self.config.contrastive.p3_ir_weight > 0.0
+                and weak_ir is not None
+                and steps_into_p3 >= self.config.contrastive.p3_ir_start_offset):
+            with torch.no_grad():
+                ir_preds = self.ir_teacher(weak_ir)
+            ir_pseudo = filter_pseudo_labels(ir_preds, self.config.contrastive.conf_thresh)
+            ir_con_loss, ir_con_log = compute_contrastive_loss(
+                student=self.student,
+                teacher=self.ir_teacher,
+                student_images=strong_ir,
+                teacher_images=weak_ir,
+                targets=ir_pseudo,
+                supcon=self.supcon,
+                weight=self.config.contrastive.p3_ir_weight,
+                levels=self.config.contrastive.feature_levels,
+            )
+            total_loss = total_loss + ir_con_loss
+            log.update({f"p3_ir_{k}": v for k, v in ir_con_log.items()})
 
         total_loss.backward()
         log["grad_norm"] = self._clip_and_step()

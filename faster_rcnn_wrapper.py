@@ -195,6 +195,32 @@ class FasterRCNNDetector(nn.Module):
         layer4         = list(body_out.values())[-1]          # [B, 2048, H/32, W/32]
         return F.adaptive_avg_pool2d(layer4, 1).flatten(1)    # [B, 2048]
 
+    def get_fpn_features(
+        self,
+        images: torch.Tensor,
+        level_keys: Tuple[str, ...] = ("0", "1", "2"),
+    ) -> Tuple[Dict[str, torch.Tensor], int, int]:
+        """
+        Run backbone + FPN and return spatial feature maps for contrastive learning.
+
+        Returns:
+            features : dict key → [B, C, H_feat, W_feat]  (transformed image space)
+            trans_w  : width  of the transformed image
+            trans_h  : height of the transformed image
+
+        Level keys for Faster RCNN ResNet50-FPN:
+          "0" → P3, stride  8
+          "1" → P4, stride 16
+          "2" → P5, stride 32
+        """
+        img_list = self._to_image_list(images)
+        transformed, _ = self.model.transform(img_list)
+        body_out  = self.model.backbone.body(transformed.tensors)
+        fpn_out   = self.model.backbone.fpn(body_out)
+        trans_h, trans_w = transformed.tensors.shape[2], transformed.tensors.shape[3]
+        features = {k: fpn_out[k] for k in level_keys if k in fpn_out}
+        return features, trans_w, trans_h
+
     def _to_image_list(self, images: torch.Tensor) -> List[torch.Tensor]:
         if images.dim() != 4:
             raise ValueError(f"Expected 4-D tensor [B,C,H,W], got shape {tuple(images.shape)}")
