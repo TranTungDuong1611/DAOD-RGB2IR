@@ -610,6 +610,7 @@ class CurriculumDomainAdaptationTrainer:
             total_loss = total_loss + con_loss
             log.update({f"p2_{k}": v for k, v in con_log.items()})
 
+        log["p2_full_loss"] = total_loss.item()   # true backward total (det + adv + con)
         total_loss.backward()
         log["grad_norm"] = self._clip_and_step()
         if self.disc_optimizer is not None:
@@ -751,6 +752,7 @@ class CurriculumDomainAdaptationTrainer:
             total_loss = total_loss + ir_con_loss
             log.update({f"p3_ir_{k}": v for k, v in ir_con_log.items()})
 
+        log["p3_full_loss"] = total_loss.item()   # true backward total (det + adv + con)
         total_loss.backward()
         log["grad_norm"] = self._clip_and_step()
         if self.disc_optimizer is not None:
