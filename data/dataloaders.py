@@ -18,7 +18,7 @@ def rgb_collate(batch: List) -> Tuple[torch.Tensor, List[Dict]]:
 
 
 def ir_collate(batch: List) -> torch.Tensor:
-    return torch.stack(batch)
+    return torch.stack([b[0] for b in batch])
 
 
 def ir_val_collate(batch: List) -> Tuple[torch.Tensor, List[Dict]]:

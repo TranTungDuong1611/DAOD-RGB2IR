@@ -24,6 +24,7 @@ except ImportError:
     _HAS_WEIGHTS_API = False
 
 from loss import HMfocalLoss, QFLv2, giou_loss_ltrb
+import copy
 
 
 def _box_iou_for_target(
@@ -69,7 +70,7 @@ class HMFocalClassificationHead(FCOSClassificationHead):
         vfl_loss_weight: float = 1.0,
     ):
         if norm_layer is None:
-            norm_layer = nn.GroupNorm
+            norm_layer = lambda ch: nn.GroupNorm(32, ch)
 
         super().__init__(
             in_channels=in_channels,
@@ -87,72 +88,49 @@ class HMFocalClassificationHead(FCOSClassificationHead):
             loss_weight=vfl_loss_weight,
         )
 
-    def compute_loss(
-        self,
-        targets: List[Dict[str, Tensor]],
-        head_outputs: Dict[str, Tensor],
-        matched_idxs: List[Tensor],
-
-        decoded_boxes_per_level: Optional[List[Tensor]] = None,
-    ) -> Tensor:
-        """
-        Calculates the classification loss using IoU-weighted soft targets.
-
-        Args:
-            targets              : Ground truth data for the current batch, list of {"boxes": [N,4] 
-                                and this is absolute coordinates, "labels": [N], foreground class indices}
-            head_outputs         : The raw predictions from the forward pass of the head. 
-                                  {"cls_logits": [B, HWA, num_classes]}
-            matched_idxs         : list length B, each [HWA] matched gt index (-1 = bg)
-            decoded_boxes_per_level: The predicted bounding boxes that have been transformed from offsets (ltrb) 
-                                    to absolute coordinates (xyxy) shape list[list[Tensor[HW, 4]]]
-                                     
-                                   
-        """
+    def compute_loss(self, targets, head_outputs, matched_idxs,
+                 decoded_boxes_per_level=None):
         cls_logits = head_outputs["cls_logits"]  # [B, HWA, C]
+        device     = cls_logits.device
+        B          = cls_logits.shape[0]
 
         all_cls_iou_targets = []
 
-        for img_i, (targets_per_img, matched_per_img) in enumerate(
-            zip(targets, matched_idxs)
-        ):
-            gt_boxes_i  = targets_per_img["boxes"]   # [N_gt, 4]
-            gt_labels_i = targets_per_img["labels"]  # [N_gt]
+        for img_i, (targets_per_img, matched_per_img) in enumerate(zip(targets, matched_idxs)):
+            gt_boxes_i  = targets_per_img["boxes"].to(device)
+            gt_labels_i = targets_per_img["labels"].to(device)
+            matched_per_img = matched_per_img.to(device)
             num_anchors = matched_per_img.shape[0]
 
-            # fg / bg masks
             fg_mask = matched_per_img >= 0
-            bg_mask = ~fg_mask
-
-            # Build one-hot class target
-            cls_target = torch.zeros(
-                num_anchors, self.num_classes,
-                dtype=cls_logits.dtype,
-                device=cls_logits.device,
-            )
+            cls_target = torch.zeros(num_anchors, self.num_classes,
+                                    dtype=cls_logits.dtype, device=device)
 
             if fg_mask.any():
-                fg_idxs     = matched_per_img[fg_mask]          # gt indices for fg anchors
-                fg_labels   = gt_labels_i[fg_idxs]              # class labels
+                fg_idxs   = matched_per_img[fg_mask]
+                fg_labels = gt_labels_i[fg_idxs]
 
-                # --- IoU-weighted target (Varifocal style) ---
                 if decoded_boxes_per_level is not None:
-                    pred_boxes_i = torch.cat(decoded_boxes_per_level[img_i], dim=0)  # [HWA, 4]
-                    pred_boxes_fg = pred_boxes_i[fg_mask]   # [Nfg, 4]
-                    gt_boxes_fg   = gt_boxes_i[fg_idxs]     # [Nfg, 4]
+                    # decoded_boxes_per_level[img_i] est une List[Tensor] → cat sur dim=0
+                    pred_boxes_i  = torch.cat(decoded_boxes_per_level[img_i], dim=0).to(device)
+                    pred_boxes_fg = pred_boxes_i[fg_mask]
+                    gt_boxes_fg   = gt_boxes_i[fg_idxs]
+
+                    # Sanity check dimensions
+                    assert pred_boxes_fg.shape[0] == fg_mask.sum(), \
+                        f"pred_boxes_fg {pred_boxes_fg.shape[0]} != fg count {fg_mask.sum()}"
+
                     with torch.no_grad():
                         iou_weights = _box_iou_for_target(
                             pred_boxes_fg.detach(), gt_boxes_fg
-                        ).clamp(min=0.0)  # [Nfg]
+                        ).clamp(min=0.0)
                     cls_target[fg_mask, fg_labels] = iou_weights
                 else:
-                    # Fallback: one-hot
                     cls_target[fg_mask, fg_labels] = 1.0
 
             all_cls_iou_targets.append(cls_target)
 
-        cls_targets = torch.stack(all_cls_iou_targets, dim=0)   # [B, HWA, C]
-
+        cls_targets = torch.stack(all_cls_iou_targets, dim=0)  # [B, HWA, C]
         num_fg = sum((m >= 0).sum() for m in matched_idxs)
         num_fg = max(1, num_fg.item() if isinstance(num_fg, Tensor) else num_fg)
 
@@ -209,103 +187,164 @@ class CustomFCOS(TV_FCOS):
             topk_candidates=topk_candidates,
         )
 
+        
         # Replace the default Torchvision classification head with HMFocalClassificationHead
         old_cls_head = self.head.classification_head
-        in_channels  = old_cls_head.conv[0][0].in_channels
-        num_anchors  = old_cls_head.num_anchors
+        in_channels = None
+        for module in old_cls_head.modules():
+            if isinstance(module, nn.Conv2d):
+                in_channels = module.in_channels
+                break
+
+        if in_channels is None:
+            raise ValueError("Could not find any Conv2d layer in the old classification head.")
+
+        num_anchors = old_cls_head.num_anchors
 
         self.head.classification_head = HMFocalClassificationHead(
             in_channels=in_channels,
             num_anchors=num_anchors,
             num_classes=num_classes,
-            norm_layer=nn.GroupNorm,
+            norm_layer=lambda ch: nn.GroupNorm(32, ch),
             vfl_alpha=vfl_alpha,
             vfl_gamma=vfl_gamma,
             vfl_weight_type=vfl_weight_type,
             vfl_loss_weight=vfl_loss_weight,
         )
 
-    def forward_for_distill(self, images: Tensor) -> Tuple[List[Tensor], List[Tensor], List[Tensor], List[Tensor]]:
-        """
-        Returns raw per-level FPN tensors for the distillation loss (Teacher-Student).
-        
-        Args:
-            images: Batch of images [B, 3, H, W]
-            
-        Returns:
-            logits_levels: Raw classification scores per FPN level.
-            deltas_levels: Raw box regression offsets (ltrb) per FPN level.
-            quality_levels: Raw centerness scores per FPN level.
-            box_xyxy_per_image: Decoded absolute coordinates [xyxy] for UHL loss.
-        """
-        # 1. Preprocess images using torchvision's internal transform (resize, normalize)
-        image_list = list(images.unbind(dim=0))
-        transformed_images, _ = self.transform(image_list, None)
+    def forward_for_distill(self, images) -> Tuple[List[Tensor], List[Tensor], List[Tensor], List[Tensor]]:
+    # ✅ Accept both Tensor [B,3,H,W] and List[Tensor] (from FCOSDetector wrapper)
+        if isinstance(images, torch.Tensor):
+            image_list = list(images.unbind(dim=0))
+        else:
+            image_list = images  # already a list
 
-        # 2. Extract features from Backbone + FPN
+        transformed_images, _ = self.transform(image_list, None)
         features = self.backbone(transformed_images.tensors)
         features_list = list(features.values())
 
-        # 3. Manually pass features through subnets to keep per-level outputs
         logits_levels, deltas_levels, quality_levels = [], [], []
-
         for feature in features_list:
             cls_f, reg_f = feature, feature
-            
-            # Process Classification Subnet
+
             for layer in self.head.classification_head.conv:
                 cls_f = layer(cls_f)
             logits_levels.append(self.head.classification_head.cls_logits(cls_f))
 
-            # Process Regression Subnet
             for layer in self.head.regression_head.conv:
                 reg_f = layer(reg_f)
             deltas_levels.append(self.head.regression_head.bbox_reg(reg_f))
             quality_levels.append(self.head.regression_head.bbox_ctrness(reg_f))
 
-        # 4. Decode bounding boxes into xyxy format for per-image processing
-        # Generate anchor points (centers) based on FPN strides
         anchors = self.anchor_generator(transformed_images, features_list)
-        
-        box_xyxy_per_image = []
-        B = images.shape[0]
-        
-        # Flatten deltas across all levels for decoding
+        B = len(image_list)  # ✅ utiliser len(image_list) et non images.shape[0]
+
         all_deltas_flat = []
         for d in deltas_levels:
             all_deltas_flat.append(d.permute(0, 2, 3, 1).reshape(B, -1, 4))
-        all_deltas = torch.cat(all_deltas_flat, dim=1) # [B, HWA_total, 4]
+        all_deltas = torch.cat(all_deltas_flat, dim=1)  # [B, HWA_total, 4]
 
+        box_xyxy_per_image = []
         for i in range(B):
-            anch_i = anchors[i]  # [HWA, 4]
+            anch_i = anchors[i]
             delt_i = all_deltas[i]
-            
-            # Anchor coordinates are represented as [x1, y1, x2, y2] where x1=x2 and y1=y2 (points)
             cx = (anch_i[:, 0] + anch_i[:, 2]) / 2.0
             cy = (anch_i[:, 1] + anch_i[:, 3]) / 2.0
-            
-            # Convert ltrb (distance to 4 sides) to xyxy (absolute coordinates)
             box_xyxy_per_image.append(torch.stack([
                 cx - delt_i[:, 0], cy - delt_i[:, 1],
-                cx + delt_i[:, 2], cy + delt_i[:, 3]
+                cx + delt_i[:, 2], cy + delt_i[:, 3],
             ], dim=-1))
 
         return logits_levels, deltas_levels, quality_levels, box_xyxy_per_image
+
+    def _get_target_assignments(self, anchors, targets, num_anchors_per_level):
+        matched_idxs = []
+        device = anchors[0].device
+
+        if hasattr(self.head.regression_head, "object_sizes_of_interest"):
+            # Fix 5 : .to(device) obligatoire
+            object_sizes = self.head.regression_head.object_sizes_of_interest.to(device)
+        else:
+            object_sizes = torch.tensor([
+                [-1, 64], [64, 128], [128, 256], [256, 512], [512, 1e8]
+            ], dtype=torch.float32, device=device)
+
+        expanded_object_sizes = torch.cat([
+            object_sizes[i].expand(n, -1)
+            for i, n in enumerate(num_anchors_per_level)
+        ], dim=0)  # [HWA_total, 2]
+
+        # Strides correspondant aux niveaux FPN (doit être cohérent avec anchor_generator)
+        strides = torch.tensor([8., 16., 32., 64., 128.], device=device)
+        stride_per_anchor = torch.cat([
+            strides[i].expand(n) for i, n in enumerate(num_anchors_per_level)
+        ])  # [HWA_total]
+
+        for i in range(len(targets)):
+            gt_boxes  = targets[i]["boxes"].to(device)
+            anchors_i = anchors[i].to(device)
+
+            if gt_boxes.numel() == 0:
+                matched_idxs.append(torch.full(
+                    (anchors_i.size(0),), -1, dtype=torch.int64, device=device))
+                continue
+
+            points = (anchors_i[:, :2] + anchors_i[:, 2:]) / 2.0  # [HWA, 2]
+
+            l = points[:, None, 0] - gt_boxes[:, 0]
+            t = points[:, None, 1] - gt_boxes[:, 1]
+            r = gt_boxes[:, 2] - points[:, None, 0]
+            b = gt_boxes[:, 3] - points[:, None, 1]
+            reg_targets = torch.stack([l, t, r, b], dim=2)  # [HWA, N_gt, 4]
+
+            is_in_boxes = reg_targets.min(dim=2).values > 0  # [HWA, N_gt]
+
+            # Fix 3 : center sampling
+            gt_cx = (gt_boxes[:, 0] + gt_boxes[:, 2]) / 2.0  # [N_gt]
+            gt_cy = (gt_boxes[:, 1] + gt_boxes[:, 3]) / 2.0
+            radius = self.center_sampling_radius * stride_per_anchor[:, None]  # [HWA, 1]
+            dist_x = (points[:, None, 0] - gt_cx[None, :]).abs()
+            dist_y = (points[:, None, 1] - gt_cy[None, :]).abs()
+            is_in_center = (dist_x <= radius) & (dist_y <= radius)  # [HWA, N_gt]
+
+            # Un anchor est candidat s'il est dans la box ET dans le cercle central
+            is_candidate = is_in_boxes & is_in_center
+
+            max_reg_targets = reg_targets.max(dim=2).values
+            is_cands_in_level = (
+                (max_reg_targets >= expanded_object_sizes[:, None, 0]) &
+                (max_reg_targets <= expanded_object_sizes[:, None, 1])
+            )
+
+            gt_areas = (
+                (gt_boxes[:, 2] - gt_boxes[:, 0]) * (gt_boxes[:, 3] - gt_boxes[:, 1])
+            )[None, :].expand(points.size(0), -1).clone()  # Fix 4 : .clone() avant in-place
+
+            gt_areas[~is_candidate]       = 1e18
+            gt_areas[~is_cands_in_level]  = 1e18
+
+            min_area, best_gt_idx = gt_areas.min(dim=1)
+            best_gt_idx[min_area >= 1e18] = -1
+            matched_idxs.append(best_gt_idx)
+
+        return matched_idxs
 
     def compute_loss(
         self,
         targets: List[Dict[str, Tensor]],
         head_outputs: Dict[str, Tensor],
         anchors: List[Tensor],
-        matched_idxs: List[Tensor],
+        num_anchors_per_level: List[int],
     ) -> Dict[str, Tensor]:
         """
         Calculates loss by overriding the default classification loss with HM-Focal logic. 
         Used for supervised training
         """
         bbox_regression     = head_outputs["bbox_regression"]
-        bbox_ctrness        = head_outputs["bbox_ctrness"]
-        cls_logits          = head_outputs["cls_logits"]
+        
+
+        matched_idxs = self._get_target_assignments(anchors, targets, num_anchors_per_level)
+
 
         # Decode predicted boxes to use as targets for IoU-weighted classification
         decoded_boxes_per_image = self._decode_boxes_for_iou(
@@ -332,112 +371,95 @@ class CustomFCOS(TV_FCOS):
         }
 
     def _decode_boxes_for_iou(
-        self,
-        bbox_regression: Tensor,  # [HWA_total, 4] (ltrb deltas)
-        anchors: List[Tensor],    # list[Tensor[HWA_i, 4]] per image
-    ) -> List[List[Tensor]]:
-        """
-        Decodes LTRB regression deltas into absolute XYXY boxes for IoU calculation.
-        """
-        # Split flattened regression output back into per-image tensors
+    self,
+    bbox_regression: Tensor,   # [B*HWA, 4] ou [B, HWA, 4]
+    anchors: List[Tensor],     # list[Tensor[HWA, 4]], len = B
+) -> List[List[Tensor]]:
+        if bbox_regression.dim() == 3:
+            bbox_regression = bbox_regression.flatten(0, 1)  # → [B*HWA, 4]
+
         splits = [len(a) for a in anchors]
+
+        # ✅ Sanity check — catches mismatches early
+        assert bbox_regression.shape[0] == sum(splits), (
+            f"bbox_regression rows {bbox_regression.shape[0]} != "
+            f"sum(anchors) {sum(splits)}"
+        )
+
         bbox_reg_per_img = bbox_regression.split(splits, dim=0)
 
         decoded_per_img = []
         for bbox_reg_i, anchors_i in zip(bbox_reg_per_img, anchors):
-            # Calculate centers from anchor points
             cx = (anchors_i[:, 0] + anchors_i[:, 2]) / 2.0
             cy = (anchors_i[:, 1] + anchors_i[:, 3]) / 2.0
-
             l, t, r, b = bbox_reg_i.unbind(dim=-1)
 
-            x1 = cx - l
-            y1 = cy - t
-            x2 = cx + r
-            y2 = cy + b
+            pred_boxes = torch.stack([cx - l, cy - t, cx + r, cy + b], dim=-1)  # [HWA, 4]
 
-            pred_boxes = torch.stack([x1, y1, x2, y2], dim=-1)  # [HWA, 4]
-            # Wrap in a list to keep level-compatibility even if flattened
+            # ✅ Un seul Tensor par image (plus de wrapping inutile [[...]])
+            # compute_loss de la cls head fait torch.cat(decoded_boxes_per_level[img_i])
+            # donc on garde la liste à 1 élément pour compatibilité
             decoded_per_img.append([pred_boxes])
 
         return decoded_per_img
 
-    def _regression_centerness_loss(
-        self,
-        targets: List[Dict[str, Tensor]],
-        head_outputs: Dict[str, Tensor],
-        anchors: List[Tensor],
-        matched_idxs: List[Tensor],
-    ) -> Tuple[Tensor, Tensor]:
-        """
-        Calculates Regression loss (GIoU) and Centerness loss (BCE).
-        """
-        bbox_regression = head_outputs["bbox_regression"]   # [HWA_total, 4]
-        bbox_ctrness    = head_outputs["bbox_ctrness"]      # [HWA_total, 1]
+    def _regression_centerness_loss(self, targets, head_outputs, anchors, matched_idxs):
+        bbox_regression = head_outputs["bbox_regression"]
+        bbox_ctrness    = head_outputs["bbox_ctrness"]
+        device = bbox_regression.device
 
-        splits = [len(a) for a in anchors]
-        bbox_reg_split   = bbox_regression.split(splits, dim=0)
-        bbox_ctrn_split  = bbox_ctrness.split(splits, dim=0)
+        if bbox_regression.dim() == 3:
+            bbox_regression = bbox_regression.flatten(0, 1)
+        if bbox_ctrness.dim() == 3:
+            bbox_ctrness = bbox_ctrness.flatten(0, 1)
 
-        losses_bbox_reg   = []
-        losses_bbox_ctrns = []
+        splits          = [len(a) for a in anchors]
+        bbox_reg_split  = bbox_regression.split(splits, dim=0)
+        bbox_ctrn_split = bbox_ctrness.split(splits, dim=0)
+
+        total_reg_loss  = bbox_regression.new_zeros(1)
+        total_ctrn_loss = bbox_regression.new_zeros(1)
+        total_fg        = 0
 
         for targets_i, matched_i, bbox_reg_i, bbox_ctrn_i, anchors_i in zip(
             targets, matched_idxs, bbox_reg_split, bbox_ctrn_split, anchors
         ):
-            fg_mask = matched_i >= 0
+            matched_i    = matched_i.to(device)
+            gt_boxes_all = targets_i["boxes"].to(device)
+            fg_mask      = matched_i >= 0
 
-            # Handle cases with no foreground objects
             if not fg_mask.any():
-                losses_bbox_reg.append(bbox_reg_i.sum() * 0.0)
-                losses_bbox_ctrns.append(bbox_ctrn_i.sum() * 0.0)
                 continue
 
-            # Get matched Ground Truth boxes for foreground anchors
-            fg_idxs = matched_i[fg_mask]
-            gt_boxes_fg = targets_i["boxes"][fg_idxs]   # [Nfg, 4] (xyxy)
-
-            # Decode predicted boxes for foreground only
+            fg_idxs     = matched_i[fg_mask]
+            gt_boxes_fg = gt_boxes_all[fg_idxs]
             cx = (anchors_i[fg_mask, 0] + anchors_i[fg_mask, 2]) / 2.0
             cy = (anchors_i[fg_mask, 1] + anchors_i[fg_mask, 3]) / 2.0
-            pred_reg_fg = bbox_reg_i[fg_mask]            # [Nfg, 4] (ltrb)
+            pred_reg_fg = bbox_reg_i[fg_mask]
 
             pred_boxes_fg = torch.stack([
-                cx - pred_reg_fg[:, 0],
-                cy - pred_reg_fg[:, 1],
-                cx + pred_reg_fg[:, 2],
-                cy + pred_reg_fg[:, 3],
-            ], dim=-1)                                   # [Nfg, 4] (xyxy)
+                cx - pred_reg_fg[:, 0], cy - pred_reg_fg[:, 1],
+                cx + pred_reg_fg[:, 2], cy + pred_reg_fg[:, 3],
+            ], dim=-1)
 
-            # Calculate GIoU loss
-            reg_loss = generalized_box_iou_loss(
-                pred_boxes_fg,
-                gt_boxes_fg,
-                reduction="sum",
-            ) / max(1, fg_mask.sum().item())
-            losses_bbox_reg.append(reg_loss)
+            # Accumuler la somme brute — PAS de division par image
+            total_reg_loss = total_reg_loss + generalized_box_iou_loss(
+                pred_boxes_fg, gt_boxes_fg, reduction="sum"
+            )
 
-            # Calculate Centerness target: geometric mean of min/max ratios of l,t,r,b
-            lt = torch.stack([cx - gt_boxes_fg[:, 0], cy - gt_boxes_fg[:, 1]], dim=-1)
-            rb = torch.stack([gt_boxes_fg[:, 2] - cx, gt_boxes_fg[:, 3] - cy], dim=-1)
-            lt = lt.clamp(min=0.0)
-            rb = rb.clamp(min=0.0)
-            
+            lt = torch.stack([cx - gt_boxes_fg[:, 0], cy - gt_boxes_fg[:, 1]], dim=-1).clamp(min=0)
+            rb = torch.stack([gt_boxes_fg[:, 2] - cx, gt_boxes_fg[:, 3] - cy], dim=-1).clamp(min=0)
             ctrness_target = torch.sqrt(
                 (lt.min(dim=-1).values / lt.max(dim=-1).values.clamp(min=1e-6))
                 * (rb.min(dim=-1).values / rb.max(dim=-1).values.clamp(min=1e-6))
-            )                                            # [Nfg]
+            )
+            total_ctrn_loss = total_ctrn_loss + F.binary_cross_entropy_with_logits(
+                bbox_ctrn_i[fg_mask].squeeze(1), ctrness_target, reduction="sum"
+            )
+            total_fg += fg_mask.sum().item()
 
-            # Binary Cross Entropy for centerness prediction
-            pred_ctrness_fg = bbox_ctrn_i[fg_mask].squeeze(1)  # [Nfg]
-            ctrness_loss = F.binary_cross_entropy_with_logits(
-                pred_ctrness_fg,
-                ctrness_target,
-                reduction="sum",
-            ) / max(1, fg_mask.sum().item())
-            losses_bbox_ctrns.append(ctrness_loss)
-
-        return sum(losses_bbox_reg), sum(losses_bbox_ctrns)
+        normalizer = max(1, total_fg)
+        return total_reg_loss / normalizer, total_ctrn_loss / normalizer
 
 class FCOSDetector(nn.Module):
     """
@@ -470,7 +492,7 @@ def build_custom_fcos(
     trainable_backbone_layers: int = 3,
     min_size: int = 600,
     max_size: int = 1000,
-    from_coco: bool = False,
+    from_coco: bool = True,
     # HM-Focal Loss hyperparameters
     vfl_alpha: float = 0.75,
     vfl_gamma: float = 2.0,
@@ -511,6 +533,7 @@ def build_custom_fcos(
             max_size=max_size,
             **fcos_kwargs,
         )
+        print("Loaded COCO pretrained weights for FCOS backbone and head.")
     else:
         # Load ImageNet weights for backbone only, head initialized from scratch
         backbone_weights = "DEFAULT" if pretrained_backbone else None
@@ -523,6 +546,7 @@ def build_custom_fcos(
             max_size=max_size,
             **fcos_kwargs,
         )
+        print("Initialized FCOS with ImageNet pretrained backbone and random head.")
 
     # 2. Extract standard FCOS parameters from base_model or kwargs
     center_sampling_radius = fcos_kwargs.get("center_sampling_radius", 1.5)
@@ -538,7 +562,7 @@ def build_custom_fcos(
         image_mean=base_model.transform.image_mean,
         image_std=base_model.transform.image_std,
         anchor_generator=base_model.anchor_generator,
-        head=base_model.head,
+        head=copy.deepcopy(base_model.head),
         center_sampling_radius=center_sampling_radius,
         score_thresh=fcos_kwargs.get("score_thresh", base_model.score_thresh),
         nms_thresh=fcos_kwargs.get("nms_thresh", base_model.nms_thresh),
@@ -562,7 +586,7 @@ def build_fcos_trio(
     min_size: int = 600,
     max_size: int = 1000,
     ir_to_rgb: bool = True,
-    from_coco: bool = False,
+    from_coco: bool = True,
     # HM-Focal Loss hyperparameters
     vfl_alpha: float = 0.75,
     vfl_gamma: float = 2.0,
@@ -610,7 +634,7 @@ class FCOSDistillAdapter:
     Adapter for FCOS Knowledge Distillation. 
     Manages the interaction between a Student model and dual Teachers (RGB and IR).
     """
-    def __init__(self, student, rgb_teacher, ir_teacher, sched, config):
+    def __init__(self, student, rgb_teacher, ir_teacher, config):
         """
         Args:
             student: The FCOSDetector instance being trained.
@@ -622,8 +646,7 @@ class FCOSDistillAdapter:
         self.student = student
         self.rgb_teacher = rgb_teacher
         self.ir_teacher = ir_teacher
-        self.config = config # Contains hyperparameters: alpha, beta, ratio...
-        self.sched = sched 
+        self.config = config # Contains hyperparameters: alpha, beta, ratio... 
         self.vfl_loss = HMfocalLoss(use_sigmoid=True)
 
     def distill_step(self, student_images, rgb_images, ir_images, global_step: int):

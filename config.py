@@ -5,8 +5,15 @@ Training flow:  RGB → MID(SAGA) → IR
 """
 
 from dataclasses import dataclass, field
-from .scheduler import Phase
 from typing import Tuple
+from enum import Enum
+
+class Phase(Enum):
+    """Enumeration of Curriculum Learning stages."""
+    PHASE1_RGB_WARMUP = 1
+    PHASE2_TRANSITION = 2  # Đảm bảo tên này tồn tại
+    PHASE3_ADAPTATION = 3  # Đảm bảo tên này tồn tại
+    PHASE4_IR_FOCUS   = 4
 
 @dataclass
 class TeacherSchedule:
@@ -20,8 +27,8 @@ class TeacherSchedule:
     def get_params(self, phase: Phase) -> Tuple[float, float]:
         mapping = {
             Phase.PHASE1_RGB_WARMUP: self.phase1,
-            Phase.PHASE2_RGB_MID:    self.phase2,
-            Phase.PHASE3_MID_IR:     self.phase3,
+            Phase.PHASE2_TRANSITION:    self.phase2,
+            Phase.PHASE3_ADAPTATION:     self.phase3,
             Phase.PHASE4_IR_FOCUS:   self.phase4,
         }
         return mapping.get(phase, self.phase2)
@@ -60,7 +67,7 @@ class FCOSModelConfig:
     trainable_backbone_layers: int = 3
     min_size: int = 600
     max_size: int = 1000
-    from_coco: bool = False
+    from_coco: bool = True
     
     # HM-Focal Loss (VFL) Hyperparameters
     vfl_alpha: float = 0.75
@@ -168,7 +175,7 @@ class LossConfig:
     Phase-based loss weights to control the balance between 
     Supervised (Ground Truth) and Unsupervised (Knowledge Distillation) learning.
     """
-    weight_logits: float = 4.0
+    weight_logits: float = 2.0
     weight_deltas: float = 1.0
     weight_quality: float = 1.0
 
@@ -178,17 +185,17 @@ class LossConfig:
 
     # Phase 2: Transition (RGB/IR flows with GT + Distill)
     p2_sup_weight: float = 1.0
-    p2_distill_weight: float = 0.7  # Start trusting teachers slightly less than GT
+    p2_distill_weight: float = 0.3  # Start trusting teachers slightly less than GT
 
     # Phase 3: Adaptation (Shift weight towards Distill)
-    p3_sup_weight: float = 0.5      # Reduce GT reliance (only used in RGB flow)
+    p3_sup_weight: float = 0.8      # Reduce GT reliance (only used in RGB flow)
     p3_distill_weight: float = 1.0
 
     # Phase 4: IR Focus (Pure Distill)
     p4_sup_weight: float = 0.0      # No GT used
     p4_distill_weight: float = 1.0
 
-    def get_weights(self, phase: Phase) -> Tuple[float, float]:
+    def get_phase_weights(self, phase: Phase) -> Tuple[float, float]:
         """Helper to retrieve (supervised_weight, distillation_weight) for a given phase."""
         mapping = {
             Phase.PHASE1_RGB_WARMUP: (self.p1_sup_weight, self.p1_distill_weight),
@@ -259,7 +266,8 @@ class TrainingConfig:
     device: str = "cuda"
     log_interval: int = 50
     output_dir: str = "outputs"
-    wandb: bool = False              
+    wandb: bool = False       
+    eval_period: int = 500       
 
     def get_phase(self, global_step: int) -> Phase:
         """Determines the phase using CurriculumConfig boundaries."""

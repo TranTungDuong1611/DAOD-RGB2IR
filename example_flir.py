@@ -4,7 +4,6 @@ import os
 import sys
 import torch
 import time
-from torch.utils.data import DataLoader
 
 # Ensure the script directory is in sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,7 +17,7 @@ from config import (
 )
 from data import (
     FLIR_CLASSES, NUM_CLASSES, FLIRIRDataset, FLIRIRValDataset,
-    FLIRRGBDataset, ir_collate, ir_val_collate, rgb_collate
+    FLIRRGBDataset, ir_collate, ir_val_collate, rgb_collate, build_dataloaders
 )
 from ema import copy_student_to_teacher
 from evaluator import DetectionEvaluator, PhaseEvaluator
@@ -44,7 +43,7 @@ def make_training_config(args) -> TrainingConfig:
     return TrainingConfig(
         model=FCOSModelConfig(
             num_classes=NUM_CLASSES,
-            from_coco=args.from_coco,
+            from_coco=True,
             min_size=args.min_size,
             max_size=args.max_size,
             vfl_alpha=0.75,
@@ -88,9 +87,9 @@ def make_training_config(args) -> TrainingConfig:
         data=DataConfig(root=args.data_root),
         step2_start=2000,
         max_iter=10000,
-        eval_period=args.eval_every,
         output_dir=args.output_dir,
-        device=args.device
+        device=args.device,
+        eval_period=500
     )
 
 # ---------------------------------------------------------------------------
@@ -106,28 +105,17 @@ def main(args):
     config = make_training_config(args)
 
     # --- 2. Datasets & Loaders ---
-    logger.info("Preparing DataLoaders...")
-    rgb_train = FLIRRGBDataset(config.data.root, split="train")
-    ir_train  = FLIRIRDataset( config.data.root, split="train")
-    ir_val    = FLIRIRValDataset(config.data.root, split="validation")
-    rgb_val   = FLIRRGBDataset( config.data.root, split="validation")
+    loaders = build_dataloaders(config)
+    
+    rgb_train_loader = loaders["rgb_train"]
+    ir_train_loader  = loaders["ir_train"]
+    ir_val_loader    = loaders["ir_val"]
+    rgb_val_loader   = loaders["rgb_val"]
 
-    rgb_loader = DataLoader(
-        rgb_train, batch_size=args.batch_size, shuffle=True,
-        collate_fn=rgb_collate, num_workers=args.workers, drop_last=True
-    )
-    ir_loader = DataLoader(
-        ir_train, batch_size=args.batch_size, shuffle=True,
-        collate_fn=ir_collate, num_workers=args.workers, drop_last=True
-    )
-    # Note: Evaluator expects (images, targets) from val_loaders
-    ir_val_loader = DataLoader(
-        ir_val, batch_size=args.batch_size, shuffle=False,
-        collate_fn=ir_val_collate, num_workers=args.workers
-    )
-    rgb_val_loader = DataLoader(
-        rgb_val, batch_size=args.batch_size, shuffle=False,
-        collate_fn=rgb_collate, num_workers=args.workers
+    logger.info(
+        f"  RGB Train: {len(rgb_train_loader.dataset)} images\n"
+        f"  IR  Train: {len(ir_train_loader.dataset)} images\n"
+        f"  IR  Val  : {len(ir_val_loader.dataset)} images"
     )
 
     # --- 3. Models (Trio) ---
@@ -142,6 +130,28 @@ def main(args):
         vfl_alpha=config.model.vfl_alpha,
         vfl_gamma=config.model.vfl_gamma
     )
+
+    student     = student.to(device)
+    rgb_teacher = rgb_teacher.to(device)
+    ir_teacher  = ir_teacher.to(device)
+
+    # Debug checklist
+    print("student device:", next(student.parameters()).device)
+    print("student training:", student.training)  # doit être False pendant eval
+    print("score_thresh:", student.model.score_thresh)
+
+    # Test forward manual avec 1 image
+    student.eval()
+    student.to(device)
+    with torch.no_grad():
+        dummy = torch.randn(1, 3, 512, 640).to(device)
+        out = student(dummy)
+        print("num detections:", len(out[0]["boxes"]))
+        if len(out[0]["boxes"]) > 0:
+            print("scores:", out[0]["scores"][:5])
+        else:
+            print("→ aucune détection — score_thresh trop élevé ou model sur mauvais device")
+
     
     # Sync initial weights
     copy_student_to_teacher(rgb_teacher, student)
@@ -172,9 +182,15 @@ def main(args):
         ir_val_loader=ir_val_loader,
         rgb_val_loader=rgb_val_loader,
         device=device,
-        eval_every_n=args.eval_every,
+        eval_every_n=1000,
         vis_dir=os.path.join(args.output_dir, "vis")
     )
+
+    def on_best_found(results):
+        trainer.save_checkpoint("best_model.pth")
+        logger.info(f" >>> New best mAP saved: {results.get('mAP@0.5'):.4f}")
+
+    phase_eval.register_best_fn(on_best_found)
 
     # --- 7. Trainer ---
     trainer = CurriculumDomainAdaptationTrainer(
@@ -183,8 +199,8 @@ def main(args):
         ir_teacher=ir_teacher,
         optimizer=optimizer,
         config=config,
-        rgb_loader=rgb_loader,
-        ir_loader=ir_loader,
+        rgb_loader=rgb_train_loader,
+        ir_loader=ir_train_loader,
         val_loader=ir_val_loader, # Primary evaluation on IR
         distill_adapter=distill_adapter
     )
@@ -201,13 +217,41 @@ def main(args):
 
     # --- 9. Start Training ---
     try:
-        trainer.train()
+        while trainer.global_step < config.max_iter:
+            # Chạy 1 bước huấn luyện
+            start_time = time.time()
+            logs = trainer.train_one_iteration()
+
+            iter_time = time.time() - start_time
+            current_step = trainer.global_step
+
+            if current_step % config.log_interval == 0:
+                logs["iter_time"] = iter_time
+                trainer._log(logs)
+            
+            # Lấy phase hiện tại từ config
+            current_phase = config.get_phase(current_step)
+            
+            # GỌI EVALUATOR Ở ĐÂY
+            # Hàm .step() sẽ tự kiểm tra: (step % 1000 == 0) HOẶC (Phase thay đổi)
+            eval_results = phase_eval.step(
+                model=student, 
+                global_step=current_step, 
+                current_phase=current_phase
+            )
+            
+            # Nếu vừa chạy eval xong, bạn có thể thực hiện logic phụ ở đây (nếu muốn)
+            if eval_results:
+                logger.info(f"Iteration {current_step} evaluation completed.")
+
+            if current_step % 5000 == 0:
+                trainer.save_checkpoint(f"checkpoint_{current_step:06d}.pt")
+
     except KeyboardInterrupt:
-        logger.info("Training interrupted. Saving final state...")
+        logger.info("Training manually interrupted.")
     finally:
         trainer.save_checkpoint("final_model.pth")
         phase_eval.print_history()
-        logger.info("Done.")
 
 # ---------------------------------------------------------------------------
 # 3. CLI Arguments
@@ -217,7 +261,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Curriculum DA Training for FLIR IR/RGB")
     p.add_argument("--data_root", required=True, help="Path to FLIR aligned dataset")
     p.add_argument("--output_dir", default="./output_flir")
-    p.add_argument("--total_iters", type=int, default=20000)
+    p.add_argument("--total_iters", type=int, default=10000)
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--lr_head", type=float, default=5e-4)

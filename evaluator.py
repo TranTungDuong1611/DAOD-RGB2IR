@@ -283,7 +283,7 @@ class PhaseEvaluator:
         phase_name = current_phase.name
         logger.info(f"--- [Evaluation] Step: {global_step} | Phase: {phase_name} ---")
         
-        results = {"global_step": global_step, "phase": phase_name}
+        results = {"global_step": global_step, "phase": phase_name, "trigger": trigger_reason }
 
         # Eval on IR (Target Domain - Always run)
         ir_results = self._run_eval_on_loader(model, self.ir_val_loader, "IR")

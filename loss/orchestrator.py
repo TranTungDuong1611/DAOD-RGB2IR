@@ -1,5 +1,5 @@
 import torch
-from ..scheduler import Phase
+from config import Phase
 from config import LossConfig
 
 
@@ -26,7 +26,7 @@ def compute_combined_loss(
         for k, v in sup_components.items():
             weighted_v = v * sup_phase_w
             loss_dict[f"sup_{k}"] = weighted_v
-            total_loss += weighted_v
+            total_loss += weighted_v.squeeze()
 
     # 2. Calculate Distillation Loss (if using distilled labels)
     if dist_phase_w > 0.0 and teacher_rgb_images is not None and teacher_ir_images is not None:
@@ -49,6 +49,6 @@ def compute_combined_loss(
             
             weighted_v = v * comp_w * dist_phase_w
             loss_dict[k] = weighted_v
-            total_loss += weighted_v
+            total_loss += weighted_v.squeeze()
 
     return total_loss, loss_dict

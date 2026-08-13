@@ -7,11 +7,11 @@ from torch.utils.data import DataLoader
 from typing import Dict, Optional, List
 from collections import defaultdict
 
-from .config import TrainingConfig, StepRouting
-from .scheduler import CurriculumScheduler, DomainStep, Phase
-from .ema import ema_update
-from .models.custom_fcos import FCOSDistillAdapter
-from .loss.orchestrator import compute_combined_loss
+from config import TrainingConfig, StepRouting
+from scheduler import CurriculumScheduler, DomainStep, Phase
+from ema import ema_update
+from models.custom_fcos import FCOSDistillAdapter
+from loss.orchestrator import compute_combined_loss
 from data.augmentations import StudentAugmentor
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ class CurriculumDomainAdaptationTrainer:
     def _get_saga_images(self, rgb_images, targets, alpha: float):
         """Apply SAGA transformation."""
         boxes_list = [t["boxes"] for t in targets]
-        from .saga import SoftSAGA
+        from saga import SoftSAGA
         return SoftSAGA().apply_to_batch(rgb_images, boxes_list, alpha)
     
     def _prepare_data_by_route(self, step_name: str, route: StepRouting):
@@ -149,14 +149,7 @@ class CurriculumDomainAdaptationTrainer:
         route = self.config.mid_routing.get_routing(step_name)
         ss_cfg = self.config.soft_saga
         
-        # 3. Resolve SAGA Alphas based on routing config
-        alpha_map = {
-            "rgb": 1.0, 
-            "weak": ss_cfg.alpha_near_rgb, 
-            "mid": ss_cfg.alpha_intermediate, 
-            "high": ss_cfg.alpha_near_ir,
-            "ir": 0.0 
-        }
+        
         
         # 4. Data Loading & Preparation
         # If it's an IR flow (P3-IR or P4), load IR images, else use RGB for SAGA
@@ -174,21 +167,32 @@ class CurriculumDomainAdaptationTrainer:
             loss_cfg=self.config.loss
         )
 
+        
+
         # 6. Optimization
-        total_loss.backward()
-        if self.config.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.grad_clip)
+        if total_loss > 0:
+            total_loss.backward()
+            if self.config.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.grad_clip)
+            self.optimizer.step()
         
         self.optimizer.step()
 
         # 7. EMA Update based on routing
-        if route.ema_target == "rgb":
-            ema_update(self.rgb_teacher, self.student, self.config.ema.alpha)
-        elif route.ema_target == "ir":
-            ema_update(self.ir_teacher, self.student, self.config.ema.alpha)
+        log_res = {}
+        for k, v in losses.items():
+            if isinstance(v, torch.Tensor):
+                log_res[k] = v.item()
+            else:
+                log_res[k] = v
+        
+        log_res["total_loss"] = total_loss.item()
+        log_res["step_type"] = step_name
+        log_res["phase"] = phase.name
+        log_res["global_step"] = self.global_step
 
         self.global_step += 1
-        return losses
+        return log_res
 
     def train(self) -> None:
         """
@@ -211,17 +215,6 @@ class CurriculumDomainAdaptationTrainer:
                 logs["iter_time"] = iter_time
                 logs["lr"] = self.optimizer.param_groups[0]['lr']
                 self._log(logs)
-
-            # 3. Periodic Evaluation & Best Model Saving
-            if self.global_step > 0 and self.global_step % self.config.eval_period == 0:
-                eval_results = self.evaluate()
-                current_map = eval_results.get("mAP_ir", 0.0)
-                
-                # Check for best model
-                if current_map > self.best_map:
-                    self.best_map = current_map
-                    logger.info(f"New best mAP: {self.best_map:.4f}! Saving best_model.pth")
-                    self.save_checkpoint("best_model.pth")
 
             # 4. Periodic Checkpoint (for resume)
             if self.global_step > 0 and self.global_step % 5000 == 0:
@@ -277,14 +270,18 @@ class CurriculumDomainAdaptationTrainer:
         total_loss = log.get("total_loss", 0.0)
         
         # Format individual loss components (kd_logits, sup_box, etc.)
-        loss_components = "  ".join(
-            f"{k}={v:.4f}"
-            for k, v in sorted(log.items())
-            if isinstance(v, float) and ("loss" in k and k != "total_loss")
-        )
+        components = []
+        for k, v in sorted(log.items()):
+            if isinstance(v, float) and any(x in k for x in ["loss", "sup_", "kd_"]) and k != "total_loss":
+                components.append(f"{k}={v:.4f}")
+        
+        comp_str = " | ".join(components)
         
         log_msg = (
             f"[{step:06d}] Phase: {phase:<18} | Step: {step_type:<18} | "
-            f"Loss: {total_loss:.4f} | {loss_components}"
+            f"Loss: {total_loss:.4f}"
         )
+        if comp_str:
+            log_msg += f" | {comp_str}"
+            
         logger.info(log_msg)

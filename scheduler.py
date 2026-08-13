@@ -1,5 +1,5 @@
 from typing import Literal
-from .config import Phase 
+from config import Phase 
 
 # Định nghĩa các bước để Trainer biết loại ảnh và nhãn cần dùng
 DomainStep = Literal[
@@ -22,8 +22,8 @@ class CurriculumScheduler:
         
         self.Phase = Phase
         self._counters = {
-            Phase.PHASE2_RGB_MID: 0,
-            Phase.PHASE3_MID_IR:  0,
+            Phase.PHASE2_TRANSITION: 0,
+            Phase.PHASE3_ADAPTATION:  0,
         }
 
     def get_next_step(self, global_step: int) -> DomainStep:
@@ -36,22 +36,22 @@ class CurriculumScheduler:
         if phase == self.Phase.PHASE1_RGB_WARMUP:
             return "p1_rgb_supervised"
 
-        elif phase == self.Phase.PHASE2_RGB_MID:
+        elif phase == self.Phase.PHASE2_TRANSITION:
             # Phase 2: RGB dominant (e.g., 80% RGB flow, 20% IR flow)
             return self._alternate(
-                phase=self.Phase.PHASE2_RGB_MID,
+                phase=self.Phase.PHASE2_TRANSITION,
                 primary="p2_rgb_flow",
                 secondary="p2_ir_flow",
-                primary_ratio=self.config.curriculum.phase2_rgb_ratio
+                ratio=self.config.curriculum.phase2_rgb_sampling_ratio
             )
 
-        elif phase == self.Phase.PHASE3_MID_IR:
+        elif phase == self.Phase.PHASE3_ADAPTATION:
             # Phase 3: IR dominant (e.g., 80% IR flow, 20% RGB flow)
             return self._alternate(
-                phase=self.Phase.PHASE3_MID_IR,
+                phase=self.Phase.PHASE3_ADAPTATION,
                 primary="p3_ir_flow",
                 secondary="p3_rgb_flow",
-                primary_ratio=self.config.curriculum.phase3_mid_ratio # This is IR ratio now
+                ratio=self.config.curriculum.phase3_rgb_sampling_ratio # This is IR ratio now
             )
 
         else: # PHASE4_IR_FOCUS

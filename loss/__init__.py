@@ -1,8 +1,5 @@
 from .orchestrator import (
-    filter_pseudo_labels,
-    compute_rgb_loss,
-    compute_mid_loss,
-    compute_ir_loss,
+    compute_combined_loss,
 )
 
 from .hmfocal import (
@@ -19,10 +16,7 @@ from .distill import (
 
 __all__ = [
     # orchestrator
-    "filter_pseudo_labels",
-    "compute_rgb_loss",
-    "compute_mid_loss",
-    "compute_ir_loss",
+    "compute_combined_loss",
 
     # focal losses
     "VarifocalLoss",
