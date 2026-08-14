@@ -1,11 +1,10 @@
 """
 Loss functions for each curriculum step.
 
-4-phase mapping:
+3-phase mapping:
   Phase 1  → compute_rgb_loss    (RGB only, GT supervised)
   Phase 2  → compute_rgb_mid_loss (mixed batch [RGB | MID], GT on whole batch)
   Phase 3  → compute_mid_ir_loss  (mixed batch [MID | IR], GT on MID slice only)
-  Phase 4  → compute_ir_loss     (IR only, ir_teacher pseudo)
 
 Expected detector API (Faster-RCNN / FCOS / DINO style):
   Training:  model(images, targets) → Dict[str, Tensor]  (named loss components)

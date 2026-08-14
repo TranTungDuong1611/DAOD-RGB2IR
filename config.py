@@ -1,12 +1,11 @@
 """
 Configuration dataclasses for Curriculum Domain Adaptation framework.
 
-4-phase training flow with **mixed-batch** Phase 2 and Phase 3:
+3-phase training flow with **mixed-batch** Phase 2 and Phase 3:
 
     Phase 1  → RGB only            (supervised warmup)
-    Phase 2  → mixed batch [RGB | MID]   (rgb_part keeps RGB, mid_part = SAGA)
-    Phase 3  → mixed batch [MID | IR]    (mid_part = SAGA, ir_part = unlabeled IR)
-    Phase 4  → IR only             (IR focus, unsupervised)
+    Phase 2  → mixed batch [RGB | MID]   (rgb_part keeps RGB, mid_part = GAN)
+    Phase 3  → mixed batch [MID | IR]    (mid_part = GAN, ir_part = unlabeled IR)
 """
 
 from dataclasses import dataclass, field
@@ -24,9 +23,15 @@ class EMAConfig:
 
 
 @dataclass
-class SAGAConfig:
-    """SemanticAwareGrayAugmentation settings — always applied (apply_prob=1.0)."""
-    apply_prob: float = 1.0       # 1.0 = deterministic, always apply SAGA
+class GANConfig:
+    """GAN translator settings — RGB → MID via pretrained GAN generator."""
+    checkpoint_path: str   = ""       # path tới file .pth của GAN generator
+    input_nc:        int   = 3        # channels input GAN (RGB)
+    output_nc:       int   = 1        # channels output GAN (grayscale)
+    ngf:             int   = 64       # base filter count
+    n_blocks:        int   = 9        # số ResNet blocks
+    state_dict_key:  str   = ""       # key trong checkpoint dict ("" = state_dict thẳng)
+    amp:             bool  = False    # dùng autocast khi GAN inference
 
 
 @dataclass
@@ -88,12 +93,11 @@ class IRAugConfig:
 @dataclass
 class CurriculumConfig:
     """
-    Phase boundaries (in global iterations) for the 4-phase curriculum.
+    Phase boundaries (in global iterations) for the 3-phase curriculum.
 
     Phase 1: [0,          phase1_end)  → RGB only           (supervised warmup)
     Phase 2: [phase1_end, phase2_end)  → mixed [RGB | MID]  (in-batch split)
     Phase 3: [phase2_end, phase3_end)  → mixed [MID | IR]   (in-batch split)
-    Phase 4: [phase3_end, ∞)           → IR only            (IR focus)
 
     In-batch split ratios:
       phase2_rgb_ratio : fraction of each Phase-2 batch that's RGB (rest is MID).
@@ -127,29 +131,6 @@ class LossConfig:
     p3_rgb_teacher_weight:  float = 0.5
     p3_ir_teacher_weight:   float = 0.5
 
-    # Phase 4 — IR focus (unsupervised, ir_teacher only)
-    p4_ir_teacher_weight:   float = 1.0
-
-
-@dataclass
-class AdvConfig:
-    """
-    Adversarial domain alignment via Gradient Reversal Layer (DANN-style).
-
-    Phase 2: disc_rgb distinguishes RGB (0) vs MID (1)
-    Phase 3: disc_ir  distinguishes MID (0) vs IR  (1)
-
-    Set p2_adv_weight / p3_adv_weight = 0 to disable per-phase.
-    """
-    p2_adv_weight:   float = 0.2    # adversarial loss weight in Phase 2
-    p3_adv_weight:   float = 0.2    # adversarial loss weight in Phase 3
-    backbone_dim:    int   = 2048   # ResNet50 layer4 channels (input to discriminator)
-    disc_hidden:     int   = 256    # discriminator hidden units (lightweight)
-    disc_lr:         float = 1e-4   # discriminator optimizer LR (AdamW)
-    label_smoothing: float = 0.1    # CrossEntropy label smoothing for discriminator
-    grl_lambda:      float = 1.0    # max / fixed lambda for GRL
-    use_schedule:    bool  = True   # True = DANN progressive schedule; False = fixed lambda
-
 
 @dataclass
 class TeacherUpdateConfig:
@@ -160,15 +141,12 @@ class TeacherUpdateConfig:
       Phase 1 (rgb step)      : no EMA update (warmup)
       Phase 2 (rgb_mid step)  : rgb_teacher only
       Phase 3 (mid_ir step)   : ir_teacher  only
-      Phase 4 (ir step)       : ir_teacher  only
     """
     p2_update_rgb_teacher: bool = True
     p2_update_ir_teacher:  bool = False
 
     p3_update_rgb_teacher: bool = False
     p3_update_ir_teacher:  bool = True
-
-    p4_update_ir_teacher:  bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -179,13 +157,12 @@ class TeacherUpdateConfig:
 class TrainingConfig:
     """Master config for CurriculumDomainAdaptationTrainer."""
     ema: EMAConfig = field(default_factory=EMAConfig)
-    saga: SAGAConfig = field(default_factory=SAGAConfig)
+    gan: GANConfig = field(default_factory=GANConfig)
     rgb_aug: RGBAugConfig = field(default_factory=RGBAugConfig)
     ir_aug: IRAugConfig = field(default_factory=IRAugConfig)
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     teacher_update: TeacherUpdateConfig = field(default_factory=TeacherUpdateConfig)
-    adv: AdvConfig = field(default_factory=AdvConfig)
 
     pseudo_label_conf_thresh: float = 0.7   # min score to keep a pseudo-label box
     grad_clip: float = 10.0                 # max gradient norm (0 = disabled)

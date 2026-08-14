@@ -28,32 +28,32 @@ import argparse
 import logging
 import os
 import sys
+import torch
 
 # Đảm bảo thư mục của script luôn nằm trong sys.path,
 # cho dù chạy từ thư mục nào.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import torch
+from typing import Optional
+
 from torch.utils.data import DataLoader
 
 from adaptive_threshold import (
     AdaptiveThresholdConfig,
     AdaptiveThresholdScheduler,
     TeacherThresholds,
-    ThreshRampConfig,
 )
 from config import (
-    AdvConfig,
     CurriculumConfig,
     EMAConfig,
+    GANConfig,
     IRAugConfig,
     LossConfig,
     RGBAugConfig,
-    SAGAConfig,
     TeacherUpdateConfig,
     TrainingConfig,
 )
-from discriminator import DomainDiscriminator
+from gan_translator import GANTranslator
 from datasets import (
     FLIR_CLASSES,
     FLIR_TO_COCO_IDX,
@@ -84,10 +84,17 @@ logger = logging.getLogger(__name__)
 # Configs
 # ---------------------------------------------------------------------------
 
-def make_training_config(device: str, target_h: int = 512, target_w: int = 640) -> TrainingConfig:
+def make_training_config(device: str, target_h: int = 512, target_w: int = 640,
+                         gan_checkpoint: str = "") -> TrainingConfig:
     return TrainingConfig(
         ema=EMAConfig(alpha=0.9996, use_warmup=True),
-        saga=SAGAConfig(apply_prob=1.0),   # SAGA applied 100% in MID phase
+        gan=GANConfig(
+            checkpoint_path=gan_checkpoint,
+            input_nc=3,
+            output_nc=1,
+            ngf=64,
+            n_blocks=9,
+        ),
         rgb_aug=RGBAugConfig(
             hflip_prob=0.5,
             multiscale_min=0.5,
@@ -122,10 +129,9 @@ def make_training_config(device: str, target_h: int = 512, target_w: int = 640) 
             gaussian_noise_std=0.02,
         ),
         curriculum=CurriculumConfig(
-            phase1_end=15_000,    # RGB warmup
-            phase2_end=20_000,    # mixed [RGB | MID]
-            phase3_end=25_000,    # mixed [MID | IR]
-            # Phase 4: IR focus until total_iters
+            phase1_end=10_000,    # RGB warmup
+            phase2_end=18_000,    # mixed [RGB | MID]
+            phase3_end=30_000,    # mixed [MID | IR]
             phase2_rgb_ratio=0.5, # 50% RGB + 50% MID per Phase-2 batch
             phase3_mid_ratio=0.5, # 50% MID + 50% IR per Phase-3 batch
         ),
@@ -141,8 +147,6 @@ def make_training_config(device: str, target_h: int = 512, target_w: int = 640) 
             p3_gt_weight=1.0,
             p3_rgb_teacher_weight=0.1,
             p3_ir_teacher_weight=0.4,
-            # Phase 4 — IR focus
-            p4_ir_teacher_weight=1.0,
         ),
         pseudo_label_conf_thresh=0.7,
         device=device,
@@ -159,24 +163,149 @@ def make_adaptive_threshold() -> AdaptiveThresholdScheduler:
         rgb_teacher=TeacherThresholds(
             phase1={0: 0.70, 1: 0.70, 2: 0.65},
             phase2={0: 0.70, 1: 0.75, 2: 0.65},
-            phase3={0: 0.70, 1: 0.75, 2: 0.65},
-            phase4={0: 0.75, 1: 0.75, 2: 0.70},
+            phase3={0: 0.75, 1: 0.80, 2: 0.70},
         ),
         ir_teacher=TeacherThresholds(
             phase1={0: 0.70, 1: 0.70, 2: 0.65},
             phase2={0: 0.70, 1: 0.75, 2: 0.65},
-            phase3={0: 0.70, 1: 0.75, 2: 0.65},
-            phase4={0: 0.75, 1: 0.75, 2: 0.70},   # base (overridden by ramp below)
-        ),
-        phase4_ir_ramp=ThreshRampConfig(
-            enabled=True,
-            # per-class: person(0) / car(1) / bicycle(2)
-            start={0: 0.75, 1: 0.75, 2: 0.70},  # threshold lúc vào Phase 4
-            end  ={0: 0.85, 1: 0.90, 2: 0.80},  # threshold tối đa sau ramp_steps
-            ramp_steps=10_000,
+            phase3={0: 0.75, 1: 0.80, 2: 0.70},
         ),
     ))
 
+
+# ---------------------------------------------------------------------------
+# Teacher pretraining
+# ---------------------------------------------------------------------------
+
+def pretrain_teacher(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    total_iters: int,
+    device: torch.device,
+    lr_backbone: float,
+    lr_head: float,
+    label: str,
+    save_path: str,
+    ir_val_loader: Optional[DataLoader] = None,
+    evaluator: Optional["DetectionEvaluator"] = None,
+) -> None:
+    """
+    Supervised pretraining cho một teacher trên loader cho trước.
+
+    Dùng cho:
+      - rgb_teacher  : loader = rgb_loader  (labeled RGB images + GT boxes)
+      - ir_teacher   : loader = mid_loader  (MID images do GAN sinh + GT boxes từ RGB)
+
+    Nếu ir_val_loader và evaluator được cung cấp, tại mỗi log checkpoint sẽ
+    eval mAP teacher trên IR val set và log kết quả.
+
+    Args:
+        model          : teacher model (FCOSDetector hoặc FasterRCNNDetector)
+        loader         : DataLoader trả (images [B,3,H,W], targets List[Dict])
+        total_iters    : số iteration pretrain
+        device         : cuda/cpu
+        lr_backbone, lr_head : learning rates
+        label          : tên log (ví dụ "rgb_teacher", "ir_teacher")
+        save_path      : đường dẫn lưu checkpoint sau pretrain
+        ir_val_loader  : IR val DataLoader để eval mAP trong burn-in
+        evaluator      : DetectionEvaluator instance (dùng chung, reset trước mỗi lần eval)
+    """
+    model.to(device)
+    model.train()
+    for p in model.parameters():
+        p.requires_grad = True
+
+    optimizer = torch.optim.SGD([
+        {"params": [p for n, p in model.named_parameters()
+                    if "backbone" in n and p.requires_grad],
+         "lr": lr_backbone},
+        {"params": [p for n, p in model.named_parameters()
+                    if "backbone" not in n and p.requires_grad],
+         "lr": lr_head},
+    ], momentum=0.9, weight_decay=1e-4)
+
+    lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_iters)
+
+    data_iter = iter(loader)
+    log_every = max(1, total_iters // 20)
+    do_ir_eval = ir_val_loader is not None and evaluator is not None
+
+    logger.info(f"[Pretrain {label}] starting {total_iters} iters ...")
+    for step in range(1, total_iters + 1):
+        try:
+            images, targets = next(data_iter)
+        except StopIteration:
+            data_iter = iter(loader)
+            images, targets = next(data_iter)
+
+        images  = images.to(device)
+        targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v
+                    for k, v in t.items()} for t in targets]
+
+        optimizer.zero_grad()
+        loss_dict = model(images, targets)
+        loss = sum(v for v in loss_dict.values())
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+        optimizer.step()
+        lr_sched.step()
+
+        if step % log_every == 0 or step == total_iters:
+            logger.info(
+                f"[Pretrain {label}] [{step:06d}/{total_iters}]  "
+                f"loss={loss.item():.4f}  lr={optimizer.param_groups[-1]['lr']:.2e}"
+            )
+            if do_ir_eval:
+                model.eval()
+                evaluator.reset()
+                with torch.no_grad():
+                    for ir_images, ir_targets in ir_val_loader:
+                        ir_images = ir_images.to(device)
+                        preds = model(ir_images)
+                        evaluator.update(preds, [{k: v for k, v in t.items()} for t in ir_targets])
+                ir_results = evaluator.compute()
+                map50   = ir_results.get("mAP@0.5", 0.0)
+                per_cls = "  ".join(
+                    f"{k.split('/')[-1]}={v:.4f}"
+                    for k, v in sorted(ir_results.items()) if k.startswith("AP@0.5/")
+                )
+                logger.info(
+                    f"[Pretrain {label}] [IR val @ {step:06d}]  "
+                    f"mAP@0.5={map50:.4f}  {per_cls}"
+                )
+                model.train()
+
+    # Freeze và eval sau pretrain
+    for p in model.parameters():
+        p.requires_grad = False
+    model.eval()
+
+    os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+    torch.save({"teacher": model.state_dict()}, save_path)
+    logger.info(f"[Pretrain {label}] done — saved to {save_path}")
+
+
+class MIDDataset(torch.utils.data.Dataset):
+    """
+    Wrapper dataset: lấy ảnh RGB + GT từ FLIRRGBDataset,
+    dùng GAN translator để sinh ảnh MID on-the-fly.
+
+    Dùng để pretrain ir_teacher trên MID domain.
+    """
+
+    def __init__(self, rgb_dataset, gan_translator: "GANTranslator"):
+        self.rgb_dataset    = rgb_dataset
+        self.gan_translator = gan_translator
+
+    def __len__(self):
+        return len(self.rgb_dataset)
+
+    def __getitem__(self, idx):
+        image, target = self.rgb_dataset[idx]         # [3, H, W], dict
+        mid = self.gan_translator.apply_to_batch(
+            image.unsqueeze(0)                        # [1, 3, H, W]
+        ).squeeze(0)                                  # [3, H, W]
+        return mid, target
 
 # ---------------------------------------------------------------------------
 # Main
@@ -226,6 +355,26 @@ def main(args):
         collate_fn=rgb_collate, num_workers=args.workers,
     )
 
+    # --- GAN Translator (cần trước khi build MIDDataset) ---
+    gan_device = device
+    if args.gan_checkpoint:
+        logger.info(f"Loading GAN translator from: {args.gan_checkpoint}")
+        gan_translator = GANTranslator.from_checkpoint(
+            checkpoint_path=args.gan_checkpoint,
+            input_nc=3,
+            output_nc=1,
+            ngf=64,
+            n_blocks=9,
+            device=gan_device,
+            amp=args.gan_amp,
+        )
+    else:
+        logger.warning(
+            "No --gan_checkpoint provided — MID images will be identical to RGB (passthrough). "
+            "Pass --gan_checkpoint to enable GAN-based RGB→MID translation."
+        )
+        gan_translator = GANTranslator(generator=None, device=gan_device)
+
     # --- Models ---
     logger.info(f"Building {args.model.upper()} trio ...")
     _trio_kwargs = dict(
@@ -237,27 +386,52 @@ def main(args):
         ir_to_rgb=True,
         from_coco=args.from_coco,
         coco_src_indices=FLIR_TO_COCO_IDX if args.from_coco else None,
-        focal_gamma=args.focal_gamma,
     )
     if args.model == "faster_rcnn":
-        student, rgb_teacher, ir_teacher = build_faster_rcnn_trio(**_trio_kwargs)
+        student, rgb_teacher, ir_teacher = build_faster_rcnn_trio(
+            **_trio_kwargs, focal_gamma=args.focal_gamma
+        )
     else:
         student, rgb_teacher, ir_teacher = build_fcos_trio(**_trio_kwargs)
-    copy_student_to_teacher(rgb_teacher, student)
-    copy_student_to_teacher(ir_teacher,  student)
 
-    # --- Optimizer ---
+    # --- MID DataLoader (GAN-translated RGB, dùng trong Phase 1 cho ir_teacher) ---
+    mid_dataset = MIDDataset(rgb_train, gan_translator)
+    mid_loader  = DataLoader(
+        mid_dataset, batch_size=args.batch_size, shuffle=True,
+        collate_fn=rgb_collate, num_workers=0, drop_last=True,
+        pin_memory=(device_str == "cuda"),
+    )
+
+    # --- Optimizer cho student (Phase 2+) ---
+    # Lúc này student chưa có requires_grad=True (trainer._setup_models sẽ freeze student),
+    # nên truyền tất cả params — trainer sẽ unfreeze đúng lúc.
     optimizer = torch.optim.SGD([
-        {"params": [p for n, p in student.named_parameters()
-                    if "backbone" in n and p.requires_grad],
+        {"params": [p for n, p in student.named_parameters() if "backbone" in n],
          "lr": args.lr_backbone},
-        {"params": [p for n, p in student.named_parameters()
-                    if "backbone" not in n and p.requires_grad],
+        {"params": [p for n, p in student.named_parameters() if "backbone" not in n],
          "lr": args.lr_head},
     ], momentum=0.9, weight_decay=1e-4)
 
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.total_iters,
+    )
+
+    # --- Optimizer cho teachers (Phase 1) ---
+    teacher_optimizer = torch.optim.SGD(
+        [
+            {"params": [p for n, p in rgb_teacher.named_parameters() if "backbone" in n],
+             "lr": args.lr_backbone},
+            {"params": [p for n, p in rgb_teacher.named_parameters() if "backbone" not in n],
+             "lr": args.lr_head},
+            {"params": [p for n, p in ir_teacher.named_parameters() if "backbone" in n],
+             "lr": args.lr_backbone},
+            {"params": [p for n, p in ir_teacher.named_parameters() if "backbone" not in n],
+             "lr": args.lr_head},
+        ],
+        momentum=0.9, weight_decay=1e-4,
+    )
+    teacher_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        teacher_optimizer, T_max=args.total_iters,
     )
 
     # --- Adaptive threshold ---
@@ -270,7 +444,8 @@ def main(args):
         class_names=FLIR_CLASSES,
         iou_thresholds=[0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
     )
-    _cfg = make_training_config(device_str, target_h=args.min_size, target_w=args.max_size)
+    _cfg = make_training_config(device_str, target_h=args.min_size, target_w=args.max_size,
+                                gan_checkpoint=args.gan_checkpoint)
     phase_eval = PhaseEvaluator(
         evaluator=evaluator,
         ir_val_loader=ir_val_loader,
@@ -289,40 +464,6 @@ def main(args):
 
     # --- Config (reuse _cfg built above for PhaseEvaluator) ---
     config = _cfg
-    config.adv = AdvConfig(
-        p2_adv_weight=args.adv_weight,
-        p3_adv_weight=args.adv_weight,
-        disc_hidden=1024,
-        backbone_dim=2048,
-        disc_lr=args.disc_lr,
-        grl_lambda=args.grl_lambda,
-        use_schedule=not args.no_grl_schedule,
-    )
-
-    # --- Adversarial discriminators (None when adv_weight=0) ---
-    disc_rgb = disc_ir = disc_optimizer = None
-    if args.adv_weight > 0.0:
-        disc_rgb = DomainDiscriminator(
-            in_features=config.adv.backbone_dim,
-            hidden=config.adv.disc_hidden,
-        )
-        disc_ir = DomainDiscriminator(
-            in_features=config.adv.backbone_dim,
-            hidden=config.adv.disc_hidden,
-        )
-        disc_optimizer = torch.optim.AdamW(
-            list(disc_rgb.parameters()) + list(disc_ir.parameters()),
-            lr=config.adv.disc_lr,
-            weight_decay=1e-4,
-        )
-        logger.info(
-            f"Adversarial training ON  "
-            f"adv_weight={args.adv_weight}  "
-            f"grl_lambda={args.grl_lambda}  "
-            f"schedule={'DANN' if not args.no_grl_schedule else 'fixed'}"
-        )
-    else:
-        logger.info("Adversarial training OFF  (--adv_weight 0)")
 
     # --- Trainer ---
     trainer = CurriculumDomainAdaptationTrainer(
@@ -333,12 +474,11 @@ def main(args):
         config=config,
         rgb_loader=rgb_loader,
         ir_loader=ir_loader,
+        gan_translator=gan_translator,
+        teacher_optimizer=teacher_optimizer,
+        mid_loader=mid_loader,
         threshold_scheduler=thresh,
         phase_evaluator=phase_eval,
-        phase1_best_path=os.path.join(args.output_dir, "best_PHASE1_RGB_WARMUP.pt"),
-        disc_rgb=disc_rgb,
-        disc_ir=disc_ir,
-        disc_optimizer=disc_optimizer,
     )
 
     # --- Best checkpoint callbacks ---
@@ -401,8 +541,13 @@ def main(args):
     )
     for _ in range(remaining_iters):
         log  = trainer.train_one_iteration()
-        lr_scheduler.step()
         step = trainer.global_step  # incremented at end of train_one_iteration
+
+        # Phase 1: step teacher lr; Phase 2+: step student lr
+        if log.get("phase") == "PHASE1_RGB_WARMUP":
+            teacher_lr_scheduler.step()
+        else:
+            lr_scheduler.step()
 
         # Verbose log every 500 iters
         if step % 500 == 0:
@@ -410,7 +555,10 @@ def main(args):
             domain = log.get("domain", "?")
             t_rgb  = log.get("thresh_rgb", "?")
             t_ir   = log.get("thresh_ir",  "?")
-            lr     = optimizer.param_groups[-1]["lr"]
+            if phase == "PHASE1_RGB_WARMUP":
+                lr = teacher_optimizer.param_groups[-1]["lr"]
+            else:
+                lr = optimizer.param_groups[-1]["lr"]
             thresh_str = f"({t_rgb:.2f}/{t_ir:.2f})" if isinstance(t_rgb, float) else ""
             logger.info(
                 f"[{step:07d}/{args.total_iters}]  "
@@ -426,7 +574,7 @@ def main(args):
     # --- Final eval + summary ---
     logger.info("\nFinal evaluation ...")
     phase_eval.evaluate(student, global_step=trainer.global_step,
-                        current_phase=Phase.PHASE4_IR_FOCUS,
+                        current_phase=Phase.PHASE3_MID_IR,
                         trigger_reason="final")
     phase_eval.print_history()
 
@@ -444,31 +592,28 @@ def parse_args():
     p.add_argument("--data_root",   required=True,
                    help="Path to align/ directory (contains JPEGImages/, Annotations/, ImageSets/)")
     p.add_argument("--output_dir",  default="./output")
-    p.add_argument("--total_iters", type=int,   default=25_000)
-    p.add_argument("--batch_size",  type=int,   default=4)
+    p.add_argument("--total_iters", type=int,   default=30_000)
+    p.add_argument("--batch_size",  type=int,   default=32)
     p.add_argument("--workers",     type=int,   default=4)
     p.add_argument("--lr_backbone", type=float, default=5e-5)
     p.add_argument("--lr_head",     type=float, default=5e-4)
     p.add_argument("--min_size",    type=int,   default=512)
     p.add_argument("--max_size",    type=int,   default=640)
-    p.add_argument("--eval_every",  type=int,   default=2_000)
-    p.add_argument("--vis_every",   type=int,   default=500)
+    p.add_argument("--eval_every",  type=int,   default=1_000)
+    p.add_argument("--vis_every",   type=int,   default=1_000)
     p.add_argument("--save_every",  type=int,   default=5_000)
     p.add_argument("--model",       default="fcos",
                    choices=["fcos", "faster_rcnn"],
                    help="Detector backbone (default: fcos)")
     p.add_argument("--from_coco",   action="store_true",
                    help="Init head from COCO pretrained weights (91-class → replace head)")
-    p.add_argument("--focal_gamma", type=float, default=2.0,
+    p.add_argument("--focal_gamma", type=float, default=0.0,
                    help="Focal loss gamma for faster_rcnn classifier (default 2.0, 0=cross-entropy)")
-    p.add_argument("--adv_weight",      type=float, default=0.2,
-                   help="Adversarial alignment loss weight for Phase 2/3 (default 0.2, 0=disabled)")
-    p.add_argument("--disc_lr",         type=float, default=1e-4,
-                   help="Discriminator optimizer LR (default 1e-4)")
-    p.add_argument("--grl_lambda",      type=float, default=1.0,
-                   help="Max GRL lambda (default 1.0)")
-    p.add_argument("--no_grl_schedule", action="store_true",
-                   help="Use fixed GRL lambda instead of DANN progressive schedule")
+    p.add_argument("--gan_checkpoint", default="",
+                   help="Path to GAN generator checkpoint .pth (e.g. gan_mid/latest_net_G_A.pth). "
+                        "If empty, MID = RGB passthrough (for debugging).")
+    p.add_argument("--gan_amp",     action="store_true",
+                   help="Use torch.autocast during GAN inference (saves VRAM)")
     p.add_argument("--resume",      default=None,
                    help="Path to checkpoint to resume from (e.g. output/best_PHASE1_RGB_WARMUP.pt)")
     p.add_argument("--device",      default="cuda",

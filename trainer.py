@@ -1,16 +1,22 @@
 """
-CurriculumDomainAdaptationTrainer (4-phase, mixed-batch).
+CurriculumDomainAdaptationTrainer (3-phase, mixed-batch).
 
 Architecture:
-  - 1 student   (trained by gradient descent, has optimizer)
+  - 1 student     (trained by gradient descent từ Phase 2 trở đi)
   - 2 teachers:
-      rgb_teacher  (EMA of student, updated in Phase 2)
-      ir_teacher   (EMA of student, updated in Phase 3 and Phase 4)
-  Teachers are ALWAYS in eval mode and require no grad.
+      rgb_teacher  (train supervised trên RGB trong Phase 1, EMA update từ Phase 2)
+      ir_teacher   (train supervised trên MID/GAN trong Phase 1, EMA update từ Phase 3)
+  Phase 1: TEACHERS tự train độc lập — student KHÔNG train.
+  Phase 1→2 transition: student được khởi tạo từ rgb_teacher weights.
+  Phase 2+: teachers freeze grad, chỉ update qua EMA.
+
+MID domain bridge:
+  GAN translator (frozen CycleGAN generator, RGB → grayscale 3-channel).
 
 Training flow per iteration:
-  scheduler.get_next_step(global_step) → "rgb" | "rgb_mid" | "mid_ir" | "ir"
-  dispatch to train_rgb_step / train_rgb_mid_step / train_mid_ir_step / train_ir_step
+  scheduler.get_next_step(global_step) → "rgb" | "rgb_mid" | "mid_ir"
+  Phase 1 "rgb" step → train_teachers_step() (cả 2 teacher train song song)
+  Phase 2+ → train_rgb_mid_step / train_mid_ir_step (student)
 
 Phase 2 and Phase 3 build MIXED batches via in-batch split:
   Phase 2 :  [RGB | MID]     n_rgb = round(B * phase2_rgb_ratio)
@@ -18,9 +24,8 @@ Phase 2 and Phase 3 build MIXED batches via in-batch split:
 """
 
 import logging
-import os
 import random
-from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional
 
 import torch
 import torch.nn as nn
@@ -29,20 +34,12 @@ from torch.utils.data import DataLoader
 
 from batch_types import IRBatch, MidIrBatch, RGBBatch, RgbMidBatch
 from config import TrainingConfig
-from discriminator import (
-    DomainDiscriminator,
-    GradientReversal,
-    compute_adv_loss,
-    grl_lambda_schedule,
-)
 from ema import ema_update
+from gan_translator import GANTranslator
 from losses import (
-    compute_ir_loss,
     compute_mid_ir_loss,
-    compute_rgb_loss,
     compute_rgb_mid_loss,
 )
-from saga import SemanticAwareGrayAugmentation
 from scheduler import CurriculumScheduler, DomainStep, Phase
 
 if TYPE_CHECKING:
@@ -82,12 +79,11 @@ class CurriculumDomainAdaptationTrainer:
         config: TrainingConfig,
         rgb_loader: DataLoader,
         ir_loader: DataLoader,
+        gan_translator: GANTranslator,
+        teacher_optimizer: Optimizer,
+        mid_loader: DataLoader,
         threshold_scheduler: Optional["AdaptiveThresholdScheduler"] = None,
         phase_evaluator: Optional["PhaseEvaluator"] = None,
-        phase1_best_path: Optional[str] = None,
-        disc_rgb: Optional[nn.Module] = None,
-        disc_ir:  Optional[nn.Module] = None,
-        disc_optimizer: Optional[Optimizer] = None,
     ) -> None:
         self.student = student
         self.rgb_teacher = rgb_teacher
@@ -96,27 +92,24 @@ class CurriculumDomainAdaptationTrainer:
         self.config = config
         self.device = torch.device(config.device)
 
-        # Adversarial components (None = disabled)
-        self.disc_rgb       = disc_rgb
-        self.disc_ir        = disc_ir
-        self.disc_optimizer = disc_optimizer
-        self._grl           = GradientReversal(lambda_=1.0) if (disc_rgb or disc_ir) else None
+        # GAN translator: RGB → MID (frozen, no grad)
+        self.gan_translator = gan_translator
+
+        # Teacher optimizer — dùng trong Phase 1, bị bỏ qua từ Phase 2
+        self.teacher_optimizer = teacher_optimizer
 
         # Optional extensions
         self.threshold_scheduler = threshold_scheduler
         self.phase_evaluator     = phase_evaluator
-        self.phase_best_paths: Dict[str, str] = {}
-        if phase1_best_path:
-            self.phase_best_paths["PHASE1_RGB_WARMUP"] = phase1_best_path
 
         self._setup_models()
 
-        self.saga      = SemanticAwareGrayAugmentation(apply_prob=config.saga.apply_prob)
         self.scheduler = CurriculumScheduler(config.curriculum)
 
         # Infinite data iterators — never exhaust
         self._rgb_iter: Iterator = self._infinite(rgb_loader)
         self._ir_iter: Iterator  = self._infinite(ir_loader)
+        self._mid_iter: Iterator = self._infinite(mid_loader)
 
         self.global_step: int = 0
         self._last_phase: Optional[Phase] = None
@@ -127,18 +120,34 @@ class CurriculumDomainAdaptationTrainer:
     # ------------------------------------------------------------------
 
     def _setup_models(self) -> None:
-        """Move models to device; freeze & eval teachers; move discriminators."""
+        """Move models to device. Teachers bắt đầu ở train mode (Phase 1)."""
         for model in (self.student, self.rgb_teacher, self.ir_teacher):
             model.to(self.device)
+        # Student freeze cho đến Phase 2
+        self.student.eval()
+        for p in self.student.parameters():
+            p.requires_grad = False
+        # Teachers train mode trong Phase 1
+        for teacher in (self.rgb_teacher, self.ir_teacher):
+            teacher.train()
+            for p in teacher.parameters():
+                p.requires_grad = True
 
+    def _freeze_teachers(self) -> None:
+        """Freeze teachers sau Phase 1 — gọi tại transition Phase 1→2."""
         for teacher in (self.rgb_teacher, self.ir_teacher):
             for p in teacher.parameters():
                 p.requires_grad = False
             teacher.eval()
 
-        for disc in (self.disc_rgb, self.disc_ir):
-            if disc is not None:
-                disc.to(self.device)
+    def _unfreeze_student(self) -> None:
+        """Unfreeze student và init từ rgb_teacher tại Phase 1→2."""
+        from ema import copy_student_to_teacher
+        copy_student_to_teacher(self.student, self.rgb_teacher)
+        self.student.train()
+        for p in self.student.parameters():
+            p.requires_grad = True
+        logger.info("[Phase transition] student initialized from rgb_teacher weights")
 
     # ------------------------------------------------------------------
     # Phase transition handler
@@ -146,45 +155,16 @@ class CurriculumDomainAdaptationTrainer:
 
     def _on_phase_transition(self, from_phase: Optional[Phase], to_phase: Phase) -> None:
         """
-        Called exactly once when the curriculum phase changes.
-
-        Phase 1 → Phase 2 :
-          Hard-copy best Phase-1 student → BOTH teachers, so they enter the
-          curriculum from the strongest RGB-pretrained weights available.
-        Other transitions : no-op (EMA continues to evolve teachers in place).
+        Phase 1 → Phase 2:
+          - Freeze cả 2 teachers (chuyển sang EMA mode).
+          - Init student từ rgb_teacher weights.
         """
         if from_phase is None:
             return
-
         if from_phase == Phase.PHASE1_RGB_WARMUP and to_phase == Phase.PHASE2_RGB_MID:
-            self._init_teachers_from_checkpoint(
-                "PHASE1_RGB_WARMUP", teachers=["rgb", "ir"],
-                fallback_msg="PHASE1→PHASE2: no best checkpoint, using current student",
-            )
-
-    def _init_teachers_from_checkpoint(
-        self,
-        phase_key: str,
-        teachers: list,
-        fallback_msg: str,
-    ) -> None:
-        """Load student weights from the best checkpoint of a phase into teachers."""
-        from ema import copy_student_to_teacher
-        best_path = self.phase_best_paths.get(phase_key)
-        if best_path and os.path.exists(best_path):
-            logger.info(f"[Phase transition] loading {best_path} → {teachers} teacher(s)")
-            ckpt = torch.load(best_path, map_location=self.device, weights_only=False)
-            state = ckpt["student"]
-            if "rgb" in teachers:
-                self.rgb_teacher.load_state_dict(state)
-            if "ir" in teachers:
-                self.ir_teacher.load_state_dict(state)
-        else:
-            logger.info(f"[Phase transition] {fallback_msg}")
-            if "rgb" in teachers:
-                copy_student_to_teacher(self.rgb_teacher, self.student)
-            if "ir" in teachers:
-                copy_student_to_teacher(self.ir_teacher,  self.student)
+            logger.info("[Phase transition] PHASE1 → PHASE2: freezing teachers, init student")
+            self._freeze_teachers()
+            self._unfreeze_student()
 
     # ------------------------------------------------------------------
     # Adaptive threshold
@@ -193,40 +173,15 @@ class CurriculumDomainAdaptationTrainer:
     def _get_threshold(self, phase: Phase, teacher: str = "both"):
         """
         Return current confidence threshold for pseudo-label filtering.
-
-        Phase 4 ir_teacher gets `steps_into_phase` for linear ramp-up
-        (measured from the start of Phase 4 = phase3_end).
         """
         if self.threshold_scheduler is None:
             return self.config.pseudo_label_conf_thresh
 
-        steps_into_phase = (
-            max(0, self.global_step - self.config.curriculum.phase3_end)
-            if phase == Phase.PHASE4_IR_FOCUS
-            else 0
-        )
-
         if teacher == "rgb":
-            return self.threshold_scheduler.rgb_teacher(phase, steps_into_phase)
+            return self.threshold_scheduler.rgb_teacher(phase)
         if teacher == "ir":
-            return self.threshold_scheduler.ir_teacher(phase, steps_into_phase)
-        return self.threshold_scheduler.both(phase, steps_into_phase)
-
-    def _get_grl_lambda(self, phase: Phase) -> float:
-        """Return GRL lambda for the current step (fixed or DANN schedule)."""
-        adv = self.config.adv
-        if not adv.use_schedule:
-            return adv.grl_lambda
-        cur = self.config.curriculum
-        if phase == Phase.PHASE2_RGB_MID:
-            return grl_lambda_schedule(
-                self.global_step, cur.phase1_end, cur.phase2_end, adv.grl_lambda
-            )
-        if phase == Phase.PHASE3_MID_IR:
-            return grl_lambda_schedule(
-                self.global_step, cur.phase2_end, cur.phase3_end, adv.grl_lambda
-            )
-        return adv.grl_lambda
+            return self.threshold_scheduler.ir_teacher(phase)
+        return self.threshold_scheduler.both(phase)
 
     # ------------------------------------------------------------------
     # Infinite data utilities
@@ -252,6 +207,17 @@ class CurriculumDomainAdaptationTrainer:
         raw = next(self._ir_iter)
         images = raw[0] if isinstance(raw, (list, tuple)) else raw
         return IRBatch(images=images.to(self.device))
+
+    def _next_mid(self) -> RGBBatch:
+        """Lấy batch MID (GAN-translated) có GT — dùng trong Phase 1 để train ir_teacher."""
+        images, targets = next(self._mid_iter)
+        images = images.to(self.device)
+        targets = [
+            {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+             for k, v in t.items()}
+            for t in targets
+        ]
+        return RGBBatch(images=images, targets=targets)
 
     # ------------------------------------------------------------------
     # Mixed-batch builders
@@ -286,8 +252,7 @@ class CurriculumDomainAdaptationTrainer:
         rgb_part = rgb.images[:n_rgb]                           # [n_rgb, 3, H, W]
         if n_mid > 0:
             mid_source  = rgb.images[n_rgb:]                    # [n_mid, 3, H, W]
-            mid_boxes   = [t["boxes"] for t in rgb.targets[n_rgb:]]
-            mid_part    = self.saga.apply_to_batch(mid_source, mid_boxes)
+            mid_part    = self.gan_translator.apply_to_batch(mid_source)
             mixed       = torch.cat([rgb_part, mid_part], dim=0)
         else:
             mixed = rgb_part
@@ -320,8 +285,7 @@ class CurriculumDomainAdaptationTrainer:
         if n_mid > 0:
             mid_source  = rgb.images[:n_mid]
             mid_targets = rgb.targets[:n_mid]
-            mid_boxes   = [t["boxes"] for t in mid_targets]
-            mid_images  = self.saga.apply_to_batch(mid_source, mid_boxes)
+            mid_images  = self.gan_translator.apply_to_batch(mid_source)
         else:
             mid_images  = rgb.images[:0]
             mid_targets = []
@@ -507,35 +471,49 @@ class CurriculumDomainAdaptationTrainer:
     # Domain steps
     # ------------------------------------------------------------------
 
-    def train_rgb_step(self, phase: Phase = Phase.PHASE1_RGB_WARMUP) -> Dict:
+    def train_teachers_step(self, phase: Phase = Phase.PHASE1_RGB_WARMUP) -> Dict:
         """
-        Phase 1 RGB step — supervised on labeled source data.
+        Phase 1: train 2 teachers độc lập, student KHÔNG train.
 
-        Loss:   p1_gt_weight · L_gt  +  optional p1_pseudo_weight · L_pseudo
-        EMA:    none (warmup)
+        rgb_teacher ← supervised trên RGB batch (GT boxes)
+        ir_teacher  ← supervised trên MID batch (GAN-translated, cùng GT boxes)
+
+        Student bị frozen trong phase này.
         """
-        self.student.train()
-        batch = self._next_rgb()
-        self.optimizer.zero_grad()
+        self.rgb_teacher.train()
+        self.ir_teacher.train()
+        self.teacher_optimizer.zero_grad()
 
-        # Phase 1 = pure supervised warmup: geometric aug only, no teacher
-        student_images, student_targets = self._geometric_aug(
-            batch.images, batch.targets, self.config.rgb_aug
+        # rgb_teacher train trên RGB
+        rgb_batch = self._next_rgb()
+        rgb_images, rgb_targets = self._geometric_aug(
+            rgb_batch.images, rgb_batch.targets, self.config.rgb_aug
         )
+        rgb_loss_dict = self.rgb_teacher(rgb_images, rgb_targets)
+        rgb_loss = sum(v for v in rgb_loss_dict.values()) * self.config.loss.p1_gt_weight
 
-        loss, log = compute_rgb_loss(
-            student=self.student,
-            images=student_images,
-            gt_targets=student_targets,
-            rgb_teacher=None,
-            config=self.config.loss,
-            conf_thresh=self._get_threshold(phase, teacher="rgb"),
-            teacher_images=None,
+        # ir_teacher train trên MID
+        mid_batch = self._next_mid()
+        mid_images, mid_targets = self._geometric_aug(
+            mid_batch.images, mid_batch.targets, self.config.rgb_aug
         )
+        mid_loss_dict = self.ir_teacher(mid_images, mid_targets)
+        mid_loss = sum(v for v in mid_loss_dict.values()) * self.config.loss.p1_gt_weight
 
-        loss.backward()
-        log["grad_norm"] = self._clip_and_step()
-        log["domain"] = "rgb"
+        total_loss = rgb_loss + mid_loss
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(self.rgb_teacher.parameters()) + list(self.ir_teacher.parameters()),
+            self.config.grad_clip if self.config.grad_clip > 0 else float("inf"),
+        )
+        self.teacher_optimizer.step()
+
+        log: Dict = {
+            "p1_rgb_teacher_loss": rgb_loss.item(),
+            "p1_ir_teacher_loss":  mid_loss.item(),
+            "p1_total_loss":       total_loss.item(),
+            "domain": "rgb+mid",
+        }
         return log
 
     def train_rgb_mid_step(self, phase: Phase = Phase.PHASE2_RGB_MID) -> Dict:
@@ -553,8 +531,6 @@ class CurriculumDomainAdaptationTrainer:
         self.student.train()
         mixed = self._next_rgb_mid()
         self.optimizer.zero_grad()
-        if self.disc_optimizer is not None:
-            self.disc_optimizer.zero_grad()
 
         weak_images, aug_targets = self._geometric_aug(
             mixed.images, mixed.targets, self.config.rgb_aug
@@ -573,24 +549,8 @@ class CurriculumDomainAdaptationTrainer:
             teacher_images=weak_images,
         )
 
-        # Adversarial alignment: disc_rgb distinguishes RGB (0) vs MID (1)
-        total_loss = det_loss
-        if self.disc_rgb is not None and self.config.adv.p2_adv_weight > 0.0:
-            features  = self.student.get_backbone_features(strong_images)
-            self._grl.set_lambda(self._get_grl_lambda(phase))
-            adv_loss, adv_log = compute_adv_loss(
-                features, self.disc_rgb, self._grl, n_a=mixed.n_rgb,
-                label_smoothing=self.config.adv.label_smoothing,
-            )
-            total_loss = det_loss + self.config.adv.p2_adv_weight * adv_loss
-            log["p2_adv_loss"]  = adv_log["adv_loss"]
-            log["p2_disc_acc"]  = adv_log["disc_acc"]
-            log["p2_grl_lambda"] = self._grl.lambda_
-
-        total_loss.backward()
+        det_loss.backward()
         log["grad_norm"] = self._clip_and_step()
-        if self.disc_optimizer is not None:
-            self.disc_optimizer.step()
 
         if self.config.teacher_update.p2_update_rgb_teacher:
             ema_update(
@@ -627,8 +587,6 @@ class CurriculumDomainAdaptationTrainer:
         self.student.train()
         mixed = self._next_mid_ir()
         self.optimizer.zero_grad()
-        if self.disc_optimizer is not None:
-            self.disc_optimizer.zero_grad()
 
         # Per-slice geometric aug (raw → target shape)
         if mixed.n_mid > 0:
@@ -673,24 +631,8 @@ class CurriculumDomainAdaptationTrainer:
             teacher_images=weak_images,
         )
 
-        # Adversarial alignment: disc_ir distinguishes MID (0) vs IR (1)
-        total_loss = det_loss
-        if self.disc_ir is not None and self.config.adv.p3_adv_weight > 0.0:
-            features  = self.student.get_backbone_features(strong_images)
-            self._grl.set_lambda(self._get_grl_lambda(phase))
-            adv_loss, adv_log = compute_adv_loss(
-                features, self.disc_ir, self._grl, n_a=n_mid_aug,
-                label_smoothing=self.config.adv.label_smoothing,
-            )
-            total_loss = det_loss + self.config.adv.p3_adv_weight * adv_loss
-            log["p3_adv_loss"]   = adv_log["adv_loss"]
-            log["p3_disc_acc"]   = adv_log["disc_acc"]
-            log["p3_grl_lambda"] = self._grl.lambda_
-
-        total_loss.backward()
+        det_loss.backward()
         log["grad_norm"] = self._clip_and_step()
-        if self.disc_optimizer is not None:
-            self.disc_optimizer.step()
 
         if self.config.teacher_update.p3_update_rgb_teacher:
             ema_update(
@@ -708,41 +650,6 @@ class CurriculumDomainAdaptationTrainer:
         log["domain"] = "mid_ir"
         return log
 
-    def train_ir_step(self, phase: Phase = Phase.PHASE4_IR_FOCUS) -> Dict:
-        """
-        Phase 4 IR step — unsupervised on unlabeled IR data, ir_teacher only.
-
-        Loss:   p4_ir_teacher_weight · L_pseudo(ir_teacher, IR)
-        EMA:    ir_teacher
-        """
-        self.student.train()
-        batch = self._next_ir()
-        self.optimizer.zero_grad()
-
-        weak_images, _ = self._geometric_aug(batch.images, None, self.config.ir_aug)
-        strong_images = self._ir_photometric_aug(weak_images.clone())
-
-        loss, log = compute_ir_loss(
-            student=self.student,
-            ir_images=strong_images,
-            ir_teacher=self.ir_teacher,
-            config=self.config.loss,
-            conf_thresh=self._get_threshold(phase, teacher="ir"),
-            teacher_images=weak_images,
-        )
-
-        loss.backward()
-        log["grad_norm"] = self._clip_and_step()
-
-        if self.config.teacher_update.p4_update_ir_teacher:
-            ema_update(
-                teacher=self.ir_teacher, student=self.student,
-                alpha=self.config.ema.alpha,
-                global_step=self.global_step if self.config.ema.use_warmup else None,
-            )
-
-        log["domain"] = "ir"
-        return log
 
     # ------------------------------------------------------------------
     # Orchestration
@@ -758,13 +665,11 @@ class CurriculumDomainAdaptationTrainer:
         self._last_phase = phase
 
         if step == "rgb":
-            log = self.train_rgb_step(phase=phase)
+            log = self.train_teachers_step(phase=phase)
         elif step == "rgb_mid":
             log = self.train_rgb_mid_step(phase=phase)
         elif step == "mid_ir":
             log = self.train_mid_ir_step(phase=phase)
-        elif step == "ir":
-            log = self.train_ir_step(phase=phase)
         else:
             raise ValueError(f"Unknown domain step: {step!r}")  # pragma: no cover
 
@@ -815,12 +720,6 @@ class CurriculumDomainAdaptationTrainer:
             "ir_teacher":  self.ir_teacher.state_dict(),
             "optimizer":   self.optimizer.state_dict(),
         }
-        if self.disc_rgb is not None:
-            ckpt["disc_rgb"] = self.disc_rgb.state_dict()
-        if self.disc_ir is not None:
-            ckpt["disc_ir"] = self.disc_ir.state_dict()
-        if self.disc_optimizer is not None:
-            ckpt["disc_optimizer"] = self.disc_optimizer.state_dict()
         torch.save(ckpt, path)
         logger.info(f"Checkpoint saved → {path}  (step {self.global_step})")
 
@@ -831,12 +730,6 @@ class CurriculumDomainAdaptationTrainer:
         self.rgb_teacher.load_state_dict(ckpt["rgb_teacher"])
         self.ir_teacher.load_state_dict(ckpt["ir_teacher"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
-        if self.disc_rgb is not None and "disc_rgb" in ckpt:
-            self.disc_rgb.load_state_dict(ckpt["disc_rgb"])
-        if self.disc_ir is not None and "disc_ir" in ckpt:
-            self.disc_ir.load_state_dict(ckpt["disc_ir"])
-        if self.disc_optimizer is not None and "disc_optimizer" in ckpt:
-            self.disc_optimizer.load_state_dict(ckpt["disc_optimizer"])
         logger.info(f"Checkpoint loaded ← {path}  (step {self.global_step})")
 
     # ------------------------------------------------------------------

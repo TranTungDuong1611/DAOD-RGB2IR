@@ -1,12 +1,11 @@
 """
 CurriculumScheduler — decides which domain step to execute at each iteration.
 
-4-phase curriculum (mixed batches in Phase 2 and Phase 3):
+3-phase curriculum (mixed batches in Phase 2 and Phase 3):
 
   Phase 1  [0,           phase1_end)  → "rgb"      (RGB warmup, supervised)
   Phase 2  [phase1_end,  phase2_end)  → "rgb_mid"  (mixed batch [RGB | MID])
   Phase 3  [phase2_end,  phase3_end)  → "mid_ir"   (mixed batch [MID | IR])
-  Phase 4  [phase3_end,  ∞)           → "ir"       (IR focus, unsupervised)
 
 There is exactly ONE step type per phase — no within-phase alternation
 because the RGB/MID and MID/IR mixing now happens **inside each batch**
@@ -27,10 +26,9 @@ class Phase(Enum):
     PHASE1_RGB_WARMUP = 1
     PHASE2_RGB_MID    = 2   # mixed [RGB | MID]
     PHASE3_MID_IR     = 3   # mixed [MID | IR]
-    PHASE4_IR_FOCUS   = 4
 
 
-DomainStep = Literal["rgb", "rgb_mid", "mid_ir", "ir"]
+DomainStep = Literal["rgb", "rgb_mid", "mid_ir"]
 
 
 # ---------------------------------------------------------------------------
@@ -54,9 +52,7 @@ class CurriculumScheduler:
             return Phase.PHASE1_RGB_WARMUP
         if global_step < c.phase2_end:
             return Phase.PHASE2_RGB_MID
-        if global_step < c.phase3_end:
-            return Phase.PHASE3_MID_IR
-        return Phase.PHASE4_IR_FOCUS
+        return Phase.PHASE3_MID_IR
 
     def get_next_step(self, global_step: int) -> DomainStep:
         """Determine the next domain step to execute."""
@@ -65,9 +61,7 @@ class CurriculumScheduler:
             return "rgb"
         if phase == Phase.PHASE2_RGB_MID:
             return "rgb_mid"
-        if phase == Phase.PHASE3_MID_IR:
-            return "mid_ir"
-        return "ir"
+        return "mid_ir"
 
     def __repr__(self) -> str:
         c = self.config

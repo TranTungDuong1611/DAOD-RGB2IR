@@ -293,7 +293,7 @@ class PhaseEvaluator:
         vis_score_thresh: float = 0.3,
         class_names:     Optional[List[str]] = None,
         thresh_scheduler: Optional[AdaptiveThresholdScheduler] = None,
-        phase3_end:      int = 0,   # curriculum.phase3_end — start of Phase 4 IR focus ramp
+        phase3_end:      int = 0,   # curriculum.phase3_end (for reference)
         # Teachers — when provided, visualization draws a side-by-side comparison
         # grid of student + teachers via visualize_compare_models. Otherwise only
         # the student is visualized.
@@ -365,6 +365,9 @@ class PhaseEvaluator:
         self._last_phase = current_phase
 
         if triggered:
+            # Phase 1: evaluate teachers on IR val instead of student
+            if current_phase.name == "PHASE1_RGB_WARMUP":
+                return self._evaluate_teachers(global_step, current_phase, trigger_reason)
             return self.evaluate(model, global_step, current_phase, trigger_reason)
 
         # Visualization-only trigger (no full eval)
@@ -488,17 +491,106 @@ class PhaseEvaluator:
     # ------------------------------------------------------------------
 
     def _should_evaluate(self, global_step: int, current_phase) -> Tuple[bool, str]:
-        # Phase transition trigger
-        if self._last_phase is not None and current_phase != self._last_phase:
-            if self.eval_on_phases is None or self._last_phase in self.eval_on_phases:
-                return True, f"phase_end:{self._last_phase.name}"
-
-        # Periodic trigger
+        # Periodic trigger only — phase transition no longer auto-triggers eval
         if self.eval_every_n is not None:
             if global_step > 0 and global_step % self.eval_every_n == 0:
                 return True, f"periodic:{self.eval_every_n}"
 
         return False, ""
+
+    def _evaluate_teachers(
+        self,
+        global_step:    int,
+        current_phase,
+        trigger_reason: str = "manual",
+    ) -> Dict:
+        """
+        Phase 1 only: evaluate rgb_teacher and ir_teacher on IR val set.
+        Results are logged and appended to history. Returns combined result dict.
+        """
+        self.log_fn(
+            f"[Eval-Teachers] step={global_step}  phase={current_phase.name}  "
+            f"trigger={trigger_reason}  running on {len(self.ir_val_loader.dataset)} IR val images ..."
+        )
+
+        results: Dict = {
+            "global_step": global_step,
+            "phase":       current_phase.name,
+            "trigger":     trigger_reason,
+        }
+
+        for tag, teacher in [("rgb_teacher", self.rgb_teacher), ("ir_teacher", self.ir_teacher)]:
+            if teacher is None:
+                continue
+            teacher.eval()
+            self.evaluator.reset()
+            with torch.no_grad():
+                for batch in self.ir_val_loader:
+                    images, targets = batch
+                    images  = images.to(self.device)
+                    preds   = teacher(images)
+                    targets = [{k: v for k, v in t.items()} for t in targets]
+                    self.evaluator.update(preds, targets)
+            teacher_results = self.evaluator.compute()
+            # prefix keys with teacher tag
+            for k, v in teacher_results.items():
+                results[f"{tag}_{k}"] = v
+            map50 = teacher_results.get("mAP@0.5", 0.0)
+            self.log_fn(f"[IR Val | {tag}] mAP@0.5={map50:.4f}")
+            per_class = {k: v for k, v in teacher_results.items() if k.startswith("AP@")}
+            for name, ap in sorted(per_class.items()):
+                self.log_fn(f"  {tag}/{name} = {ap:.4f}")
+            teacher.train()
+
+        self.history.append(results)
+        self._last_eval_step = global_step
+
+        # Optional visualization — show teachers side by side on IR val
+        if self.vis_dir is not None:
+            self._visualize_teachers(global_step, current_phase, trigger_reason)
+
+        return results
+
+    def _visualize_teachers(self, global_step: int, current_phase, trigger_reason: str) -> None:
+        """Phase 1 visualization: teachers only (student still frozen), no student column."""
+        try:
+            from visualize import visualize_compare_models
+        except ImportError:
+            self.log_fn("[Visualize] matplotlib not available, skipping visualization")
+            return
+
+        filename = f"step{global_step:07d}_{current_phase.name}_{trigger_reason}.png"
+        save_path = str(Path(self.vis_dir) / filename)
+        title = f"step={global_step}  phase={current_phase.name}  trigger={trigger_reason}  [teachers]"
+
+        models: Dict[str, "torch.nn.Module"] = {}
+        per_model_thresh: Dict[str, object] = {}
+        thresh = self.vis_score_thresh if self.thresh_scheduler is None else (
+            self.thresh_scheduler.rgb_teacher(current_phase, 0)
+        )
+        if self.rgb_teacher is not None:
+            models["rgb_teacher"] = self.rgb_teacher
+            per_model_thresh["rgb_teacher"] = thresh
+        if self.ir_teacher is not None:
+            models["ir_teacher"] = self.ir_teacher
+            per_model_thresh["ir_teacher"] = (
+                thresh if self.thresh_scheduler is None
+                else self.thresh_scheduler.ir_teacher(current_phase, 0)
+            )
+
+        if not models:
+            return
+
+        visualize_compare_models(
+            models=models,
+            val_loader=self.ir_val_loader,
+            device=self.device,
+            save_path=save_path,
+            num_samples=self.vis_num_samples,
+            per_model_thresh=per_model_thresh,
+            class_names=self.class_names,
+            title=title,
+        )
 
     @torch.no_grad()
     def _eval_rgb_val(self, model) -> Dict:
@@ -569,16 +661,10 @@ class PhaseEvaluator:
             f"step={global_step}  phase={current_phase.name}  "
             f"trigger={trigger_reason}  mAP@0.5={map50:.4f}"
         )
-        # Phase 4 ramp: steps_into_phase measured from phase3_end (start of Phase 4)
-        steps_into_phase = (
-            max(0, global_step - self.phase3_end)
-            if current_phase.name == "PHASE4_IR_FOCUS"
-            else 0
-        )
 
         if self.thresh_scheduler is not None:
-            rgb_thresh = self.thresh_scheduler.rgb_teacher(current_phase, steps_into_phase)
-            ir_thresh  = self.thresh_scheduler.ir_teacher( current_phase, steps_into_phase)
+            rgb_thresh = self.thresh_scheduler.rgb_teacher(current_phase)
+            ir_thresh = self.thresh_scheduler.ir_teacher(current_phase)
         else:
             rgb_thresh = ir_thresh = self.vis_score_thresh
 
@@ -590,9 +676,9 @@ class PhaseEvaluator:
             if self.ir_teacher is not None:
                 models["ir_teacher"] = self.ir_teacher
 
-            # student → show all boxes (thresh=0.0)
-            # teachers → per-class threshold from adaptive scheduler
-            per_model_thresh: Dict[str, object] = {"student": 0.0}
+            # student → dùng cùng threshold với ir_teacher
+            # teachers → per-class threshold từ adaptive scheduler
+            per_model_thresh: Dict[str, object] = {"student": ir_thresh}
             if self.rgb_teacher is not None:
                 per_model_thresh["rgb_teacher"] = rgb_thresh
             if self.ir_teacher is not None:

@@ -317,7 +317,7 @@ def visualize_compare_models(
     legend_handles = [
         patches.Patch(edgecolor=_GT_COLOR,       facecolor="none", label="GT"),
         patches.Patch(edgecolor=_PRED_COLORS[0], facecolor="none", linestyle="--",
-                      label="student: all boxes  |  teachers: per-class thresh"
+                      label="student + teachers: ir_teacher per-class thresh"
                             if per_model_thresh else f"pred (thresh={_fmt_thresh(score_thresh)})"),
     ]
     fig.legend(handles=legend_handles, loc="lower center", ncol=2,
