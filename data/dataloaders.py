@@ -13,16 +13,24 @@ from .datasets import (
 # Collate functions
 # ---------------------------------------------------------------------------
 
-def rgb_collate(batch: List) -> Tuple[torch.Tensor, List[Dict]]:
-    return torch.stack([b[0] for b in batch]), [b[1] for b in batch]
+def rgb_collate(batch: List) -> Tuple[torch.Tensor, List[Dict], Tuple[str, ...]]:
+    return (
+        torch.stack([b[0] for b in batch]),
+        [b[1] for b in batch],
+        tuple(b[2] for b in batch),
+    )
 
 
-def ir_collate(batch: List) -> torch.Tensor:
-    return torch.stack([b[0] for b in batch])
+def ir_collate(batch: List) -> Tuple[torch.Tensor, Tuple[str, ...]]:
+    return torch.stack([b[0] for b in batch]), tuple(b[1] for b in batch)
 
 
-def ir_val_collate(batch: List) -> Tuple[torch.Tensor, List[Dict]]:
-    return torch.stack([b[0] for b in batch]), [b[1] for b in batch]
+def ir_val_collate(batch: List) -> Tuple[torch.Tensor, List[Dict], Tuple[str, ...]]:
+    return (
+        torch.stack([b[0] for b in batch]),
+        [b[1] for b in batch],
+        tuple(b[2] for b in batch),
+    )
 
 
 # ---------------------------------------------------------------------------

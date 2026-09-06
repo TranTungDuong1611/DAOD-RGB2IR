@@ -84,7 +84,7 @@ class FLIRRGBDataset(Dataset):
     def __len__(self) -> int:
         return len(self.stems)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict, str]:
         stem     = self.stems[idx]
         rgb_path = self.root / "JPEGImages" / ir_stem_to_rgb_filename(stem)
         ann_path = self.root / "Annotations" / f"{stem}.xml"
@@ -96,7 +96,7 @@ class FLIRRGBDataset(Dataset):
         boxes, labels = objects_to_tensors(objects, self.min_area)
 
         target = {"boxes": boxes, "labels": labels, "stem": stem}
-        return img_t, target
+        return img_t, target, stem
 
 
 class FLIRIRDataset(Dataset):
@@ -132,10 +132,10 @@ class FLIRIRDataset(Dataset):
     def __len__(self) -> int:
         return len(self.ir_paths)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, str]:
         img   = Image.open(self.ir_paths[idx])
         img_t = self.transform(img)
-        return (img_t,)
+        return img_t, self.ir_paths[idx].stem
 
 
 class FLIRIRValDataset(Dataset):
@@ -176,7 +176,7 @@ class FLIRIRValDataset(Dataset):
     def __len__(self) -> int:
         return len(self.stems)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict, str]:
         stem     = self.stems[idx]
         ir_path  = self.root / "JPEGImages"  / f"{stem}.jpeg"
         ann_path = self.root / "Annotations" / f"{stem}.xml"
@@ -188,10 +188,8 @@ class FLIRIRValDataset(Dataset):
         boxes, labels = objects_to_tensors(objects, self.min_area)
 
         target = {"boxes": boxes, "labels": labels, "stem": stem}
-        return img_t, target
+        return img_t, target, stem
     
-
-
 
 
 

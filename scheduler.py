@@ -1,3 +1,4 @@
+from fractions import Fraction
 from typing import Literal
 from config import Phase 
 
@@ -46,12 +47,12 @@ class CurriculumScheduler:
             )
 
         elif phase == self.Phase.PHASE3_ADAPTATION:
-            # Phase 3: IR dominant (e.g., 80% IR flow, 20% RGB flow)
+            # The configured value is always the RGB route ratio.
             return self._alternate(
                 phase=self.Phase.PHASE3_ADAPTATION,
-                primary="p3_ir_flow",
-                secondary="p3_rgb_flow",
-                ratio=self.config.curriculum.phase3_rgb_sampling_ratio # This is IR ratio now
+                primary="p3_rgb_flow",
+                secondary="p3_ir_flow",
+                ratio=self.config.curriculum.phase3_rgb_sampling_ratio
             )
 
         else: # PHASE4_IR_FOCUS
@@ -60,7 +61,7 @@ class CurriculumScheduler:
     def _alternate(self, phase, primary: DomainStep, secondary: DomainStep, ratio: float) -> DomainStep:
         """Helper to alternate between two steps based on a ratio."""
         period = self._ratio_to_period(ratio)
-        n_primary = max(1, round(period * ratio))
+        n_primary = round(period * ratio)
 
         count = self._counters[phase]
         self._counters[phase] += 1
@@ -70,9 +71,17 @@ class CurriculumScheduler:
 
     @staticmethod
     def _ratio_to_period(ratio: float) -> int:
-        """Converts a float ratio to a repeating cycle period (e.g., 0.8 -> 5)."""
-        ratio = max(0.01, min(0.99, ratio))
-        for d in range(2, 11): # Check for cycles up to 10
-            if abs(ratio * d - round(ratio * d)) < 0.02:
-                return d
-        return 10
+        """Return a short exact period for the requested RGB ratio."""
+        if not 0.0 <= ratio <= 1.0:
+            raise ValueError("sampling ratio must be in [0, 1]")
+        if ratio in (0.0, 1.0):
+            return 1
+        return Fraction(float(ratio)).limit_denominator(100).denominator
+
+    def state_dict(self):
+        return {phase.name: count for phase, count in self._counters.items()}
+
+    def load_state_dict(self, state):
+        for phase in self._counters:
+            if phase.name in state:
+                self._counters[phase] = int(state[phase.name])

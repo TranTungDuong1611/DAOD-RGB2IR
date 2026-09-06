@@ -1,33 +1,41 @@
+"""Training orchestration for RGB baseline and dual-teacher D3T routes."""
+
+from collections import defaultdict
 import logging
+import os
 import time
+from typing import Any, Dict, Iterable, Optional, Sequence
+
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
-from typing import Dict, Optional, List
-from collections import defaultdict
 
-from config import TrainingConfig, StepRouting
-from scheduler import CurriculumScheduler, DomainStep, Phase
-from ema import ema_update
-from models.custom_fcos import FCOSDistillAdapter
-from loss.orchestrator import compute_combined_loss
+from config import Phase, StepRouting, TrainingConfig
+from ema import copy_student_to_teacher, ema_update
+from models.d3t_adapter import CriterionResult, DistillationSettings
+from models.d3t_wrapper import D3TWrapper
+from scheduler import CurriculumScheduler, DomainStep
 from data.augmentations import StudentAugmentor
 
 logger = logging.getLogger(__name__)
 
+
 class CurriculumDomainAdaptationTrainer:
+    """Own routing, optimization, EMA, checkpointing, and evaluation hooks."""
+
     def __init__(
         self,
         student: nn.Module,
-        rgb_teacher: nn.Module,
-        ir_teacher: nn.Module,
+        rgb_teacher: Optional[nn.Module],
+        ir_teacher: Optional[nn.Module],
         optimizer: Optimizer,
         config: TrainingConfig,
         rgb_loader: DataLoader,
-        ir_loader: DataLoader,
-        val_loader: DataLoader,
-        distill_adapter: FCOSDistillAdapter,
+        ir_loader: Optional[DataLoader] = None,
+        val_loader: Optional[DataLoader] = None,
+        distill_adapter: Any = None,
+        phase_evaluator: Any = None,
     ) -> None:
         self.student = student
         self.rgb_teacher = rgb_teacher
@@ -35,253 +43,397 @@ class CurriculumDomainAdaptationTrainer:
         self.optimizer = optimizer
         self.config = config
         self.device = torch.device(config.device)
-        self.distill_adapter = distill_adapter
         self.val_loader = val_loader
+        self.phase_evaluator = phase_evaluator
+        # Kept as a non-operational compatibility argument so old callers fail
+        # by behavior rather than by import; the new trainer never uses it.
+        self.distill_adapter = None
         self.augmentor = StudentAugmentor(config)
 
         self._setup_models()
-
-        # Infinite iterators
         self._rgb_iter = iter(self._infinite(rgb_loader))
-        self._ir_iter = iter(self._infinite(ir_loader))
-        
+        self._ir_iter = None if ir_loader is None else iter(self._infinite(ir_loader))
         self.scheduler = CurriculumScheduler(config)
         self.global_step = 0
-        
-        # Metric tracking
         self.best_map = 0.0
         self.loss_history = defaultdict(list)
+        self.ema_initialized = False
 
-    def _setup_models(self):
-        """Freeze teachers and move models to device."""
+    def _setup_models(self) -> None:
+        self.student.to(self.device)
         for teacher in (self.rgb_teacher, self.ir_teacher):
+            if teacher is None:
+                continue
             teacher.to(self.device)
             teacher.eval()
-            for p in teacher.parameters():
-                p.requires_grad = False
-        self.student.to(self.device)
+            for parameter in teacher.parameters():
+                parameter.requires_grad = False
 
     @staticmethod
-    def _infinite(loader):
+    def _infinite(loader: Iterable):
         while True:
-            yield from loader
+            yielded = False
+            for batch in loader:
+                yielded = True
+                yield batch
+            if not yielded:
+                raise ValueError("training DataLoader is empty")
 
-    def _get_saga_images(self, rgb_images, targets, alpha: float):
-        """Apply SAGA transformation."""
-        boxes_list = [t["boxes"] for t in targets]
+    def _move_images(self, images):
+        if isinstance(images, torch.Tensor):
+            return images.to(self.device)
+        return tuple(image.to(self.device) for image in images)
+
+    def _move_targets(self, targets):
+        moved = []
+        for target in targets:
+            moved.append({
+                key: value.to(self.device) if isinstance(value, torch.Tensor) else value
+                for key, value in target.items()
+            })
+        return moved
+
+    @staticmethod
+    def _ids_from_targets(targets) -> tuple[str, ...]:
+        ids = tuple(target.get("stem") for target in targets)
+        if any(not isinstance(value, str) or not value.strip() for value in ids):
+            raise ValueError("labeled batches must carry one non-empty sample stem per image")
+        return ids
+
+    def _unpack_rgb_batch(self, batch):
+        if not isinstance(batch, (tuple, list)) or len(batch) not in (2, 3):
+            raise ValueError("RGB loader must return (images, targets[, sample_ids])")
+        images, targets = batch[0], list(batch[1])
+        ids = tuple(batch[2]) if len(batch) == 3 else self._ids_from_targets(targets)
+        if len(ids) != len(targets):
+            raise ValueError("RGB sample_ids must match target count")
+        return self._move_images(images), self._move_targets(targets), ids
+
+    def _unpack_ir_batch(self, batch):
+        if not isinstance(batch, (tuple, list)) or len(batch) not in (1, 2, 3):
+            raise ValueError("IR loader must return (images[, sample_ids])")
+        images = self._move_images(batch[0])
+        if len(batch) >= 2:
+            ids = tuple(batch[1])
+        else:
+            raise ValueError("unlabeled IR batches must carry sample_ids")
+        image_count = images.shape[0] if isinstance(images, torch.Tensor) else len(images)
+        if len(ids) != image_count or any(not isinstance(value, str) or not value.strip() for value in ids):
+            raise ValueError("IR sample_ids must contain one non-empty ID per image")
+        return images, ids
+
+    def _get_saga_images(self, images, targets, alpha: float):
+        if targets is None:
+            return images.clone()
         from saga import SoftSAGA
-        return SoftSAGA().apply_to_batch(rgb_images, boxes_list, alpha)
-    
-    def _prepare_data_by_route(self, step_name: str, route: StepRouting):
-        """
-        Use augmentation for images
-        """
+        boxes_list = [target["boxes"] for target in targets]
+        return SoftSAGA().apply_to_batch(images, boxes_list, alpha)
+
+    def _alpha_map(self):
         ss_cfg = self.config.soft_saga
-        alpha_map = {
-            "rgb": 1.0, 
-            "weak": ss_cfg.alpha_near_rgb, 
+        return {
+            "rgb": 1.0,
+            "weak": ss_cfg.alpha_near_rgb,
             "mid": ss_cfg.alpha_intermediate,
-            "high": ss_cfg.alpha_near_ir, 
-            "ir": 0.0
+            "high": ss_cfg.alpha_near_ir,
+            "ir": 0.0,
         }
 
-        # From ir source no bale
-        if "ir_flow" in step_name or "ir_focus" in step_name:
-            images_ir = next(self._ir_iter).to(self.device)
-            
-            # Geometric augmentation
-            stu_img, _, did_flip = self.augmentor.apply_weak_aug(images_ir)
-            
-            # In Phase 3 IR: Teacher uses SAGA-High 
-            if step_name == "p3_ir_flow":
-                rgb_batch = next(self._rgb_iter)
-                images_rgb, targets_rgb = rgb_batch[0].to(self.device), rgb_batch[1]
+    def _prepare_data_by_route(self, step_name: str, route: StepRouting):
+        """Create aligned student/teacher views from exactly one source batch."""
 
-                if did_flip:
-                    images_rgb = torch.flip(images_rgb, dims=[-1])
-                    # Flip boxes for saga
-                    W = images_rgb.shape[-1]
-                    for t in targets_rgb:
-                        boxes = t["boxes"]
-                        if boxes.numel() > 0:
-                            flipped = boxes.clone()
-                            flipped[:, 0] = W - boxes[:, 2]
-                            flipped[:, 2] = W - boxes[:, 0]
-                            t["boxes"] = flipped
+        alpha_map = self._alpha_map()
+        rgb_source_steps = {
+            "p1_rgb_supervised",
+            "p2_rgb_flow",
+            "p2_ir_flow",
+            "p3_rgb_flow",
+        }
+        if step_name in rgb_source_steps:
+            images, targets, sample_ids = self._unpack_rgb_batch(next(self._rgb_iter))
+            geometric_images, geometric_targets, _ = self.augmentor.apply_weak_aug(
+                images, targets
+            )
+            student_images = self._get_saga_images(
+                geometric_images,
+                geometric_targets,
+                alpha_map[route.student_saga_level],
+            )
+            teacher_images = self._get_saga_images(
+                geometric_images,
+                geometric_targets,
+                alpha_map[route.teacher_saga_level],
+            )
+            student_images = self.augmentor.apply_photometric_aug(student_images)
+            return {
+                "student_images": student_images,
+                "teacher_images": teacher_images,
+                "targets": geometric_targets if route.use_gt else None,
+                "sample_ids": sample_ids,
+            }
 
-                # Applying SAGA after augmentation
-                tea_img = self._get_saga_images(images_rgb, targets_rgb, alpha_map["high"])
-            else:
-                # In Phase 4 IR
-                tea_img = stu_img.clone()
+        if step_name in {"p3_ir_flow", "p4_ir_focus"}:
+            if self._ir_iter is None:
+                raise ValueError("IR route requested without an IR DataLoader")
+            images, sample_ids = self._unpack_ir_batch(next(self._ir_iter))
+            geometric_images, _, _ = self.augmentor.apply_weak_aug(images)
+            teacher_images = geometric_images.clone()
+            student_images = self.augmentor.apply_photometric_aug(geometric_images)
+            return {
+                "student_images": student_images,
+                "teacher_images": teacher_images,
+                "targets": None,
+                "sample_ids": sample_ids,
+            }
+        raise ValueError(f"Unsupported curriculum step: {step_name}")
 
-            # Student use strong photometric augmentation
-            stu_img = self.augmentor.apply_photometric_aug(stu_img)
-            
-            return stu_img, tea_img, tea_img, None
-
-        # RGB source
+    def _ensure_ema_initialized(self) -> None:
+        if self.ema_initialized:
+            return
+        if self.global_step < self.config.ema.start_steps:
+            return
+        active_teachers = {
+            "rgb": self.rgb_teacher,
+            "ir": self.ir_teacher,
+        }
+        if self.config.teacher_mode == "two_teacher":
+            active_names = ("rgb", "ir")
         else:
-            rgb_batch = next(self._rgb_iter)
-            images_raw, targets_raw = rgb_batch[0].to(self.device), rgb_batch[1]
-            
-            # Geometric augmentation + box adjustment
-            flipped_img, flipped_targets, _ = self.augmentor.apply_weak_aug(images_raw, targets_raw)
-            
-            # SAGA
-            stu_img = self._get_saga_images(flipped_img, flipped_targets, alpha_map[route.student_saga_level])
-            tea_img = self._get_saga_images(flipped_img, flipped_targets, alpha_map[route.teacher_saga_level])
-            
-            # Strong Aug for Student
-            stu_img = self.augmentor.apply_photometric_aug(stu_img)
-            
-            return stu_img, tea_img, tea_img, flipped_targets
+            active_names = (self.config.teacher_mode,)
+        for name in active_names:
+            teacher = active_teachers[name]
+            if teacher is None:
+                raise ValueError(f"EMA start requires the '{name}' teacher")
+            copy_student_to_teacher(teacher, self.student)
+        self.ema_initialized = True
+
+    def _enabled_teacher_names(self, route: StepRouting) -> tuple[str, ...]:
+        if self.config.teacher_mode == "two_teacher":
+            enabled = {"rgb", "ir"}
+        else:
+            enabled = {self.config.teacher_mode}
+        return tuple(name for name in route.teacher_names if name in enabled)
+
+    def _teacher_for_name(self, name: str) -> nn.Module:
+        teacher = {"rgb": self.rgb_teacher, "ir": self.ir_teacher}.get(name)
+        if teacher is None:
+            raise ValueError(f"teacher '{name}' is not configured")
+        teacher.eval()
+        return teacher
+
+    def _distillation_settings(self, teacher_name: str, phase: Phase):
+        schedule = getattr(self.config.distill, f"{teacher_name}_teacher")
+        top_ratio, min_hm = schedule.get_params(phase)
+        return DistillationSettings(
+            top_ratio=top_ratio,
+            min_hm=min_hm,
+            hm_alpha=self.config.distill.hm_alpha,
+            hm_beta=self.config.distill.hm_beta,
+            uncertainty_alpha=self.config.distill.un_regular_alpha,
+        )
+
+    @staticmethod
+    def _component_weight(name: str, config) -> float:
+        if "quality" in name:
+            return config.weight_quality
+        if "box" in name or "delta" in name:
+            return config.weight_deltas
+        if "cls" in name or "logit" in name:
+            return config.weight_logits
+        return 1.0
+
+    @staticmethod
+    def _as_result(value) -> CriterionResult:
+        if isinstance(value, CriterionResult):
+            return value
+        if isinstance(value, dict):
+            return CriterionResult(value, {})
+        raise TypeError("wrapper distillation must return CriterionResult")
+
+    @staticmethod
+    def _add_loss(total, value):
+        return value if total is None else total + value
 
     def train_one_iteration(self) -> Dict[str, float]:
         self.student.train()
-        self.optimizer.zero_grad()
-        
-        # 1. Ask scheduler for the step and phase
-        step_name: DomainStep = self.scheduler.get_next_step(self.global_step)
+        if self.config.workflow == "rgb_baseline":
+            step_name: DomainStep = "p1_rgb_supervised"
+        else:
+            step_name = self.scheduler.get_next_step(self.global_step)
         phase = self.config.get_phase(self.global_step)
-        
-        # 2. Get routing instructions for this step
         route = self.config.mid_routing.get_routing(step_name)
-        ss_cfg = self.config.soft_saga
-        
-        
-        
-        # 4. Data Loading & Preparation
-        # If it's an IR flow (P3-IR or P4), load IR images, else use RGB for SAGA
-        stu_img, tea_rgb, tea_ir, targets = self._prepare_data_by_route(step_name, route)
+        if self.config.workflow == "rgb_baseline":
+            route = self.config.mid_routing.p1_rgb_supervised
 
-        # 5. Compute Combined Loss
-        total_loss, losses = compute_combined_loss(
-            self.student, self.distill_adapter,
-            student_images=stu_img,
-            targets=(targets if route.use_gt else None),
-            teacher_rgb_images=tea_rgb,
-            teacher_ir_images=tea_ir,
-            global_step=self.global_step,
-            phase=phase,
-            loss_cfg=self.config.loss
+        data = self._prepare_data_by_route(step_name, route)
+        targets = data["targets"]
+        sample_ids = data["sample_ids"]
+        self.optimizer.zero_grad(set_to_none=True)
+
+        if self.config.workflow != "rgb_baseline":
+            self._ensure_ema_initialized()
+
+        student_output = self.student.raw(
+            data["student_images"],
+            targets,
+            sample_ids=sample_ids,
         )
+        total_loss = None
+        logs: Dict[str, float] = {}
+        sup_weight, distill_weight = self.config.loss.get_phase_weights(phase)
+        if self.config.workflow == "rgb_baseline":
+            sup_weight, distill_weight = 1.0, 0.0
 
-        
+        if targets is not None and route.use_gt and sup_weight > 0:
+            supervised_losses = self.student.supervised_from_output(
+                student_output, targets
+            )
+            for name, value in supervised_losses.items():
+                weighted = value * sup_weight * self._component_weight(
+                    name, self.config.loss
+                )
+                total_loss = self._add_loss(total_loss, weighted)
+                logs[f"sup_{name}"] = float(weighted.detach().item())
 
-        # 6. Optimization
-        if total_loss > 0:
+        if (
+            self.config.workflow != "rgb_baseline"
+            and self.ema_initialized
+            and distill_weight > 0
+        ):
+            enabled_teacher_names = self._enabled_teacher_names(route)
+            for teacher_name in enabled_teacher_names:
+                teacher = self._teacher_for_name(teacher_name)
+                with torch.no_grad():
+                    teacher_output = teacher.raw(
+                        data["teacher_images"],
+                        sample_ids=sample_ids,
+                    )
+                result = self._as_result(
+                    self.student.distill_from_outputs(
+                        student_output,
+                        teacher_output,
+                        self._distillation_settings(teacher_name, phase),
+                    )
+                )
+                suffix = f"_{teacher_name}"
+                for name, value in result.losses.items():
+                    weighted = value * distill_weight * self._component_weight(
+                        name, self.config.loss
+                    )
+                    total_loss = self._add_loss(total_loss, weighted)
+                    logs[f"{name}{suffix}"] = float(weighted.detach().item())
+                for name, value in result.metrics.items():
+                    if isinstance(value, torch.Tensor) and value.numel() == 1:
+                        logs[f"{name}{suffix}"] = float(value.detach().item())
+
+        if total_loss is None:
+            total_loss = torch.zeros((), device=self.device)
+        did_step = False
+        if total_loss.requires_grad and bool(torch.isfinite(total_loss).item()):
             total_loss.backward()
             if self.config.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.grad_clip)
+                torch.nn.utils.clip_grad_norm_(
+                    self.student.parameters(), self.config.grad_clip
+                )
             self.optimizer.step()
-        
-        self.optimizer.step()
+            did_step = True
 
-        # 7. EMA Update based on routing
-        log_res = {}
-        for k, v in losses.items():
-            if isinstance(v, torch.Tensor):
-                log_res[k] = v.item()
-            else:
-                log_res[k] = v
-        
-        log_res["total_loss"] = total_loss.item()
-        log_res["step_type"] = step_name
-        log_res["phase"] = phase.name
-        log_res["global_step"] = self.global_step
+        if (
+            did_step
+            and self.ema_initialized
+            and route.ema_target in self._enabled_teacher_names(route)
+        ):
+            ema_update(
+                self._teacher_for_name(route.ema_target),
+                self.student,
+                alpha=self.config.ema.alpha,
+                global_step=self.global_step,
+            )
 
+        logs["total_loss"] = float(total_loss.detach().item())
+        logs["step_type"] = step_name
+        logs["phase"] = phase.name
+        logs["global_step"] = self.global_step
+        logs["ema_initialized"] = float(self.ema_initialized)
+        self.loss_history[step_name].append(logs["total_loss"])
         self.global_step += 1
-        return log_res
+        return logs
 
     def train(self) -> None:
-        """
-        Full curriculum training loop with integrated logging and evaluation.
-        """
-        total_iters = self.config.max_iter
         logger.info(
-            f"Starting Curriculum DA training: total_iters={total_iters} "
-            f"starting_from_step={self.global_step}"
+            "Starting training: total_iters=%s starting_from_step=%s workflow=%s",
+            self.config.max_iter,
+            self.global_step,
+            self.config.workflow,
         )
-        
-        for _ in range(self.global_step, total_iters):
-            # 1. Execute one iteration (includes Data Prep, Forward, Backward, EMA)
-            iter_start_time = time.time()
+        for _ in range(self.global_step, self.config.max_iter):
+            started = time.time()
             logs = self.train_one_iteration()
-            iter_time = time.time() - iter_start_time
-
-            # 2. Periodic Logging
             if self.global_step % self.config.log_interval == 0:
-                logs["iter_time"] = iter_time
-                logs["lr"] = self.optimizer.param_groups[0]['lr']
+                logs["iter_time"] = time.time() - started
+                logs["lr"] = self.optimizer.param_groups[0]["lr"]
                 self._log(logs)
-
-            # 4. Periodic Checkpoint (for resume)
+            if self.phase_evaluator is not None:
+                phase = self.config.get_phase(self.global_step)
+                results = self.phase_evaluator.step(
+                    self.student, self.global_step, phase
+                )
+                if results and "mAP@0.5" in results:
+                    self.best_map = max(self.best_map, results["mAP@0.5"])
             if self.global_step > 0 and self.global_step % 5000 == 0:
                 self.save_checkpoint(f"checkpoint_{self.global_step:06d}.pth")
 
-        logger.info("Training complete.")
-
     def save_checkpoint(self, filename: str) -> None:
-        """
-        Saves full state of training to resume later or use for inference.
-        """
-        import os
+        from models.fcos_factory import build_checkpoint_metadata
+
         os.makedirs(self.config.output_dir, exist_ok=True)
         path = os.path.join(self.config.output_dir, filename)
-        
-        torch.save(
-            {
-                "global_step":   self.global_step,
-                "best_map":      self.best_map,
-                "student":       self.student.state_dict(),
-                "rgb_teacher":   self.rgb_teacher.state_dict(),
-                "ir_teacher":    self.ir_teacher.state_dict(),
-                "optimizer":     self.optimizer.state_dict(),
-            },
-            path,
-        )
-        logger.info(f"Checkpoint saved → {path}")
+        payload = {
+            "metadata": build_checkpoint_metadata(self.config),
+            "global_step": self.global_step,
+            "best_map": self.best_map,
+            "ema_initialized": self.ema_initialized,
+            "student": self.student.state_dict(),
+            "rgb_teacher": None if self.rgb_teacher is None else self.rgb_teacher.state_dict(),
+            "ir_teacher": None if self.ir_teacher is None else self.ir_teacher.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
+        }
+        torch.save(payload, path)
+        logger.info("Checkpoint saved -> %s", path)
 
     def load_checkpoint(self, path: str) -> None:
-        """
-        Loads the training state from a file.
-        """
-        logger.info(f"Loading checkpoint ← {path}")
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        
-        self.global_step = ckpt.get("global_step", 0)
-        self.best_map    = ckpt.get("best_map", 0.0)
-        
-        self.student.load_state_dict(ckpt["student"])
-        self.rgb_teacher.load_state_dict(ckpt["rgb_teacher"])
-        self.ir_teacher.load_state_dict(ckpt["ir_teacher"])
-        self.optimizer.load_state_dict(ckpt["optimizer"])
-        
-        logger.info(f"Resumed from step {self.global_step} (Best mAP so far: {self.best_map:.4f})")
+        from models.fcos_factory import validate_checkpoint_metadata
 
-    def _log(self, log: Dict) -> None:
-        """
-        Organizes and prints iteration metrics to the console/logger.
-        """
-        step   = log.get("global_step", self.global_step)
-        phase  = log.get("phase",  "N/A")
-        step_type = log.get("step_type", "N/A")
-        total_loss = log.get("total_loss", 0.0)
-        
-        # Format individual loss components (kd_logits, sup_box, etc.)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        metadata = checkpoint.get("metadata")
+        if metadata is None:
+            raise ValueError("Checkpoint has no D3T metadata; legacy checkpoints are unsupported")
+        validate_checkpoint_metadata(metadata, self.config)
+        self.student.load_state_dict(checkpoint["student"])
+        if self.rgb_teacher is not None and checkpoint.get("rgb_teacher") is not None:
+            self.rgb_teacher.load_state_dict(checkpoint["rgb_teacher"])
+        if self.ir_teacher is not None and checkpoint.get("ir_teacher") is not None:
+            self.ir_teacher.load_state_dict(checkpoint["ir_teacher"])
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        if "scheduler" in checkpoint:
+            self.scheduler.load_state_dict(checkpoint["scheduler"])
+        self.global_step = int(checkpoint.get("global_step", 0))
+        self.best_map = float(checkpoint.get("best_map", 0.0))
+        self.ema_initialized = bool(checkpoint.get("ema_initialized", False))
+        logger.info("Resumed from step %s", self.global_step)
+
+    def _log(self, log: Dict[str, Any]) -> None:
         components = []
-        for k, v in sorted(log.items()):
-            if isinstance(v, float) and any(x in k for x in ["loss", "sup_", "kd_"]) and k != "total_loss":
-                components.append(f"{k}={v:.4f}")
-        
-        comp_str = " | ".join(components)
-        
-        log_msg = (
-            f"[{step:06d}] Phase: {phase:<18} | Step: {step_type:<18} | "
-            f"Loss: {total_loss:.4f}"
+        for key, value in sorted(log.items()):
+            if isinstance(value, float) and ("loss" in key or "kd_" in key):
+                components.append(f"{key}={value:.4f}")
+        message = (
+            f"[{int(log.get('global_step', self.global_step)):06d}] "
+            f"Phase: {log.get('phase', 'N/A'):<22} | "
+            f"Step: {log.get('step_type', 'N/A'):<18} | "
+            f"Loss: {log.get('total_loss', 0.0):.4f}"
         )
-        if comp_str:
-            log_msg += f" | {comp_str}"
-            
-        logger.info(log_msg)
+        if components:
+            message += " | " + " | ".join(components)
+        logger.info(message)

@@ -50,8 +50,15 @@ def ema_update(
         s_bufs = dict(student.named_buffers())
 
         for name, t_b in t_bufs.items():
-            if name in s_bufs and t_b.is_floating_point():
-                t_b.data.mul_(alpha).add_(s_bufs[name].data, alpha=1.0 - alpha)
+            if name not in s_bufs:
+                continue
+            s_b = s_bufs[name]
+            if t_b.is_floating_point():
+                t_b.data.mul_(alpha).add_(s_b.data, alpha=1.0 - alpha)
+            else:
+                # Counters and other integral buffers have no meaningful
+                # interpolation; follow the student exactly.
+                t_b.data.copy_(s_b.data)
 
 
 def copy_student_to_teacher(teacher: nn.Module, student: nn.Module) -> None:
@@ -60,5 +67,4 @@ def copy_student_to_teacher(teacher: nn.Module, student: nn.Module) -> None:
         for t_p, s_p in zip(teacher.parameters(), student.parameters()):
             t_p.data.copy_(s_p.data)
         for t_b, s_b in zip(teacher.buffers(), student.buffers()):
-            if t_b.is_floating_point():
-                t_b.data.copy_(s_b.data)
+            t_b.data.copy_(s_b.data)
