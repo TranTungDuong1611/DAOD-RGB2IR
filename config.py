@@ -5,8 +5,11 @@ Training flow:  RGB → MID(SAGA) → IR
 """
 
 from dataclasses import dataclass, field
-from typing import Tuple
+import math
+from typing import Optional, Tuple
 from enum import Enum
+
+from models.torchvision_fcos_adapter import ClassificationInitMode
 
 class Phase(Enum):
     """Enumeration of Curriculum Learning stages."""
@@ -23,6 +26,14 @@ class TeacherSchedule:
     phase2: Tuple[float, float]
     phase3: Tuple[float, float]
     phase4: Tuple[float, float]
+
+    def __post_init__(self):
+        for phase_name in ("phase1", "phase2", "phase3", "phase4"):
+            ratio, min_hm = getattr(self, phase_name)
+            if not math.isfinite(ratio) or not 0.0 < ratio <= 1.0:
+                raise ValueError(f"{phase_name} top ratio must be in (0, 1]")
+            if not math.isfinite(min_hm) or not 0.0 <= min_hm <= 1.0:
+                raise ValueError(f"{phase_name} min_hm must be in [0, 1]")
 
     def get_params(self, phase: Phase) -> Tuple[float, float]:
         mapping = {
@@ -57,16 +68,33 @@ class DistillConfig:
     
     # Uncertainty Weighting: weight = exp(-(1-HM) / un_regular_alpha)
     un_regular_alpha: float = 4.0
+
+    def __post_init__(self):
+        if len(self.phase_boundaries) != 3 or any(
+            not isinstance(value, int) or value < 0
+            for value in self.phase_boundaries
+        ) or tuple(self.phase_boundaries) != tuple(sorted(self.phase_boundaries)):
+            raise ValueError("phase_boundaries must be three increasing iterations")
+        if self.hm_alpha < 0 or self.hm_beta < 0 or self.un_regular_alpha <= 0:
+            raise ValueError("invalid HM/uncertainty settings")
     
 
 @dataclass
 class FCOSModelConfig:
-    """Settings for build_custom_fcos and HMFocalClassificationHead."""
+    """Effective Torchvision FCOS model settings."""
     num_classes: int = 3
+    class_names: Tuple[str, ...] = ("person", "car", "bicycle")
+    weights: Optional[str] = "DEFAULT"
+    classification_init_mode: ClassificationInitMode = ClassificationInitMode.COCO_TOWER
     pretrained_backbone: bool = True
     trainable_backbone_layers: int = 3
     min_size: int = 600
     max_size: int = 1000
+    center_sampling_radius: float = 1.5
+    score_thresh: float = 0.2
+    nms_thresh: float = 0.6
+    topk_candidates: int = 1000
+    detections_per_img: int = 100
     from_coco: bool = True
     
     # HM-Focal Loss (VFL) Hyperparameters
@@ -75,11 +103,37 @@ class FCOSModelConfig:
     vfl_weight_type: str = "iou"
     vfl_loss_weight: float = 1.0
 
+    def __post_init__(self):
+        self.class_names = tuple(self.class_names)
+        self.classification_init_mode = ClassificationInitMode(
+            self.classification_init_mode
+        )
+        if self.num_classes != len(self.class_names):
+            raise ValueError("num_classes must match class_names")
+        if self.class_names != ("person", "car", "bicycle"):
+            raise ValueError("class_names must be ('person', 'car', 'bicycle')")
+        if not 0 <= self.trainable_backbone_layers <= 5:
+            raise ValueError("trainable_backbone_layers must be in [0, 5]")
+        if self.min_size <= 0 or self.max_size < self.min_size:
+            raise ValueError("min_size/max_size must be positive and ordered")
+        if self.center_sampling_radius < 0:
+            raise ValueError("center_sampling_radius must be non-negative")
+        if not 0 <= self.score_thresh <= 1 or not 0 <= self.nms_thresh <= 1:
+            raise ValueError("score_thresh and nms_thresh must be in [0, 1]")
+        if self.topk_candidates <= 0 or self.detections_per_img <= 0:
+            raise ValueError("detection top-k values must be positive")
+
 @dataclass
 class EMAConfig:
     """Exponential Moving Average settings for teacher update."""
     alpha: float = 0.996          # EMA decay factor (higher = slower teacher update)
     start_steps: int = 6000      # ramp alpha up during early training
+
+    def __post_init__(self):
+        if not math.isfinite(self.alpha) or not 0.0 <= self.alpha <= 1.0:
+            raise ValueError("EMA alpha must be in [0, 1]")
+        if not isinstance(self.start_steps, int) or self.start_steps < 0:
+            raise ValueError("EMA start_steps must be a non-negative integer")
 
 
 @dataclass
@@ -105,6 +159,7 @@ class StepRouting:
     use_gt: bool = True           # Whether to include Supervised Ground Truth loss
     student_saga_level: str = "rgb"  # "rgb" | "weak" | "mid" | "high" | "ir"
     teacher_saga_level: str = "rgb"  # "rgb" | "weak" | "mid" | "high" | "ir"
+    teacher_names: Tuple[str, ...] = ()
 
 @dataclass
 class MidRoutingConfig:
@@ -114,28 +169,34 @@ class MidRoutingConfig:
     """
     # PHASE 1: Supervised Warmup
     p1_rgb_supervised: StepRouting = field(default_factory=lambda: StepRouting(
-        ema_target="none", use_gt=True, student_saga_level="rgb", teacher_saga_level="rgb"
+        ema_target="none", use_gt=True, student_saga_level="rgb", teacher_saga_level="rgb",
+        teacher_names=(),
     ))
 
     # PHASE 2: Transition (RGB Dominant)
     p2_rgb_flow: StepRouting = field(default_factory=lambda: StepRouting(
-        ema_target="rgb", use_gt=True, student_saga_level="weak", teacher_saga_level="rgb"
+        ema_target="rgb", use_gt=True, student_saga_level="weak", teacher_saga_level="rgb",
+        teacher_names=("rgb",),
     ))
     p2_ir_flow: StepRouting = field(default_factory=lambda: StepRouting(
-        ema_target="ir", use_gt=True, student_saga_level="high", teacher_saga_level="mid"
+        ema_target="ir", use_gt=True, student_saga_level="high", teacher_saga_level="mid",
+        teacher_names=("ir",),
     ))
 
     # PHASE 3: Adaptation (IR Dominant)
     p3_rgb_flow: StepRouting = field(default_factory=lambda: StepRouting(
-        ema_target="rgb", use_gt=True, student_saga_level="mid", teacher_saga_level="weak"
+        ema_target="rgb", use_gt=True, student_saga_level="mid", teacher_saga_level="weak",
+        teacher_names=("rgb",),
     ))
     p3_ir_flow: StepRouting = field(default_factory=lambda: StepRouting(
-        ema_target="ir", use_gt=False, student_saga_level="ir", teacher_saga_level="high"
+        ema_target="ir", use_gt=False, student_saga_level="ir", teacher_saga_level="high",
+        teacher_names=("ir",),
     ))
 
     # PHASE 4: IR Focus
     p4_ir_focus: StepRouting = field(default_factory=lambda: StepRouting(
-        ema_target="ir", use_gt=False, student_saga_level="ir", teacher_saga_level="ir"
+        ema_target="ir", use_gt=False, student_saga_level="ir", teacher_saga_level="ir",
+        teacher_names=("ir",),
     ))
 
     def get_routing(self, step_name: str) -> StepRouting:
@@ -166,6 +227,17 @@ class CurriculumConfig:
 
     phase2_rgb_sampling_ratio: float = 0.7 
     phase3_rgb_sampling_ratio: float = 0.3  
+
+    def __post_init__(self):
+        boundaries = (self.phase1_end, self.phase2_end, self.phase3_end)
+        if any(not isinstance(value, int) or value < 0 for value in boundaries):
+            raise ValueError("phase boundaries must be non-negative integers")
+        if tuple(boundaries) != tuple(sorted(boundaries)):
+            raise ValueError("phase boundaries must be increasing")
+        for name in ("phase2_rgb_sampling_ratio", "phase3_rgb_sampling_ratio"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1]")
 
 
 
@@ -262,12 +334,39 @@ class TrainingConfig:
 
     step2_start: int = 2000
     max_iter: int = 10000
+    total_iters: Optional[int] = None
     grad_clip: float = 10.0
     device: str = "cuda"
     log_interval: int = 50
     output_dir: str = "outputs"
+    workflow: str = "curriculum"
+    teacher_mode: str = "two_teacher"
     wandb: bool = False       
     eval_period: int = 500       
+
+    def __post_init__(self):
+        if self.total_iters is not None:
+            if self.total_iters <= 0:
+                raise ValueError("total_iters must be positive")
+            self.max_iter = self.total_iters
+        else:
+            self.total_iters = self.max_iter
+        if self.max_iter <= 0:
+            raise ValueError("max_iter must be positive")
+        if self.grad_clip < 0 or self.log_interval <= 0 or self.eval_period <= 0:
+            raise ValueError("training intervals and grad_clip are invalid")
+        if self.step2_start < 0:
+            raise ValueError("step2_start must be non-negative")
+        if self.workflow not in {"curriculum", "rgb_baseline"}:
+            raise ValueError("workflow must be 'curriculum' or 'rgb_baseline'")
+        if self.teacher_mode not in {"rgb", "ir", "two_teacher"}:
+            raise ValueError("teacher_mode must be 'rgb', 'ir', or 'two_teacher'")
+        curriculum_boundaries = (
+            self.curriculum.phase1_end,
+            self.curriculum.phase2_end,
+            self.curriculum.phase3_end,
+        )
+        self.distill.phase_boundaries = tuple(curriculum_boundaries)
 
     def get_phase(self, global_step: int) -> Phase:
         """Determines the phase using CurriculumConfig boundaries."""
