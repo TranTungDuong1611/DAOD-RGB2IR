@@ -1,403 +1,262 @@
-"""
-Detection Evaluator — mAP computation without pycocotools or torchmetrics.
+"""Small dependency-free detection evaluator and phase callback."""
 
-Implements:
-  - Per-class AP@IoU  (VOC 11-point interpolation)
-  - mAP@0.5           (mean over classes)
-  - mAP@0.5:0.95      (COCO-style, mean over IoU thresholds)
-  - Per-domain tracking across curriculum phases
-
-Dependencies: only torch + torchvision.ops.box_iou
-"""
-
-import logging
 from collections import defaultdict
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+import logging
+import time
+from typing import Dict, List, Optional
 
 import torch
 from torch.utils.data import DataLoader
 from torchvision.ops import box_iou
-import time
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Core AP computation
-# ---------------------------------------------------------------------------
-
 def _compute_ap_voc11(recalls: torch.Tensor, precisions: torch.Tensor) -> float:
-    """
-    VOC 11-point interpolated AP.
-
-    For each recall threshold t in {0.0, 0.1, ..., 1.0}:
-      p(t) = max precision where recall >= t
-    AP = mean(p(t))
-    """
-    ap = 0.0
-    for t in torch.linspace(0.0, 1.0, 11):
-        mask = recalls >= t
-        ap += precisions[mask].max().item() if mask.any() else 0.0
-    return ap / 11.0
+    return sum(
+        precisions[recalls >= threshold].max().item()
+        if (recalls >= threshold).any()
+        else 0.0
+        for threshold in torch.linspace(0.0, 1.0, 11)
+    ) / 11.0
 
 
 def _compute_ap_auc(recalls: torch.Tensor, precisions: torch.Tensor) -> float:
-    """
-    Area-under-curve AP (COCO-style interpolation).
-    Monotonically decreasing envelope then trapezoid integration.
-    """
-    # Sentinel values
     mrec = torch.cat([torch.tensor([0.0]), recalls, torch.tensor([1.0])])
     mpre = torch.cat([torch.tensor([0.0]), precisions, torch.tensor([0.0])])
-
-    # Monotonically decreasing envelope
-    for i in range(len(mpre) - 2, -1, -1):
-        mpre[i] = torch.max(mpre[i], mpre[i + 1])
-
-    # Integrate at points where recall changes
-    idx = torch.where(mrec[1:] != mrec[:-1])[0]
-    ap  = ((mrec[idx + 1] - mrec[idx]) * mpre[idx + 1]).sum().item()
-    return ap
+    for index in range(len(mpre) - 2, -1, -1):
+        mpre[index] = torch.maximum(mpre[index], mpre[index + 1])
+    indices = torch.where(mrec[1:] != mrec[:-1])[0]
+    return ((mrec[indices + 1] - mrec[indices]) * mpre[indices + 1]).sum().item()
 
 
 def _compute_class_ap(
-    pred_list: List[Dict],    # per-image predictions for this class
-    gt_list:   List[Dict],    # per-image ground-truths  for this class
+    pred_list: List[Dict],
+    gt_list: List[Dict],
     iou_thresh: float = 0.5,
-    interp: str = "voc11",    # "voc11" | "auc"
+    interp: str = "voc11",
 ) -> float:
-    """
-    Compute AP for a single class across all images.
-
-    pred_list[i] = {"boxes": [N,4], "scores": [N]}
-    gt_list[i]   = {"boxes": [M,4]}
-    """
-    n_gt = sum(len(g["boxes"]) for g in gt_list)
-    if n_gt == 0:
-        return float("nan")   # no GT for this class → skip in mAP average
-
-    all_scores: List[float] = []
-    all_tp:     List[int]   = []
-
-    for pred, gt in zip(pred_list, gt_list):
-        pb = pred["boxes"]   # [N, 4]
-        ps = pred["scores"]  # [N]
-        gb = gt["boxes"]     # [M, 4]
-
-        if len(pb) == 0:
+    num_gt = sum(len(item["boxes"]) for item in gt_list)
+    if num_gt == 0:
+        return float("nan")
+    scores: List[float] = []
+    true_positives: List[int] = []
+    for prediction, target in zip(pred_list, gt_list):
+        pred_boxes, pred_scores, gt_boxes = (
+            prediction["boxes"], prediction["scores"], target["boxes"]
+        )
+        if len(pred_boxes) == 0:
             continue
-
-        # Sort predictions by score descending
-        order = ps.argsort(descending=True)
-        pb, ps = pb[order], ps[order]
-
-        matched = torch.zeros(len(gb), dtype=torch.bool)
-
-        for i in range(len(pb)):
-            all_scores.append(ps[i].item())
-
-            if len(gb) == 0:
-                all_tp.append(0)
+        order = pred_scores.argsort(descending=True)
+        matched = torch.zeros(len(gt_boxes), dtype=torch.bool)
+        for index in order:
+            scores.append(float(pred_scores[index]))
+            if len(gt_boxes) == 0:
+                true_positives.append(0)
                 continue
-
-            ious        = box_iou(pb[i].unsqueeze(0), gb)[0]   # [M]
-            best_iou, j = ious.max(0)
-
-            if best_iou >= iou_thresh and not matched[j]:
-                matched[j] = True
-                all_tp.append(1)
-            else:
-                all_tp.append(0)
-
-    if not all_scores:
+            ious = box_iou(pred_boxes[index].unsqueeze(0), gt_boxes)[0]
+            best_iou, best_index = ious.max(dim=0)
+            is_true_positive = best_iou >= iou_thresh and not matched[best_index]
+            true_positives.append(int(is_true_positive))
+            if is_true_positive:
+                matched[best_index] = True
+    if not scores:
         return 0.0
+    order = sorted(range(len(scores)), key=scores.__getitem__, reverse=True)
+    tp = torch.tensor([true_positives[index] for index in order], dtype=torch.float32)
+    cumulative_tp = tp.cumsum(0)
+    cumulative_fp = (1.0 - tp).cumsum(0)
+    recalls = cumulative_tp / num_gt
+    precisions = cumulative_tp / (cumulative_tp + cumulative_fp + 1e-9)
+    return (_compute_ap_voc11 if interp == "voc11" else _compute_ap_auc)(
+        recalls, precisions
+    )
 
-    # Sort all predictions across images by score
-    order   = sorted(range(len(all_scores)), key=lambda i: all_scores[i], reverse=True)
-    tp_arr  = torch.tensor([all_tp[i] for i in order], dtype=torch.float32)
-
-    cum_tp  = tp_arr.cumsum(0)
-    cum_fp  = (1 - tp_arr).cumsum(0)
-    recalls    = cum_tp / n_gt
-    precisions = cum_tp / (cum_tp + cum_fp + 1e-9)
-
-    fn = _compute_ap_voc11 if interp == "voc11" else _compute_ap_auc
-    return fn(recalls, precisions)
-
-
-# ---------------------------------------------------------------------------
-# Main evaluator
-# ---------------------------------------------------------------------------
 
 class DetectionEvaluator:
-    """
-    Accumulates predictions and ground-truths, computes mAP.
-
-    Workflow:
-        evaluator.reset()
-        for images, targets in val_loader:
-            preds = model(images)
-            evaluator.update(preds, targets)
-        results = evaluator.compute()
-    """
-
     def __init__(
         self,
-        num_classes:  int,
-        class_names:  Optional[List[str]] = None,
+        num_classes: int,
+        class_names: Optional[List[str]] = None,
         iou_thresholds: Optional[List[float]] = None,
         interp: str = "voc11",
     ) -> None:
-        """
-        Args:
-            num_classes    : number of foreground classes (0-indexed)
-            class_names    : human-readable names for logging
-            iou_thresholds : list of IoU thresholds for mAP computation
-                             default = [0.5] → mAP@0.5
-                             COCO-style = [0.5, 0.55, ..., 0.95]
-            interp         : "voc11" or "auc"
-        """
-        self.num_classes     = num_classes
-        self.class_names     = class_names or [f"cls_{i}" for i in range(num_classes)]
-        self.iou_thresholds  = iou_thresholds or [0.5]
-        self.interp          = interp
+        self.num_classes = num_classes
+        self.class_names = class_names or [f"cls_{i}" for i in range(num_classes)]
+        self.iou_thresholds = iou_thresholds or [0.5]
+        self.interp = interp
         self.reset()
 
     def reset(self) -> None:
-        """Clear accumulated predictions and ground-truths."""
-        # per_class_preds[c][img_idx] = {"boxes": T, "scores": T}
         self._preds: List[Dict] = []
-        self._gts:   List[Dict] = []
+        self._gts: List[Dict] = []
 
-    def update(
-        self,
-        predictions: List[Dict[str, torch.Tensor]],
-        targets:     List[Dict[str, torch.Tensor]],
-    ) -> None:
-        """
-        Add one batch of predictions and ground-truths.
-
-        predictions : output of model.eval()(images)
-                      each dict: {"boxes":[N,4], "labels":[N], "scores":[N]}
-        targets     : ground-truth dicts
-                      each dict: {"boxes":[M,4], "labels":[M]}
-        """
-        for pred, target in zip(predictions, targets):
-            self._preds.append({k: v.cpu() for k, v in pred.items() if isinstance(v, torch.Tensor)})
-            self._gts.append(  {k: v.cpu() for k, v in target.items() if isinstance(v, torch.Tensor)})
+    def update(self, predictions, targets) -> None:
+        if len(predictions) != len(targets):
+            raise ValueError("predictions and targets must have equal batch length")
+        for prediction, target in zip(predictions, targets):
+            self._preds.append({
+                key: value.detach().cpu()
+                for key, value in prediction.items()
+                if isinstance(value, torch.Tensor)
+            })
+            self._gts.append({
+                key: value.detach().cpu()
+                for key, value in target.items()
+                if isinstance(value, torch.Tensor)
+            })
 
     def compute(self) -> Dict[str, float]:
-        results = {}
-        if not self._preds: return {"mAP@0.5": 0.0}
-
-        by_cls_pred = defaultdict(lambda: [{}] * len(self._preds))
-        by_cls_gt = defaultdict(lambda: [{}] * len(self._gts))
-
-        for img_i, (pred, gt) in enumerate(zip(self._preds, self._gts)):
-            for c in range(self.num_classes):
-                pm = pred["labels"] == c
-                gm = gt["labels"] == c
-                by_cls_pred[c][img_i] = {
-                    "boxes": pred["boxes"][pm] if pm.any() else torch.zeros(0, 4),
-                    "scores": pred["scores"][pm] if pm.any() else torch.zeros(0),
+        if not self._preds:
+            return {"mAP@0.5": 0.0}
+        by_class_predictions = defaultdict(lambda: [{} for _ in self._preds])
+        by_class_targets = defaultdict(lambda: [{} for _ in self._gts])
+        for image_index, (prediction, target) in enumerate(zip(self._preds, self._gts)):
+            for class_index in range(self.num_classes):
+                pred_mask = prediction["labels"] == class_index
+                target_mask = target["labels"] == class_index
+                by_class_predictions[class_index][image_index] = {
+                    "boxes": prediction["boxes"][pred_mask],
+                    "scores": prediction["scores"][pred_mask],
                 }
-                by_cls_gt[c][img_i] = {"boxes": gt["boxes"][gm] if gm.any() else torch.zeros(0, 4)}
-
-        all_threshold_maps = []
-        for iou_t in self.iou_thresholds:
+                by_class_targets[class_index][image_index] = {
+                    "boxes": target["boxes"][target_mask]
+                }
+        results: Dict[str, float] = {}
+        maps = []
+        for threshold in self.iou_thresholds:
             class_aps = []
-            for c in range(self.num_classes):
-                ap = _compute_class_ap(by_cls_pred[c], by_cls_gt[c], iou_thresh=iou_t, interp=self.interp)
-                if not (ap != ap): # Skip NaN
+            for class_index in range(self.num_classes):
+                ap = _compute_class_ap(
+                    by_class_predictions[class_index],
+                    by_class_targets[class_index],
+                    threshold,
+                    self.interp,
+                )
+                if ap == ap:
                     class_aps.append(ap)
-                    if iou_t == 0.5: results[f"AP@0.5/{self.class_names[c]}"] = round(ap, 4)
-            
-            map_at_t = sum(class_aps) / len(class_aps) if class_aps else 0.0
-            if iou_t == 0.5: results["mAP@0.5"] = round(map_at_t, 4)
-            all_threshold_maps.append(map_at_t)
-
+                    if threshold == 0.5:
+                        results[f"AP@0.5/{self.class_names[class_index]}"] = round(ap, 4)
+            mean_ap = sum(class_aps) / len(class_aps) if class_aps else 0.0
+            maps.append(mean_ap)
+            if threshold == 0.5:
+                results["mAP@0.5"] = round(mean_ap, 4)
         if len(self.iou_thresholds) > 1:
-            results["mAP@0.5:0.95"] = round(sum(all_threshold_maps) / len(all_threshold_maps), 4)
+            results["mAP@0.5:0.95"] = round(sum(maps) / len(maps), 4)
         return results
 
 
-# ---------------------------------------------------------------------------
-# Phase evaluator — runs evaluation at curriculum phase transitions
-# ---------------------------------------------------------------------------
-
 class PhaseEvaluator:
+    """Evaluate domains and invoke the best callback exactly on improvement."""
+
     def __init__(
         self,
         evaluator: DetectionEvaluator,
-        ir_val_loader: torch.utils.data.DataLoader,
+        ir_val_loader: Optional[DataLoader],
         device: torch.device,
-        rgb_val_loader: Optional[torch.utils.data.DataLoader] = None,
-        eval_every_n: int = 500,
+        rgb_val_loader: Optional[DataLoader] = None,
+        eval_every_n: Optional[int] = 500,
         vis_dir: Optional[str] = None,
-    ):
+    ) -> None:
         self.evaluator = evaluator
         self.ir_val_loader = ir_val_loader
         self.rgb_val_loader = rgb_val_loader
         self.device = device
         self.eval_every_n = eval_every_n
         self.vis_dir = vis_dir
-
-        # Best metrics tracking
         self.best_ir_map = -1.0
         self.best_rgb_map = -1.0
         self._last_phase = None
         self.history = []
+        self.on_new_best_fn = None
 
     def register_best_fn(self, fn) -> None:
-        """Register a callback called when a new best mAP@0.5 is achieved.
-        fn(results: Dict) where results contains global_step, phase, mAP@0.5, etc.
-        """
         self.on_new_best_fn = fn
 
-    def step(
-        self,
-        model:        "torch.nn.Module",
-        global_step:  int,
-        current_phase,
-    ) -> Optional[Dict]:
-        """
-        Call once per training iteration. Evaluates if triggered.
-        """
-        should_eval = (global_step > 0 and global_step % self.eval_every_n == 0) or \
-                      (self._last_phase is not None and current_phase != self._last_phase)
-        
+    def step(self, model, global_step: int, current_phase) -> Optional[Dict]:
+        phase_changed = self._last_phase is not None and current_phase != self._last_phase
+        periodic = self.eval_every_n is not None and global_step > 0 and global_step % self.eval_every_n == 0
         self._last_phase = current_phase
-        if should_eval:
+        if phase_changed or periodic:
             return self.evaluate(model, global_step, current_phase)
         return None
 
-    def evaluate(
-        self,
-        model,
-        global_step:    int,
-        current_phase,
-        trigger_reason: str = "manual",
-    ) -> Dict:
+    @staticmethod
+    def _phase_name(phase) -> str:
+        return phase.name if hasattr(phase, "name") else str(phase)
+
+    def evaluate(self, model, global_step: int, current_phase, trigger_reason: str = "manual") -> Dict:
+        was_training = model.training
         model.eval()
-        phase_name = current_phase.name
-        logger.info(f"--- [Evaluation] Step: {global_step} | Phase: {phase_name} ---")
-        
-        results = {"global_step": global_step, "phase": phase_name, "trigger": trigger_reason }
+        phase_name = self._phase_name(current_phase)
+        results = {"global_step": global_step, "phase": phase_name, "trigger": trigger_reason}
+        try:
+            if self.ir_val_loader is not None:
+                ir_results = self._run_eval_on_loader(model, self.ir_val_loader, "IR")
+            else:
+                ir_results = {"mAP@0.5": 0.0}
+            results.update(ir_results)
+            if ir_results.get("mAP@0.5", 0.0) > self.best_ir_map:
+                self.best_ir_map = ir_results["mAP@0.5"]
+                results["is_best_ir"] = True
+                if self.on_new_best_fn is not None:
+                    self.on_new_best_fn(results)
 
-        # Eval on IR (Target Domain - Always run)
-        ir_results = self._run_eval_on_loader(model, self.ir_val_loader, "IR")
-        results.update(ir_results)
-        
-        # Update Best IR mAP
-        if ir_results["mAP@0.5"] > self.best_ir_map:
-            self.best_ir_map = ir_results["mAP@0.5"]
-            results["is_best_ir"] = True
+            if self.rgb_val_loader is not None and phase_name in {
+                "PHASE1_RGB_WARMUP", "PHASE2_TRANSITION"
+            }:
+                rgb_results = self._run_eval_on_loader(model, self.rgb_val_loader, "RGB")
+                results.update({f"rgb_{key}": value for key, value in rgb_results.items()})
+                if rgb_results.get("mAP@0.5", 0.0) > self.best_rgb_map:
+                    self.best_rgb_map = rgb_results["mAP@0.5"]
+                    results["is_best_rgb"] = True
+            self.history.append(results)
+            return results
+        finally:
+            model.train(was_training)
 
-        # Eval on RGB (Only run in Phase 1 or Phase 2 to check stability)
-        if self.rgb_val_loader is not None and phase_name in ["PHASE1_RGB_WARMUP", "PHASE2_TRANSITION"]:
-            rgb_results = self._run_eval_on_loader(model, self.rgb_val_loader, "RGB")
-            results.update({f"rgb_{k}": v for k, v in rgb_results.items()})
-            
-            if rgb_results["mAP@0.5"] > self.best_rgb_map:
-                self.best_rgb_map = rgb_results["mAP@0.5"]
-                results["is_best_rgb"] = True
+    @staticmethod
+    def _split_batch(batch):
+        if len(batch) == 3:
+            return batch[0], batch[1], tuple(batch[2])
+        if len(batch) == 2:
+            return batch[0], batch[1], tuple(
+                target.get("stem", str(index))
+                for index, target in enumerate(batch[1])
+            )
+        raise ValueError("evaluation batch must contain images and targets")
 
-        self.history.append(results)
-        model.train()
-        return results
-    
     def _run_eval_on_loader(self, model, loader, domain_name) -> Dict:
         self.evaluator.reset()
-        start_time = time.time()
-        
+        started = time.time()
         with torch.no_grad():
-            for images, targets in loader:
-                images = images.to(self.device)
-                targets = [{k: v for k, v in t.items()} for t in targets]
-                
-                preds = model(images)
-                self.evaluator.update(preds, targets)
-        
+            for batch in loader:
+                images, targets, sample_ids = self._split_batch(batch)
+                images = images.to(self.device) if isinstance(images, torch.Tensor) else images
+                targets = [
+                    {key: value.to(self.device) if isinstance(value, torch.Tensor) else value
+                     for key, value in target.items()}
+                    for target in targets
+                ]
+                try:
+                    predictions = model(images, sample_ids=sample_ids)
+                except TypeError:
+                    predictions = model(images)
+                self.evaluator.update(predictions, targets)
         metrics = self.evaluator.compute()
-        elapsed = time.time() - start_time
-        logger.info(f"[{domain_name} Val] mAP@0.5: {metrics['mAP@0.5']:.4f} ({elapsed:.1f}s)")
+        logger.info(
+            "[%s Val] mAP@0.5: %.4f (%.1fs)",
+            domain_name,
+            metrics.get("mAP@0.5", 0.0),
+            time.time() - started,
+        )
         return metrics
 
     def print_history(self) -> None:
-        """Print a summary table of all evaluations."""
-        if not self.history:
-            logger.info("No evaluations recorded yet.")
-            return
-
-        # Header
-        header = f"{'Step':>8}  {'Phase':<25}  {'Trigger':<18}  {'mAP@0.5':>8}"
-        if "mAP@0.5:0.95" in self.history[0]:
-            header += f"  {'mAP@0.5:0.95':>12}"
-        logger.info("\n" + "=" * len(header))
-        logger.info(header)
-        logger.info("=" * len(header))
-
-        for r in self.history:
-            row = (
-                f"{r['global_step']:>8}  "
-                f"{r['phase']:<25}  "
-                f"{r['trigger']:<18}  "
-                f"{r.get('mAP@0.5', 0.0):>8.4f}"
+        for result in self.history:
+            logger.info(
+                "step=%s phase=%s mAP@0.5=%.4f",
+                result.get("global_step"),
+                result.get("phase"),
+                result.get("mAP@0.5", 0.0),
             )
-            if "mAP@0.5:0.95" in r:
-                row += f"  {r['mAP@0.5:0.95']:>12.4f}"
-            logger.info(row)
-
-        logger.info("=" * len(header) + "\n")
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    def _should_evaluate(self, global_step: int, current_phase) -> Tuple[bool, str]:
-        # Phase transition trigger
-        if self._last_phase is not None and current_phase != self._last_phase:
-            if self.eval_on_phases is None or self._last_phase in self.eval_on_phases:
-                return True, f"phase_end:{self._last_phase.name}"
-
-        # Periodic trigger
-        if self.eval_every_n is not None:
-            if global_step > 0 and global_step % self.eval_every_n == 0:
-                return True, f"periodic:{self.eval_every_n}"
-
-        return False, ""
-
-    def _log_results(self, results: Dict) -> None:
-        map50 = results.get("mAP@0.5", 0.0)
-        self.log_fn(f"[Eval result] mAP@0.5={map50:.4f}")
-        per_class = {k: v for k, v in results.items() if k.startswith("AP@")}
-        for name, ap in sorted(per_class.items()):
-            self.log_fn(f"  {name} = {ap:.4f}")
-        if "mAP@0.5:0.95" in results:
-            self.log_fn(f"  mAP@0.5:0.95 = {results['mAP@0.5:0.95']:.4f}")
-
-    def _visualize(self, model, global_step: int, current_phase, trigger_reason: str) -> None:
-        try:
-            from .visualize import visualize_eval_samples
-        except ImportError:
-            self.log_fn("[Visualize] matplotlib not available, skipping visualization")
-            return
-
-        filename = f"step{global_step:07d}_{current_phase.name}_{trigger_reason}.png"
-        save_path = str(Path(self.vis_dir) / filename)
-        map50 = self.history[-1].get("mAP@0.5", 0.0) if self.history else 0.0
-        title = (
-            f"step={global_step}  phase={current_phase.name}  "
-            f"trigger={trigger_reason}  mAP@0.5={map50:.4f}"
-        )
-        visualize_eval_samples(
-            model=model,
-            val_loader=self.ir_val_loader,
-            device=self.device,
-            save_path=save_path,
-            num_samples=self.vis_num_samples,
-            score_thresh=self.vis_score_thresh,
-            class_names=self.class_names,
-            title=title,
-        )
