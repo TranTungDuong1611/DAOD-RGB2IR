@@ -449,8 +449,8 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
         upper_bound[-num_anchors_per_level[-1] :] = float("inf")
         max_regression = pairwise_dist.max(dim=2).values
         level_match = (
-            (max_regression > lower_bound[:, None])
-            & (max_regression < upper_bound[:, None])
+            (max_regression >= lower_bound[:, None])
+            & (max_regression <= upper_bound[:, None])
         )
 
         candidate = inside_match & level_match

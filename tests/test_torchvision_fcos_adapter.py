@@ -202,6 +202,44 @@ class TorchvisionFCOSAdapterTests(unittest.TestCase):
 
         self.assertTrue(torch.equal(matched, torch.tensor([-1, 0])))
 
+    def test_fpn_scale_boundaries_are_inclusive_like_d3t(self):
+        adapter = build_adapter()
+        adapter.detector.center_sampling_radius = 0.0
+        anchor_sizes = (8.0, 16.0, 32.0, 64.0, 128.0)
+
+        for boundary, expected_levels in (
+            (64.0, (0, 1)),
+            (128.0, (1, 2)),
+            (256.0, (2, 3)),
+            (512.0, (3, 4)),
+        ):
+            with self.subTest(boundary=boundary):
+                anchors = torch.tensor(
+                    [
+                        [
+                            boundary - size / 2,
+                            boundary - size / 2,
+                            boundary + size / 2,
+                            boundary + size / 2,
+                        ]
+                        for size in anchor_sizes
+                    ]
+                )
+                target = {
+                    "boxes": torch.tensor(
+                        [[0.0, 0.0, 2 * boundary, 2 * boundary]]
+                    ),
+                    "labels": torch.tensor([0]),
+                }
+
+                matched = adapter._match_anchors_to_targets(
+                    anchors, target, (1, 1, 1, 1, 1)
+                )
+
+                expected = torch.full((5,), -1, dtype=torch.int64)
+                expected[list(expected_levels)] = 0
+                self.assertTrue(torch.equal(matched, expected))
+
     def test_prepare_supervised_uses_transformed_targets_and_detaches_iou(self):
         adapter = build_adapter()
         adapter.eval()
