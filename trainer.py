@@ -361,11 +361,11 @@ class CurriculumDomainAdaptationTrainer:
         logs["total_loss"] = float(total_loss.detach().item())
         logs["step_type"] = step_name
         logs["phase"] = phase.name
-        logs["global_step"] = self.global_step
         logs["ema_initialized"] = float(self.ema_initialized)
         logs["lr"] = iteration_lr
         self.loss_history[step_name].append(logs["total_loss"])
         self.global_step += 1
+        logs["global_step"] = self.global_step
         return logs
 
     def train(self) -> None:

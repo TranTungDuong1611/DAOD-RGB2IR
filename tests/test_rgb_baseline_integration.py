@@ -126,6 +126,7 @@ class RGBBaselineIntegrationTests(unittest.TestCase):
         self.assertEqual(ir_teacher.raw_calls, 0)
         self.assertEqual(optimizer.step_calls, 1)
         self.assertEqual(trainer.global_step, 1)
+        self.assertEqual(logs["global_step"], 1)
         self.assertAlmostEqual(logs["total_loss"], 2.0, places=6)
         self.assertTrue(torch.isfinite(torch.tensor(logs['total_loss'])))
 
