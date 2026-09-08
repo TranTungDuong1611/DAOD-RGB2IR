@@ -29,13 +29,9 @@ from models.fcos_factory import build_fcos_d3t_trio
 from models.torchvision_fcos_adapter import ClassificationInitMode
 from optimization import build_lr_scheduler, build_optimizer
 from trainer import CurriculumDomainAdaptationTrainer
+from training_logging import configure_training_logging
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -183,6 +179,8 @@ def _move_model_trio_to_device(student, rgb_teacher, ir_teacher, device):
 
 def main(args) -> None:
     config = make_training_config(args)
+    log_path = configure_training_logging(config.output_dir)
+    logger.info("Training log -> %s", log_path)
     device = torch.device(config.device)
     logger.info(
         "FLIR D3T: workflow=%s teacher_mode=%s mode=%s weights=%s device=%s total_iters=%d",

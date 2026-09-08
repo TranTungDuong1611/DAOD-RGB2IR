@@ -468,15 +468,21 @@ class CurriculumDomainAdaptationTrainer:
     def _log(self, log: Dict[str, Any]) -> None:
         components = []
         for key, value in sorted(log.items()):
-            if isinstance(value, float) and ("loss" in key or "kd_" in key):
+            if (
+                key != "total_loss"
+                and isinstance(value, float)
+                and ("loss" in key or "kd_" in key)
+            ):
                 components.append(f"{key}={value:.4f}")
         message = (
             f"[{int(log.get('global_step', self.global_step)):06d}] "
             f"Phase: {log.get('phase', 'N/A'):<22} | "
-            f"Step: {log.get('step_type', 'N/A'):<18} | "
+            f"Route: {log.get('step_type', 'N/A'):<18} | "
             f"Loss: {log.get('total_loss', 0.0):.4f} | "
             f"LR: {log.get('lr', 0.0):.6g}"
         )
+        if isinstance(log.get("iter_time"), (int, float)):
+            message += f" | Time: {log['iter_time']:.3f}s"
         if components:
             message += " | " + " | ".join(components)
         logger.info(message)
