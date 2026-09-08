@@ -149,7 +149,8 @@ class FLIRIRValDataset(Dataset):
         root      : path to the `align/` directory
         split     : "train" or "validation"
         transform : image transform
-        min_area  : skip boxes smaller than this (pixels²)
+        min_area  : skip boxes smaller than this (pixels²); defaults to 0 so
+                    evaluation retains every valid annotation
     """
 
     def __init__(
@@ -157,7 +158,7 @@ class FLIRIRValDataset(Dataset):
         root: str,
         split: str = "validation",
         transform: Optional[Callable] = None,
-        min_area: float = 16.0,
+        min_area: float = 0.0,
     ) -> None:
         self.root      = Path(root)
         self.transform = transform or default_ir_transform()
@@ -190,6 +191,5 @@ class FLIRIRValDataset(Dataset):
         target = {"boxes": boxes, "labels": labels, "stem": stem}
         return img_t, target, stem
     
-
 
 
