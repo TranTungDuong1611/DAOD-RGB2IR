@@ -10,9 +10,10 @@ Actual dataset structure:
   ├── Annotations/
   │   ├── FLIR_XXXXX_PreviewData.xml    ← VOC XML annotation for IR image
   │   └── ...
-  └── ImageSets/Main/
-      ├── align_train.txt               ← stems: "FLIR_XXXXX_PreviewData"
-      └── align_validation.txt
+  ├── align_train.txt                   ← stems: "FLIR_XXXXX_PreviewData"
+  └── align_validation.txt
+
+The split files may also use the VOC-compatible ImageSets/Main/ directory.
 
 Key conventions:
   - stem  = "FLIR_XXXXX_PreviewData"
@@ -41,6 +42,22 @@ from torch.utils.data import Dataset
 from utils.helper import ir_stem_to_rgb_filename, read_split_file
 from data.augmentations import default_rgb_transform, default_ir_transform
 from data.preprocessing import parse_voc_xml, objects_to_tensors
+
+
+def _resolve_split_file(root: Path, split: str) -> Path:
+    filename = f"align_{split}.txt"
+    candidates = (
+        root / filename,
+        root / "ImageSets" / "Main" / filename,
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(
+        f"FLIR split file '{filename}' was not found; searched: {searched}"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Datasets
@@ -72,7 +89,7 @@ class FLIRRGBDataset(Dataset):
         self.transform = transform or default_rgb_transform()
         self.min_area  = min_area
 
-        split_file = self.root / "ImageSets" / "Main" / f"align_{split}.txt"
+        split_file = _resolve_split_file(self.root, split)
         self.stems = read_split_file(split_file)
 
         # Filter to stems where the RGB image actually exists
@@ -120,7 +137,7 @@ class FLIRIRDataset(Dataset):
         self.root      = Path(root)
         self.transform = transform or default_ir_transform()
 
-        split_file = self.root / "ImageSets" / "Main" / f"align_{split}.txt"
+        split_file = _resolve_split_file(self.root, split)
         all_stems  = read_split_file(split_file)
 
         self.ir_paths = [
@@ -164,7 +181,7 @@ class FLIRIRValDataset(Dataset):
         self.transform = transform or default_ir_transform()
         self.min_area  = min_area
 
-        split_file = self.root / "ImageSets" / "Main" / f"align_{split}.txt"
+        split_file = _resolve_split_file(self.root, split)
         all_stems  = read_split_file(split_file)
 
         # Keep only stems where both image and annotation exist
@@ -191,5 +208,4 @@ class FLIRIRValDataset(Dataset):
         target = {"boxes": boxes, "labels": labels, "stem": stem}
         return img_t, target, stem
     
-
 
