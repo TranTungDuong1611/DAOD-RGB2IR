@@ -11,6 +11,18 @@ from models.torchvision_fcos_adapter import ClassificationInitMode
 
 
 class EntrypointConfigTests(unittest.TestCase):
+    def test_default_resize_schedule_matches_d3t(self):
+        with mock.patch.object(
+            sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
+        ):
+            config = make_training_config(parse_args())
+
+        self.assertEqual(
+            config.model.min_sizes,
+            (640, 672, 704, 736, 768, 800),
+        )
+        self.assertEqual(config.model.max_size, 1333)
+
     def test_default_hm_settings_match_d3t(self):
         with mock.patch.object(
             sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
@@ -114,7 +126,7 @@ class EntrypointConfigTests(unittest.TestCase):
             "--warmup-factor", "0.1",
             "--lr-steps", "8", "12",
             "--lr-gamma", "0.2",
-            "--min_size", "96",
+            "--min-sizes", "96", "112",
             "--max_size", "128",
             "--eval_every", "7",
             "--weights", "none",
@@ -138,7 +150,7 @@ class EntrypointConfigTests(unittest.TestCase):
         self.assertEqual(config.optimizer.milestones, (8, 12))
         self.assertEqual(config.optimizer.gamma, 0.2)
         self.assertEqual(config.eval_period, 7)
-        self.assertEqual(config.model.min_size, 96)
+        self.assertEqual(config.model.min_sizes, (96, 112))
         self.assertEqual(config.model.max_size, 128)
         self.assertIsNone(config.model.weights)
         self.assertFalse(config.model.pretrained_backbone)

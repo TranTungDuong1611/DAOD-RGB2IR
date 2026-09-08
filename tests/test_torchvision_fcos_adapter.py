@@ -1,5 +1,7 @@
 from collections import OrderedDict
+import copy
 import unittest
+from unittest import mock
 
 import torch
 from torch import nn
@@ -9,6 +11,8 @@ from models.torchvision_fcos_adapter import (
     FCOSIoUHead,
     TorchvisionFCOSAdapter,
 )
+from loss.d3t_criterion import D3TLossCriterion
+from models.d3t_wrapper import D3TWrapper
 from torchvision.models.detection import FCOS
 
 
@@ -49,6 +53,57 @@ def build_adapter(min_size=64, max_size=128):
 
 
 class TorchvisionFCOSAdapterTests(unittest.TestCase):
+    def test_shared_resize_override_aligns_train_student_and_eval_teacher(self):
+        student = D3TWrapper(
+            build_adapter(min_size=(64, 96)), D3TLossCriterion()
+        )
+        teacher = copy.deepcopy(student).eval()
+        student.train()
+        image = torch.rand(3, 40, 56)
+
+        student_output = student.raw(
+            [image], sample_ids=("a",), resize_short_edge=64
+        )
+        teacher_output = teacher.raw(
+            [image], sample_ids=("a",), resize_short_edge=64
+        )
+        pair = student.adapter.prepare_distillation(
+            student_output, teacher_output
+        )
+
+        self.assertEqual(
+            student_output.context.transformed_images.image_sizes,
+            teacher_output.context.transformed_images.image_sizes,
+        )
+        self.assertEqual(
+            pair.student[0].class_logits.shape,
+            pair.teacher[0].class_logits.shape,
+        )
+
+    def test_distill_convenience_selects_one_shared_resize(self):
+        student = D3TWrapper(
+            build_adapter(min_size=(64, 96)), D3TLossCriterion()
+        )
+        teacher = copy.deepcopy(student).eval()
+        student.train()
+        image = torch.rand(3, 40, 56)
+
+        with mock.patch.object(
+            student.adapter,
+            "select_training_resize_short_edge",
+            return_value=64,
+        ) as select_resize:
+            losses = student.distill(
+                [image],
+                teacher,
+                [image],
+                sample_ids=("a",),
+                teacher_sample_ids=("a",),
+            )
+
+        select_resize.assert_called_once_with()
+        self.assertIn("loss_kd_cls", losses)
+
     def test_raw_forward_supports_variable_list_and_decodes_with_box_coder(self):
         adapter = build_adapter()
         adapter.train()

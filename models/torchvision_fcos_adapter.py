@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 import copy
 from collections import OrderedDict
+from contextlib import contextmanager
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
 import torch
@@ -259,6 +260,29 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
         self.detector = detector
         self.class_names = names
         self.num_classes = len(names)
+
+    def select_training_resize_short_edge(self) -> int:
+        """Choose once so student and EMA teachers use identical anchors."""
+
+        return int(
+            self.detector.transform.torch_choice(
+                self.detector.transform.min_size
+            )
+        )
+
+    @contextmanager
+    def resize_short_edge(self, short_edge: Optional[int]):
+        """Force one shared short edge while preserving the configured schedule."""
+
+        if short_edge is None:
+            yield
+            return
+        previous = self.detector.transform.min_size
+        self.detector.transform.min_size = (int(short_edge),)
+        try:
+            yield
+        finally:
+            self.detector.transform.min_size = previous
 
     @staticmethod
     def _normalize_images(images: Sequence[Tensor] | Tensor) -> Tuple[Tensor, ...]:

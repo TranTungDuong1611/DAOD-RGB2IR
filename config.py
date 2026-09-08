@@ -80,8 +80,8 @@ class FCOSModelConfig:
     classification_init_mode: ClassificationInitMode = ClassificationInitMode.COCO_TOWER
     pretrained_backbone: bool = True
     trainable_backbone_layers: int = 3
-    min_size: int = 600
-    max_size: int = 1000
+    min_sizes: Tuple[int, ...] = (640, 672, 704, 736, 768, 800)
+    max_size: int = 1333
     center_sampling_radius: float = 1.5
     score_thresh: float = 0.05
     nms_thresh: float = 0.6
@@ -95,6 +95,7 @@ class FCOSModelConfig:
 
     def __post_init__(self):
         self.class_names = tuple(self.class_names)
+        self.min_sizes = tuple(self.min_sizes)
         self.classification_init_mode = ClassificationInitMode(
             self.classification_init_mode
         )
@@ -104,8 +105,12 @@ class FCOSModelConfig:
             raise ValueError("class_names must be ('person', 'car', 'bicycle')")
         if not 0 <= self.trainable_backbone_layers <= 5:
             raise ValueError("trainable_backbone_layers must be in [0, 5]")
-        if self.min_size <= 0 or self.max_size < self.min_size:
-            raise ValueError("min_size/max_size must be positive and ordered")
+        if not self.min_sizes or any(size <= 0 for size in self.min_sizes):
+            raise ValueError("min_sizes must contain positive values")
+        if self.min_sizes != tuple(sorted(self.min_sizes)):
+            raise ValueError("min_sizes must be increasing")
+        if self.max_size < max(self.min_sizes):
+            raise ValueError("max_size must be at least the largest min_size")
         if self.center_sampling_radius < 0:
             raise ValueError("center_sampling_radius must be non-negative")
         if not 0 <= self.score_thresh <= 1 or not 0 <= self.nms_thresh <= 1:

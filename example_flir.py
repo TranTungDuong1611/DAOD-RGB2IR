@@ -83,7 +83,7 @@ def build_training_config(args) -> TrainingConfig:
             ),
             pretrained_backbone=pretrained_backbone,
             trainable_backbone_layers=args.trainable_backbone_layers,
-            min_size=args.min_size,
+            min_sizes=tuple(args.min_sizes),
             max_size=args.max_size,
             center_sampling_radius=args.center_sampling_radius,
             score_thresh=args.score_thresh,
@@ -288,8 +288,14 @@ def parse_args():
     parser.add_argument("--warmup-factor", type=float, default=1.0 / 1000.0)
     parser.add_argument("--lr-steps", type=int, nargs="*", default=(70000,))
     parser.add_argument("--lr-gamma", type=float, default=0.1)
-    parser.add_argument("--min_size", type=int, default=512)
-    parser.add_argument("--max_size", type=int, default=640)
+    parser.add_argument(
+        "--min-sizes",
+        type=int,
+        nargs="+",
+        default=(640, 672, 704, 736, 768, 800),
+        help="Training short-edge choices; evaluation uses the final value",
+    )
+    parser.add_argument("--max_size", type=int, default=1333)
     parser.add_argument("--center_sampling_radius", type=float, default=1.5)
     parser.add_argument("--score_thresh", type=float, default=0.05)
     parser.add_argument("--nms_thresh", type=float, default=0.6)

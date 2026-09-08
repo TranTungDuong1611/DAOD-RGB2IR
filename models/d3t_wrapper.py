@@ -31,6 +31,11 @@ class D3TWrapper(nn.Module):
         self.adapter = adapter
         self.criterion = criterion
 
+    def select_training_resize_short_edge(self) -> Optional[int]:
+        """Delegate detector-specific geometry selection to the adapter."""
+
+        return self.adapter.select_training_resize_short_edge()
+
     @staticmethod
     def _normalize_images(images: Sequence[Tensor] | Tensor) -> Tuple[Tensor, ...]:
         if isinstance(images, Tensor):
@@ -84,6 +89,7 @@ class D3TWrapper(nn.Module):
         images: Sequence[Tensor] | Tensor,
         targets: Optional[Targets] = None,
         sample_ids: Optional[Sequence[str]] = None,
+        resize_short_edge: Optional[int] = None,
     ) -> AdapterOutput:
         image_list = self._normalize_images(images)
         if targets is not None and len(targets) != len(image_list):
@@ -94,11 +100,14 @@ class D3TWrapper(nn.Module):
             resolved_ids = self._ids_from_targets(targets, len(image_list))
         resolved_ids = self.adapter.validate_sample_ids(resolved_ids, len(image_list))
 
-        output = self.adapter(
-            image_list,
-            targets,
-            sample_ids=resolved_ids,
-        )
+        if resize_short_edge is not None and resize_short_edge <= 0:
+            raise ValueError("resize_short_edge must be positive")
+        with self.adapter.resize_short_edge(resize_short_edge):
+            output = self.adapter(
+                image_list,
+                targets,
+                sample_ids=resolved_ids,
+            )
         if len(output.predictions) != len(image_list):
             raise ValueError("Adapter output must match the image batch length")
         if output.sample_ids is None and resolved_ids is not None:
@@ -166,9 +175,18 @@ class D3TWrapper(nn.Module):
         if len(student_list) != len(teacher_list):
             raise ValueError("Distillation requires matching image batch lengths")
 
-        student_output = self.raw(student_list, sample_ids=sample_ids)
+        resize_short_edge = self.select_training_resize_short_edge()
+        student_output = self.raw(
+            student_list,
+            sample_ids=sample_ids,
+            resize_short_edge=resize_short_edge,
+        )
         with torch.no_grad():
-            teacher_output = teacher.raw(teacher_list, sample_ids=teacher_sample_ids)
+            teacher_output = teacher.raw(
+                teacher_list,
+                sample_ids=teacher_sample_ids,
+                resize_short_edge=resize_short_edge,
+            )
         return self.distill_from_outputs(
             student_output,
             teacher_output,

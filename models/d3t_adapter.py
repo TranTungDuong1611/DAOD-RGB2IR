@@ -6,6 +6,7 @@ only receives the normalized tensors declared in this module.
 """
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import math
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
@@ -158,6 +159,17 @@ class DistillationPair:
 
 class DetectorAdapter(nn.Module, ABC):
     """Adapter seam shared by detector families."""
+
+    def select_training_resize_short_edge(self) -> Optional[int]:
+        """Choose one shared training geometry when the detector needs it."""
+
+        return None
+
+    @contextmanager
+    def resize_short_edge(self, short_edge: Optional[int]):
+        """Temporarily apply a shared resize; detector adapters may override."""
+
+        yield
 
     @staticmethod
     def validate_sample_ids(

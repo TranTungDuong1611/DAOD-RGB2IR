@@ -109,7 +109,7 @@ def _make_base_detector(
         weights_backbone=weights_backbone,
         num_classes=base_num_classes,
         trainable_backbone_layers=model_config.trainable_backbone_layers,
-        min_size=model_config.min_size,
+        min_size=model_config.min_sizes,
         max_size=model_config.max_size,
         center_sampling_radius=model_config.center_sampling_radius,
         score_thresh=model_config.score_thresh,
@@ -144,7 +144,7 @@ def build_fcos_d3t_model(
     # effective transform/detection settings as a freshly constructed model.
     transform = getattr(base_detector, "transform", None)
     if transform is not None:
-        transform.min_size = [config.model.min_size]
+        transform.min_size = config.model.min_sizes
         transform.max_size = config.model.max_size
     for name in (
         "center_sampling_radius",

@@ -226,6 +226,36 @@ def build_trainer(config):
 
 
 class CurriculumIntegrationTests(unittest.TestCase):
+    def test_trainer_uses_one_resize_choice_for_student_and_teacher(self):
+        config = build_config(
+            teacher_mode="rgb",
+            ema=EMAConfig(alpha=0.0, start_steps=0),
+            curriculum=CurriculumConfig(
+                phase1_end=0,
+                phase2_end=10,
+                phase3_end=20,
+                phase2_rgb_sampling_ratio=1.0,
+            ),
+        )
+        trainer, student, rgb_teacher, _ = build_trainer(config)
+
+        with (
+            mock.patch.object(
+                student,
+                "select_training_resize_short_edge",
+                return_value=672,
+            ) as choose,
+            mock.patch.object(student, "raw", wraps=student.raw) as student_raw,
+            mock.patch.object(
+                rgb_teacher, "raw", wraps=rgb_teacher.raw
+            ) as teacher_raw,
+        ):
+            trainer.train_one_iteration()
+
+        choose.assert_called_once_with()
+        self.assertEqual(student_raw.call_args.kwargs["resize_short_edge"], 672)
+        self.assertEqual(teacher_raw.call_args.kwargs["resize_short_edge"], 672)
+
     def test_lr_scheduler_steps_and_resumes_with_checkpoint(self):
         with tempfile.TemporaryDirectory() as output_dir:
             config = build_config(output_dir=output_dir)

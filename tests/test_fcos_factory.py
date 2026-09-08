@@ -1,5 +1,8 @@
 import copy
 import unittest
+from unittest import mock
+
+import torch
 
 from config import FCOSModelConfig, TrainingConfig
 from loss.d3t_criterion import D3TLossCriterion
@@ -22,7 +25,7 @@ def build_config(
         weights=None,
         pretrained_backbone=False,
         classification_init_mode=mode,
-        min_size=64,
+        min_sizes=(64, 96),
         max_size=128,
     ), device='cpu', teacher_mode=teacher_mode)
 
@@ -71,6 +74,36 @@ class FactoryTests(unittest.TestCase):
         build_fcos_d3t_model(config, detector_builder=builder)
         self.assertEqual(calls['trainable_backbone_layers'], 2)
         self.assertIsNone(calls['weights'])
+        self.assertEqual(calls['min_size'], (64, 96))
+
+    def test_factory_configures_train_choice_and_eval_last_resize(self):
+        wrapper = build_fcos_d3t_model(
+            build_config(),
+            base_detector=fcos_resnet50_fpn(
+                weights=None,
+                weights_backbone=None,
+                num_classes=91,
+                min_size=64,
+                max_size=128,
+            ),
+        )
+        transform = wrapper.adapter.detector.transform
+        image = torch.rand(3, 32, 32)
+
+        transform.train()
+        with mock.patch.object(transform, "torch_choice", return_value=64) as choice:
+            train_image, _ = transform.resize(image)
+        choice.assert_called_once_with((64, 96))
+        self.assertEqual(train_image.shape[-2:], (64, 64))
+
+        transform.eval()
+        with mock.patch.object(
+            transform,
+            "torch_choice",
+            side_effect=AssertionError("eval must use the final configured size"),
+        ):
+            eval_image, _ = transform.resize(image)
+        self.assertEqual(eval_image.shape[-2:], (96, 96))
 
     def test_trio_deepcopies_complete_student_and_freezes_teachers(self):
         config = build_config()

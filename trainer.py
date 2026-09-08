@@ -272,10 +272,15 @@ class CurriculumDomainAdaptationTrainer:
         if self.config.workflow != "rgb_baseline":
             self._ensure_ema_initialized()
 
+        select_resize = getattr(
+            self.student, "select_training_resize_short_edge", None
+        )
+        resize_short_edge = None if select_resize is None else select_resize()
+        student_raw_kwargs = {"sample_ids": sample_ids}
+        if resize_short_edge is not None:
+            student_raw_kwargs["resize_short_edge"] = resize_short_edge
         student_output = self.student.raw(
-            data["student_images"],
-            targets,
-            sample_ids=sample_ids,
+            data["student_images"], targets, **student_raw_kwargs
         )
         total_loss = None
         logs: Dict[str, float] = {}
@@ -303,9 +308,11 @@ class CurriculumDomainAdaptationTrainer:
             for teacher_name in enabled_teacher_names:
                 teacher = self._teacher_for_name(teacher_name)
                 with torch.no_grad():
+                    teacher_raw_kwargs = {"sample_ids": sample_ids}
+                    if resize_short_edge is not None:
+                        teacher_raw_kwargs["resize_short_edge"] = resize_short_edge
                     teacher_output = teacher.raw(
-                        data["teacher_images"],
-                        sample_ids=sample_ids,
+                        data["teacher_images"], **teacher_raw_kwargs
                     )
                 result = self._as_result(
                     self.student.distill_from_outputs(
