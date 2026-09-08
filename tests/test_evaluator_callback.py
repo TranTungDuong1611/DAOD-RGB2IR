@@ -33,6 +33,39 @@ class EvaluatorCallbackTests(unittest.TestCase):
         self.assertTrue(model.training)
         self.assertEqual(phase_evaluator.best_ir_map, 0.6)
 
+    def test_state_roundtrip_preserves_best_metrics_and_prevents_false_best(self):
+        model = nn.Linear(1, 1)
+        original = PhaseEvaluator(
+            evaluator=DetectionEvaluator(num_classes=1),
+            ir_val_loader=[object()],
+            device=torch.device("cpu"),
+        )
+        original.best_ir_map = 0.6
+        original.best_rgb_map = 0.7
+        original._last_phase = Phase.PHASE2_TRANSITION
+        original.history = [{"global_step": 10, "mAP@0.5": 0.6}]
+
+        resumed = PhaseEvaluator(
+            evaluator=DetectionEvaluator(num_classes=1),
+            ir_val_loader=[object()],
+            device=torch.device("cpu"),
+        )
+        resumed.load_state_dict(original.state_dict())
+        resumed._run_eval_on_loader = (
+            lambda model, loader, domain: {"mAP@0.5": 0.5}
+        )
+        calls = []
+        resumed.register_best_fn(lambda result: calls.append(result))
+
+        result = resumed.evaluate(model, 11, Phase.PHASE2_TRANSITION)
+
+        self.assertNotIn("is_best_ir", result)
+        self.assertEqual(calls, [])
+        self.assertEqual(resumed.best_ir_map, 0.6)
+        self.assertEqual(resumed.best_rgb_map, 0.7)
+        self.assertEqual(resumed._last_phase, Phase.PHASE2_TRANSITION)
+        self.assertEqual(resumed.history[0]["global_step"], 10)
+
 
 if __name__ == "__main__":
     unittest.main()

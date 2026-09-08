@@ -1,6 +1,7 @@
 """Small dependency-free detection evaluator and phase callback."""
 
 from collections import defaultdict
+import copy
 import logging
 import time
 from typing import Dict, List, Optional
@@ -172,6 +173,26 @@ class PhaseEvaluator:
 
     def register_best_fn(self, fn) -> None:
         self.on_new_best_fn = fn
+
+    def state_dict(self) -> Dict:
+        """Return persistent evaluation state without serializing callbacks/loaders."""
+
+        return {
+            "best_ir_map": float(self.best_ir_map),
+            "best_rgb_map": float(self.best_rgb_map),
+            "last_phase": self._last_phase,
+            "history": copy.deepcopy(self.history),
+        }
+
+    def load_state_dict(self, state: Dict) -> None:
+        """Restore evaluation progress used by periodic and best-model decisions."""
+
+        if not isinstance(state, dict):
+            raise TypeError("phase evaluator state must be a dictionary")
+        self.best_ir_map = float(state.get("best_ir_map", -1.0))
+        self.best_rgb_map = float(state.get("best_rgb_map", -1.0))
+        self._last_phase = state.get("last_phase")
+        self.history = copy.deepcopy(state.get("history", []))
 
     def step(self, model, global_step: int, current_phase) -> Optional[Dict]:
         phase_changed = self._last_phase is not None and current_phase != self._last_phase

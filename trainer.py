@@ -398,6 +398,12 @@ class CurriculumDomainAdaptationTrainer:
             "ir_teacher": None if self.ir_teacher is None else self.ir_teacher.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
+            "phase_evaluator": (
+                self.phase_evaluator.state_dict()
+                if self.phase_evaluator is not None
+                and hasattr(self.phase_evaluator, "state_dict")
+                else None
+            ),
         }
         torch.save(payload, path)
         logger.info("Checkpoint saved -> %s", path)
@@ -410,14 +416,34 @@ class CurriculumDomainAdaptationTrainer:
         if metadata is None:
             raise ValueError("Checkpoint has no D3T metadata; legacy checkpoints are unsupported")
         validate_checkpoint_metadata(metadata, self.config)
+        configured_teachers = {
+            "rgb_teacher": self.rgb_teacher,
+            "ir_teacher": self.ir_teacher,
+        }
+        missing_teacher_states = [
+            name
+            for name, teacher in configured_teachers.items()
+            if teacher is not None and checkpoint.get(name) is None
+        ]
+        if missing_teacher_states:
+            missing = ", ".join(missing_teacher_states)
+            raise ValueError(
+                f"Checkpoint is missing state for configured teacher(s): {missing}"
+            )
         self.student.load_state_dict(checkpoint["student"])
-        if self.rgb_teacher is not None and checkpoint.get("rgb_teacher") is not None:
-            self.rgb_teacher.load_state_dict(checkpoint["rgb_teacher"])
-        if self.ir_teacher is not None and checkpoint.get("ir_teacher") is not None:
-            self.ir_teacher.load_state_dict(checkpoint["ir_teacher"])
+        for name, teacher in configured_teachers.items():
+            if teacher is not None:
+                teacher.load_state_dict(checkpoint[name])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         if "scheduler" in checkpoint:
             self.scheduler.load_state_dict(checkpoint["scheduler"])
+        evaluator_state = checkpoint.get("phase_evaluator")
+        if (
+            evaluator_state is not None
+            and self.phase_evaluator is not None
+            and hasattr(self.phase_evaluator, "load_state_dict")
+        ):
+            self.phase_evaluator.load_state_dict(evaluator_state)
         self.global_step = int(checkpoint.get("global_step", 0))
         self.best_map = float(checkpoint.get("best_map", 0.0))
         self.ema_initialized = bool(checkpoint.get("ema_initialized", False))

@@ -139,6 +139,17 @@ def collate_ir(batch):
     return torch.stack([item[0] for item in batch]), tuple(item[1] for item in batch)
 
 
+class StatefulPhaseEvaluator:
+    def __init__(self, state=None):
+        self.state = state or {}
+
+    def state_dict(self):
+        return dict(self.state)
+
+    def load_state_dict(self, state):
+        self.state = dict(state)
+
+
 def build_config(**kwargs):
     curriculum = kwargs.pop(
         "curriculum",
@@ -256,6 +267,40 @@ class CurriculumIntegrationTests(unittest.TestCase):
                 )
                 trainer._ensure_ema_initialized()
                 hard_copy.assert_not_called()
+
+    def test_checkpoint_restores_phase_evaluator_state(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            config = build_config(output_dir=output_dir)
+            trainer, _, _, _ = build_trainer(config)
+            trainer.phase_evaluator = StatefulPhaseEvaluator(
+                {"best_ir_map": 0.61, "history": [{"global_step": 3}]}
+            )
+            trainer.save_checkpoint("evaluator-state.pth")
+
+            resumed, _, _, _ = build_trainer(config)
+            resumed.phase_evaluator = StatefulPhaseEvaluator()
+            resumed.load_checkpoint(f"{output_dir}/evaluator-state.pth")
+
+            self.assertEqual(resumed.phase_evaluator.state["best_ir_map"], 0.61)
+            self.assertEqual(
+                resumed.phase_evaluator.state["history"], [{"global_step": 3}]
+            )
+
+    def test_checkpoint_rejects_missing_enabled_teacher_state(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            config = build_config(output_dir=output_dir)
+            trainer, _, _, _ = build_trainer(config)
+            trainer.save_checkpoint("complete.pth")
+            checkpoint_path = f"{output_dir}/complete.pth"
+            checkpoint = torch.load(
+                checkpoint_path, map_location="cpu", weights_only=False
+            )
+            checkpoint["ir_teacher"] = None
+            torch.save(checkpoint, checkpoint_path)
+
+            resumed, _, _, _ = build_trainer(config)
+            with self.assertRaisesRegex(ValueError, "ir_teacher"):
+                resumed.load_checkpoint(checkpoint_path)
 
     def test_trainer_can_run_with_only_the_selected_teacher(self):
         config = build_config(
