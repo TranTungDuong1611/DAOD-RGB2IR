@@ -212,6 +212,20 @@ def build_trainer(config):
 
 
 class CurriculumIntegrationTests(unittest.TestCase):
+    def test_uhl_uses_its_dedicated_component_weight(self):
+        loss_config = LossConfig(
+            weight_logits=4.0,
+            weight_deltas=3.0,
+            weight_quality=2.0,
+            weight_uhl=0.25,
+        )
+
+        weight = CurriculumDomainAdaptationTrainer._component_weight(
+            "loss_kd_uhl", loss_config
+        )
+
+        self.assertEqual(weight, 0.25)
+
     def test_ema_copies_integral_buffers_and_interpolates_float_buffers(self):
         student = nn.BatchNorm1d(2)
         teacher = nn.BatchNorm1d(2)

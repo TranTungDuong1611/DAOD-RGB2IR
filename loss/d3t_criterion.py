@@ -97,6 +97,21 @@ def _giou_loss_xyxy(
     return 1.0 - giou
 
 
+def _pairwise_iou_xyxy(boxes: Tensor, eps: float = 1e-7) -> Tensor:
+    """Return the IoU matrix for decoded XYXY boxes from one image."""
+
+    if boxes.ndim != 2 or boxes.shape[1] != 4:
+        raise ValueError("boxes must have shape [N, 4]")
+    top_left = torch.maximum(boxes[:, None, :2], boxes[None, :, :2])
+    bottom_right = torch.minimum(boxes[:, None, 2:], boxes[None, :, 2:])
+    intersection_wh = (bottom_right - top_left).clamp_min(0)
+    intersection = intersection_wh[..., 0] * intersection_wh[..., 1]
+    wh = (boxes[:, 2:] - boxes[:, :2]).clamp_min(0)
+    area = wh[:, 0] * wh[:, 1]
+    union = area[:, None] + area[None, :] - intersection
+    return intersection / union.clamp_min(eps)
+
+
 def _zero_with_grad(*tensors: Tensor) -> Tensor:
     """Create a scalar zero connected to every supplied computation graph."""
 
@@ -212,6 +227,48 @@ class D3TLossCriterion(D3TCriterion):
         t_quality = _cat_or_none([p.quality_logits for p in teacher])
         return s_cls, t_cls, s_boxes, t_boxes, s_quality, t_quality
 
+    def _uhl_loss(self, pair: DistillationPair, selected: Tensor) -> Tensor:
+        """Build D3T overlap targets per image and supervise student logits."""
+
+        logits = []
+        targets = []
+        offset = 0
+        for student, teacher in zip(pair.student, pair.teacher):
+            row_count = student.class_logits.shape[0]
+            image_selected = selected[offset : offset + row_count]
+            offset += row_count
+            if int(image_selected.sum().item()) <= 1:
+                continue
+
+            selected_boxes = student.boxes[image_selected].detach()
+            pairwise_iou = _pairwise_iou_xyxy(selected_boxes)
+            pairwise_iou.fill_diagonal_(0.0)
+            max_iou = pairwise_iou.max(dim=1).values
+            overlapping = max_iou > 0
+            if not overlapping.any():
+                continue
+
+            selected_logits = student.class_logits[image_selected]
+            teacher_labels = (
+                teacher.class_logits.detach().sigmoid().argmax(dim=1)[image_selected]
+            )
+            image_targets = torch.zeros_like(selected_logits)
+            image_targets[overlapping, teacher_labels[overlapping]] = max_iou[
+                overlapping
+            ]
+            logits.append(selected_logits[overlapping])
+            targets.append(image_targets[overlapping])
+
+        if not logits:
+            return _zero_with_grad(*(p.class_logits for p in pair.student))
+        return _hm_focal_elementwise(
+            torch.cat(logits, dim=0),
+            torch.cat(targets, dim=0),
+            alpha=self.alpha,
+            gamma=self.gamma,
+            weight_type=self.weight_type,
+        ).mean()
+
     @staticmethod
     def _metrics(
         device: torch.device,
@@ -258,6 +315,7 @@ class D3TLossCriterion(D3TCriterion):
                     "loss_kd_cls": zero,
                     "loss_kd_box": zero,
                     "loss_kd_quality": zero,
+                    "loss_kd_uhl": zero,
                 },
                 metrics=metrics,
             )
@@ -319,11 +377,14 @@ class D3TLossCriterion(D3TCriterion):
             loss_kd_box = _zero_with_grad(student_boxes)
             loss_kd_quality = _zero_with_grad(student_quality)
 
+        loss_kd_uhl = self._uhl_loss(pair, selected)
+
         return CriterionResult(
             losses={
                 "loss_kd_cls": loss_kd_cls,
                 "loss_kd_box": loss_kd_box,
                 "loss_kd_quality": loss_kd_quality,
+                "loss_kd_uhl": loss_kd_uhl,
             },
             metrics=self._metrics(device, int(selected.sum().item()), total_rows, hm_sum),
         )

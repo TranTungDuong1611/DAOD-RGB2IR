@@ -24,6 +24,77 @@ def supervised_batch(class_logits, boxes, quality_logits, class_targets, box_tar
 
 
 class D3TCriterionTests(unittest.TestCase):
+    def test_uhl_uses_intra_image_box_overlap_and_teacher_labels(self):
+        criterion = D3TLossCriterion(alpha=0.75, gamma=2.0, weight_type="iou")
+        student_logits = torch.zeros(3, 2, requires_grad=True)
+        student_boxes = torch.tensor(
+            [
+                [0.0, 0.0, 2.0, 2.0],
+                [1.0, 0.0, 3.0, 2.0],
+                [10.0, 10.0, 12.0, 12.0],
+            ],
+            requires_grad=True,
+        )
+        student_quality = torch.zeros(3, requires_grad=True)
+        teacher_logits = torch.tensor(
+            [[10.0, -10.0], [-10.0, 10.0], [10.0, -10.0]],
+            requires_grad=True,
+        )
+        teacher = Predictions(
+            teacher_logits,
+            student_boxes.detach().clone(),
+            torch.full((3,), 10.0, requires_grad=True),
+        )
+        result = criterion.distillation(
+            DistillationPair(
+                (Predictions(student_logits, student_boxes, student_quality),),
+                (teacher,),
+            ),
+            DistillationSettings(top_ratio=1.0, min_hm=0.0),
+        )
+
+        overlap = 1.0 / 3.0
+        expected = math.log(2.0) * (
+            2.0 * overlap + 2.0 * 0.75 * 0.5 ** 2
+        ) / 4.0
+        self.assertAlmostEqual(result.losses["loss_kd_uhl"].item(), expected, places=6)
+
+        result.losses["loss_kd_uhl"].backward()
+        self.assertGreater(student_logits.grad[:2].abs().sum().item(), 0.0)
+        self.assertEqual(student_logits.grad[2].abs().sum().item(), 0.0)
+        self.assertIsNone(student_boxes.grad)
+        self.assertIsNone(teacher_logits.grad)
+
+    def test_uhl_does_not_compare_boxes_across_images(self):
+        student_predictions = tuple(
+            Predictions(
+                torch.zeros(1, 1, requires_grad=True),
+                torch.tensor([[0.0, 0.0, 2.0, 2.0]], requires_grad=True),
+                torch.zeros(1, requires_grad=True),
+            )
+            for _ in range(2)
+        )
+        teacher_predictions = tuple(
+            Predictions(
+                torch.full((1, 1), 10.0),
+                torch.tensor([[0.0, 0.0, 2.0, 2.0]]),
+                torch.full((1,), 10.0),
+            )
+            for _ in range(2)
+        )
+
+        result = D3TLossCriterion().distillation(
+            DistillationPair(student_predictions, teacher_predictions),
+            DistillationSettings(top_ratio=1.0, min_hm=0.0),
+        )
+
+        self.assertEqual(result.losses["loss_kd_uhl"].item(), 0.0)
+        result.losses["loss_kd_uhl"].backward()
+        self.assertEqual(
+            sum(p.class_logits.grad.abs().sum().item() for p in student_predictions),
+            0.0,
+        )
+
     def test_supervised_reduction_matches_literal_hm_focal_and_quality(self):
         criterion = D3TLossCriterion(alpha=0.75, gamma=2.0, weight_type='iou')
         batch = supervised_batch(

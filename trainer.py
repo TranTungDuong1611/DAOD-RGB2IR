@@ -228,6 +228,8 @@ class CurriculumDomainAdaptationTrainer:
 
     @staticmethod
     def _component_weight(name: str, config) -> float:
+        if "uhl" in name:
+            return config.weight_uhl
         if "quality" in name:
             return config.weight_quality
         if "box" in name or "delta" in name:

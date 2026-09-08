@@ -236,6 +236,7 @@ class LossConfig:
     weight_logits: float = 2.0
     weight_deltas: float = 1.0
     weight_quality: float = 1.0
+    weight_uhl: float = 1.0
 
     # Phase 1: Pure Supervised Warmup (RGB + GT)
     p1_sup_weight: float = 1.0

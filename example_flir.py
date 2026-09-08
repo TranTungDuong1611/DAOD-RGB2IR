@@ -121,6 +121,7 @@ def build_training_config(args) -> TrainingConfig:
             weight_logits=4.0,
             weight_deltas=1.0,
             weight_quality=1.0,
+            weight_uhl=1.0,
         ),
         ema=EMAConfig(alpha=args.ema_alpha, start_steps=args.ema_start),
         soft_saga=SoftSAGAConfig(
