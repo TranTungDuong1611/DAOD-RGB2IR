@@ -266,6 +266,43 @@ class LossConfig:
 
 
 @dataclass
+class OptimizerConfig:
+    """SGD and iteration-based LR schedule derived from the D3T solver."""
+
+    base_lr: Optional[float] = None
+    reference_lr: float = 0.016
+    reference_batch_size: int = 16
+    momentum: float = 0.9
+    weight_decay: float = 1e-4
+    warmup_iters: Optional[int] = None
+    warmup_factor: float = 1.0 / 1000.0
+    milestones: Tuple[int, ...] = (70000,)
+    gamma: float = 0.1
+
+    def __post_init__(self):
+        self.milestones = tuple(self.milestones)
+        positive_values = (self.reference_lr, self.momentum, self.gamma)
+        if any(not math.isfinite(value) or value <= 0 for value in positive_values):
+            raise ValueError("reference_lr, momentum, and gamma must be positive")
+        if self.base_lr is not None and (
+            not math.isfinite(self.base_lr) or self.base_lr <= 0
+        ):
+            raise ValueError("base_lr must be None or positive")
+        if self.reference_batch_size <= 0:
+            raise ValueError("reference_batch_size must be positive")
+        if not math.isfinite(self.weight_decay) or self.weight_decay < 0:
+            raise ValueError("weight_decay must be non-negative")
+        if self.warmup_iters is not None and self.warmup_iters < 0:
+            raise ValueError("warmup_iters must be None or non-negative")
+        if not math.isfinite(self.warmup_factor) or not 0 < self.warmup_factor <= 1:
+            raise ValueError("warmup_factor must be in (0, 1]")
+        if any(step < 0 for step in self.milestones):
+            raise ValueError("LR milestones must be non-negative")
+        if self.milestones != tuple(sorted(self.milestones)):
+            raise ValueError("LR milestones must be increasing")
+
+
+@dataclass
 class DataConfig:
     root: str = "/home/duongtt/ws/DA/datasets/flir_data/align"
 
@@ -306,6 +343,7 @@ class TrainingConfig:
     aug: AugConfig = field(default_factory=AugConfig)
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
     loss: LossConfig = field(default_factory=LossConfig)
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
 
     data: DataConfig = field(default_factory=DataConfig)
     loader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
@@ -336,6 +374,14 @@ class TrainingConfig:
             raise ValueError("workflow must be 'curriculum' or 'rgb_baseline'")
         if self.teacher_mode not in {"rgb", "ir", "two_teacher"}:
             raise ValueError("teacher_mode must be 'rgb', 'ir', or 'two_teacher'")
+        if self.optimizer.base_lr is None:
+            self.optimizer.base_lr = (
+                self.optimizer.reference_lr
+                * self.loader.train.batch_size
+                / self.optimizer.reference_batch_size
+            )
+        if self.optimizer.warmup_iters is None:
+            self.optimizer.warmup_iters = min(1000, self.curriculum.phase1_end)
         if self.ema.start_steps is None:
             self.ema.start_steps = self.curriculum.phase1_end
 

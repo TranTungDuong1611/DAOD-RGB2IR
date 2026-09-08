@@ -150,6 +150,20 @@ class StatefulPhaseEvaluator:
         self.state = dict(state)
 
 
+class StatefulLRScheduler:
+    def __init__(self):
+        self.steps = 0
+
+    def step(self):
+        self.steps += 1
+
+    def state_dict(self):
+        return {"steps": self.steps}
+
+    def load_state_dict(self, state):
+        self.steps = state["steps"]
+
+
 def build_config(**kwargs):
     curriculum = kwargs.pop(
         "curriculum",
@@ -212,6 +226,23 @@ def build_trainer(config):
 
 
 class CurriculumIntegrationTests(unittest.TestCase):
+    def test_lr_scheduler_steps_and_resumes_with_checkpoint(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            config = build_config(output_dir=output_dir)
+            trainer, _, _, _ = build_trainer(config)
+            trainer.lr_scheduler = StatefulLRScheduler()
+
+            logs = trainer.train_one_iteration()
+            self.assertEqual(trainer.lr_scheduler.steps, 1)
+            self.assertEqual(logs["lr"], trainer.optimizer.param_groups[0]["lr"])
+            trainer.save_checkpoint("lr-state.pth")
+
+            resumed, _, _, _ = build_trainer(config)
+            resumed.lr_scheduler = StatefulLRScheduler()
+            resumed.load_checkpoint(f"{output_dir}/lr-state.pth")
+
+            self.assertEqual(resumed.lr_scheduler.steps, 1)
+
     def test_uhl_uses_its_dedicated_component_weight(self):
         loss_config = LossConfig(
             weight_logits=4.0,

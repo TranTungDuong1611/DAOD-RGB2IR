@@ -34,6 +34,7 @@ class CurriculumDomainAdaptationTrainer:
         rgb_loader: DataLoader,
         ir_loader: Optional[DataLoader] = None,
         phase_evaluator: Any = None,
+        lr_scheduler: Any = None,
     ) -> None:
         self.student = student
         self.rgb_teacher = rgb_teacher
@@ -42,6 +43,7 @@ class CurriculumDomainAdaptationTrainer:
         self.config = config
         self.device = torch.device(config.device)
         self.phase_evaluator = phase_evaluator
+        self.lr_scheduler = lr_scheduler
         self.augmentor = StudentAugmentor(config)
 
         self._setup_models()
@@ -264,6 +266,7 @@ class CurriculumDomainAdaptationTrainer:
         data = self._prepare_data_by_route(step_name, route)
         targets = data["targets"]
         sample_ids = data["sample_ids"]
+        iteration_lr = float(self.optimizer.param_groups[0]["lr"])
         self.optimizer.zero_grad(set_to_none=True)
 
         if self.config.workflow != "rgb_baseline":
@@ -332,6 +335,8 @@ class CurriculumDomainAdaptationTrainer:
                     self.student.parameters(), self.config.grad_clip
                 )
             self.optimizer.step()
+            if self.lr_scheduler is not None:
+                self.lr_scheduler.step()
             did_step = True
 
         if (
@@ -351,6 +356,7 @@ class CurriculumDomainAdaptationTrainer:
         logs["phase"] = phase.name
         logs["global_step"] = self.global_step
         logs["ema_initialized"] = float(self.ema_initialized)
+        logs["lr"] = iteration_lr
         self.loss_history[step_name].append(logs["total_loss"])
         self.global_step += 1
         return logs
@@ -367,7 +373,6 @@ class CurriculumDomainAdaptationTrainer:
             logs = self.train_one_iteration()
             if self.global_step % self.config.log_interval == 0:
                 logs["iter_time"] = time.time() - started
-                logs["lr"] = self.optimizer.param_groups[0]["lr"]
                 self._log(logs)
             if self.phase_evaluator is not None:
                 phase = self.config.get_phase(self.global_step)
@@ -394,6 +399,9 @@ class CurriculumDomainAdaptationTrainer:
             "ir_teacher": None if self.ir_teacher is None else self.ir_teacher.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
+            "lr_scheduler": (
+                None if self.lr_scheduler is None else self.lr_scheduler.state_dict()
+            ),
             "phase_evaluator": (
                 self.phase_evaluator.state_dict()
                 if self.phase_evaluator is not None
@@ -433,6 +441,11 @@ class CurriculumDomainAdaptationTrainer:
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         if "scheduler" in checkpoint:
             self.scheduler.load_state_dict(checkpoint["scheduler"])
+        if self.lr_scheduler is not None:
+            lr_scheduler_state = checkpoint.get("lr_scheduler")
+            if lr_scheduler_state is None:
+                raise ValueError("Checkpoint is missing LR scheduler state")
+            self.lr_scheduler.load_state_dict(lr_scheduler_state)
         evaluator_state = checkpoint.get("phase_evaluator")
         if (
             evaluator_state is not None
@@ -454,7 +467,8 @@ class CurriculumDomainAdaptationTrainer:
             f"[{int(log.get('global_step', self.global_step)):06d}] "
             f"Phase: {log.get('phase', 'N/A'):<22} | "
             f"Step: {log.get('step_type', 'N/A'):<18} | "
-            f"Loss: {log.get('total_loss', 0.0):.4f}"
+            f"Loss: {log.get('total_loss', 0.0):.4f} | "
+            f"LR: {log.get('lr', 0.0):.6g}"
         )
         if components:
             message += " | " + " | ".join(components)

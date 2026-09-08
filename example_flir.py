@@ -16,6 +16,7 @@ from config import (
     EvalLoaderConfig,
     FCOSModelConfig,
     LossConfig,
+    OptimizerConfig,
     Phase,
     SoftSAGAConfig,
     TeacherSchedule,
@@ -26,6 +27,7 @@ from data import FLIR_CLASSES, NUM_CLASSES, build_dataloaders
 from evaluator import DetectionEvaluator, PhaseEvaluator
 from models.fcos_factory import build_fcos_d3t_trio
 from models.torchvision_fcos_adapter import ClassificationInitMode
+from optimization import build_lr_scheduler, build_optimizer
 from trainer import CurriculumDomainAdaptationTrainer
 
 
@@ -123,6 +125,13 @@ def build_training_config(args) -> TrainingConfig:
             weight_quality=1.0,
             weight_uhl=1.0,
         ),
+        optimizer=OptimizerConfig(
+            base_lr=args.lr,
+            warmup_iters=args.warmup_iters,
+            warmup_factor=args.warmup_factor,
+            milestones=tuple(args.lr_steps),
+            gamma=args.lr_gamma,
+        ),
         ema=EMAConfig(alpha=args.ema_alpha, start_steps=args.ema_start),
         soft_saga=SoftSAGAConfig(
             alpha_near_rgb=0.75,
@@ -202,12 +211,8 @@ def main(args) -> None:
         *build_fcos_d3t_trio(config),
         device,
     )
-    optimizer = torch.optim.SGD(
-        student.parameters(),
-        lr=args.lr_head,
-        momentum=0.9,
-        weight_decay=1e-4,
-    )
+    optimizer = build_optimizer(student, config)
+    lr_scheduler = build_lr_scheduler(optimizer, config)
 
     evaluator = DetectionEvaluator(
         num_classes=NUM_CLASSES,
@@ -231,6 +236,7 @@ def main(args) -> None:
         rgb_loader=rgb_train_loader,
         ir_loader=ir_train_loader,
         phase_evaluator=phase_evaluator,
+        lr_scheduler=lr_scheduler,
     )
 
     def on_best_found(results):
@@ -272,7 +278,16 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--eval_batch_size", type=int, default=4)
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--lr_head", type=float, default=5e-4)
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Actual LR; defaults to D3T's 0.016 scaled from batch 16",
+    )
+    parser.add_argument("--warmup-iters", type=int, default=None)
+    parser.add_argument("--warmup-factor", type=float, default=1.0 / 1000.0)
+    parser.add_argument("--lr-steps", type=int, nargs="*", default=(70000,))
+    parser.add_argument("--lr-gamma", type=float, default=0.1)
     parser.add_argument("--min_size", type=int, default=512)
     parser.add_argument("--max_size", type=int, default=640)
     parser.add_argument("--center_sampling_radius", type=float, default=1.5)

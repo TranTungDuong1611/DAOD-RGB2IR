@@ -109,6 +109,11 @@ class EntrypointConfigTests(unittest.TestCase):
             "--batch_size", "2",
             "--eval_batch_size", "3",
             "--workers", "0",
+            "--lr", "0.002",
+            "--warmup-iters", "5",
+            "--warmup-factor", "0.1",
+            "--lr-steps", "8", "12",
+            "--lr-gamma", "0.2",
             "--min_size", "96",
             "--max_size", "128",
             "--eval_every", "7",
@@ -127,6 +132,11 @@ class EntrypointConfigTests(unittest.TestCase):
         self.assertEqual(config.loader.train.batch_size, 2)
         self.assertEqual(config.loader.eval.batch_size, 3)
         self.assertEqual(config.loader.train.num_workers, 0)
+        self.assertEqual(config.optimizer.base_lr, 0.002)
+        self.assertEqual(config.optimizer.warmup_iters, 5)
+        self.assertEqual(config.optimizer.warmup_factor, 0.1)
+        self.assertEqual(config.optimizer.milestones, (8, 12))
+        self.assertEqual(config.optimizer.gamma, 0.2)
         self.assertEqual(config.eval_period, 7)
         self.assertEqual(config.model.min_size, 96)
         self.assertEqual(config.model.max_size, 128)
