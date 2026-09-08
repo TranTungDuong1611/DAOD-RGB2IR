@@ -33,8 +33,6 @@ class CurriculumDomainAdaptationTrainer:
         config: TrainingConfig,
         rgb_loader: DataLoader,
         ir_loader: Optional[DataLoader] = None,
-        val_loader: Optional[DataLoader] = None,
-        distill_adapter: Any = None,
         phase_evaluator: Any = None,
     ) -> None:
         self.student = student
@@ -43,11 +41,7 @@ class CurriculumDomainAdaptationTrainer:
         self.optimizer = optimizer
         self.config = config
         self.device = torch.device(config.device)
-        self.val_loader = val_loader
         self.phase_evaluator = phase_evaluator
-        # Kept as a non-operational compatibility argument so old callers fail
-        # by behavior rather than by import; the new trainer never uses it.
-        self.distill_adapter = None
         self.augmentor = StudentAugmentor(config)
 
         self._setup_models()

@@ -1,3 +1,4 @@
+import inspect
 import unittest
 
 import torch
@@ -79,6 +80,14 @@ def collate_ir(batch):
 
 
 class RGBBaselineIntegrationTests(unittest.TestCase):
+    def test_trainer_constructor_exposes_only_active_runtime_dependencies(self):
+        parameters = inspect.signature(
+            CurriculumDomainAdaptationTrainer.__init__
+        ).parameters
+
+        self.assertNotIn("val_loader", parameters)
+        self.assertNotIn("distill_adapter", parameters)
+
     def test_rgb_baseline_forwards_student_once_and_steps_once(self):
         config = TrainingConfig(
             model=FCOSModelConfig(weights=None, pretrained_backbone=False),
@@ -108,7 +117,6 @@ class RGBBaselineIntegrationTests(unittest.TestCase):
             config=config,
             rgb_loader=loader,
             ir_loader=ir_loader,
-            val_loader=None,
         )
         logs = trainer.train_one_iteration()
         self.assertEqual(student.raw_calls, 1)

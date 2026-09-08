@@ -229,7 +229,6 @@ def main(args) -> None:
         config=config,
         rgb_loader=rgb_train_loader,
         ir_loader=ir_train_loader,
-        val_loader=ir_val_loader,
         phase_evaluator=phase_evaluator,
     )
 
