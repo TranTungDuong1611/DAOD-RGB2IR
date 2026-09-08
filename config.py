@@ -91,7 +91,7 @@ class FCOSModelConfig:
     min_size: int = 600
     max_size: int = 1000
     center_sampling_radius: float = 1.5
-    score_thresh: float = 0.2
+    score_thresh: float = 0.05
     nms_thresh: float = 0.6
     topk_candidates: int = 1000
     detections_per_img: int = 100

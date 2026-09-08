@@ -163,6 +163,17 @@ def build_training_config(args) -> TrainingConfig:
 make_training_config = build_training_config
 
 
+def _move_model_trio_to_device(student, rgb_teacher, ir_teacher, device):
+    """Move the student and whichever teachers are enabled to one device."""
+
+    student = student.to(device)
+    if rgb_teacher is not None:
+        rgb_teacher = rgb_teacher.to(device)
+    if ir_teacher is not None:
+        ir_teacher = ir_teacher.to(device)
+    return student, rgb_teacher, ir_teacher
+
+
 def main(args) -> None:
     config = make_training_config(args)
     device = torch.device(config.device)
@@ -189,10 +200,10 @@ def main(args) -> None:
         len(ir_val_loader.dataset),
     )
 
-    student, rgb_teacher, ir_teacher = build_fcos_d3t_trio(config)
-    student.to(device)
-    rgb_teacher.to(device)
-    ir_teacher.to(device)
+    student, rgb_teacher, ir_teacher = _move_model_trio_to_device(
+        *build_fcos_d3t_trio(config),
+        device,
+    )
     optimizer = torch.optim.SGD(
         student.parameters(),
         lr=args.lr_head,
@@ -268,7 +279,7 @@ def parse_args():
     parser.add_argument("--min_size", type=int, default=512)
     parser.add_argument("--max_size", type=int, default=640)
     parser.add_argument("--center_sampling_radius", type=float, default=1.5)
-    parser.add_argument("--score_thresh", type=float, default=0.2)
+    parser.add_argument("--score_thresh", type=float, default=0.05)
     parser.add_argument("--nms_thresh", type=float, default=0.6)
     parser.add_argument("--topk_candidates", type=int, default=1000)
     parser.add_argument("--detections_per_img", type=int, default=100)

@@ -2,11 +2,37 @@ import sys
 import unittest
 from unittest import mock
 
-from example_flir import make_training_config, parse_args
+import torch
+from torch import nn
+
+from example_flir import _move_model_trio_to_device, make_training_config, parse_args
+from config import FCOSModelConfig
 from models.torchvision_fcos_adapter import ClassificationInitMode
 
 
 class EntrypointConfigTests(unittest.TestCase):
+    def test_default_score_threshold_matches_d3t_fcos_evaluation(self):
+        with mock.patch.object(
+            sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
+        ):
+            config = make_training_config(parse_args())
+
+        self.assertEqual(config.model.score_thresh, 0.05)
+        self.assertEqual(FCOSModelConfig().score_thresh, 0.05)
+
+    def test_move_model_trio_accepts_a_missing_teacher(self):
+        student = nn.Linear(1, 1)
+        rgb_teacher = nn.Linear(1, 1)
+
+        moved = _move_model_trio_to_device(
+            student, rgb_teacher, None, torch.device("cpu")
+        )
+
+        self.assertIs(moved[0], student)
+        self.assertIs(moved[1], rgb_teacher)
+        self.assertIsNone(moved[2])
+        self.assertEqual(next(student.parameters()).device.type, "cpu")
+
     def test_cli_values_are_reflected_in_effective_config(self):
         argv = [
             "example_flir.py",
