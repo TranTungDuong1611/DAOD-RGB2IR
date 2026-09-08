@@ -88,12 +88,10 @@ def build_training_config(args) -> TrainingConfig:
             nms_thresh=args.nms_thresh,
             topk_candidates=args.topk_candidates,
             detections_per_img=args.detections_per_img,
-            from_coco=weights is not None,
             vfl_alpha=0.75,
             vfl_gamma=2.0,
         ),
         distill=DistillConfig(
-            phase_boundaries=(phase1_end, phase2_end, phase3_end),
             hm_alpha=1.0,
             hm_beta=1.0,
             un_regular_alpha=4.0,
@@ -147,7 +145,6 @@ def build_training_config(args) -> TrainingConfig:
                 num_workers=args.workers,
             ),
         ),
-        step2_start=phase1_end,
         max_iter=total_iters,
         total_iters=total_iters,
         output_dir=args.output_dir,
@@ -291,11 +288,6 @@ def parse_args():
         help="Torchvision FCOS COCO weights or none",
     )
     parser.add_argument(
-        "--from_coco",
-        action="store_true",
-        help="Deprecated compatibility flag; COCO weights are selected explicitly with --weights DEFAULT",
-    )
-    parser.add_argument(
         "--pretrained-backbone",
         dest="pretrained_backbone",
         action="store_true",
@@ -335,10 +327,7 @@ def parse_args():
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--device", default="cuda")
-    args = parser.parse_args()
-    if args.from_coco:
-        args.weights = "DEFAULT"
-    return args
+    return parser.parse_args()
 
 
 if __name__ == "__main__":

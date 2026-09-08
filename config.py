@@ -46,9 +46,6 @@ class TeacherSchedule:
     
 @dataclass
 class DistillConfig:
-    # Phase boundaries (iterations)
-    phase_boundaries: Tuple[int, int, int] = (12500, 15000, 17500)
-    
     # Adaptive Threshold Schedules for RGB and IR Teachers
     # RGB Teacher: Learns faster, more reliable early on
     rgb_teacher: TeacherSchedule = field(default_factory=lambda: TeacherSchedule(
@@ -70,11 +67,6 @@ class DistillConfig:
     un_regular_alpha: float = 4.0
 
     def __post_init__(self):
-        if len(self.phase_boundaries) != 3 or any(
-            not isinstance(value, int) or value < 0
-            for value in self.phase_boundaries
-        ) or tuple(self.phase_boundaries) != tuple(sorted(self.phase_boundaries)):
-            raise ValueError("phase_boundaries must be three increasing iterations")
         if self.hm_alpha < 0 or self.hm_beta < 0 or self.un_regular_alpha <= 0:
             raise ValueError("invalid HM/uncertainty settings")
     
@@ -95,13 +87,11 @@ class FCOSModelConfig:
     nms_thresh: float = 0.6
     topk_candidates: int = 1000
     detections_per_img: int = 100
-    from_coco: bool = True
     
     # HM-Focal Loss (VFL) Hyperparameters
     vfl_alpha: float = 0.75
     vfl_gamma: float = 2.0
     vfl_weight_type: str = "iou"
-    vfl_loss_weight: float = 1.0
 
     def __post_init__(self):
         self.class_names = tuple(self.class_names)
@@ -134,12 +124,6 @@ class EMAConfig:
             raise ValueError("EMA alpha must be in [0, 1]")
         if not isinstance(self.start_steps, int) or self.start_steps < 0:
             raise ValueError("EMA start_steps must be a non-negative integer")
-
-
-@dataclass
-class SAGAConfig:
-    """SemanticAwareGrayAugmentation settings (hard SAGA, legacy)."""
-    apply_prob: float = 0.5       # probability of applying SAGA per image
 
 
 @dataclass
@@ -279,13 +263,6 @@ class LossConfig:
 
 
 @dataclass
-class TeacherUpdateConfig:
-    """Flags determining which teacher is updated via EMA in each step."""
-    update_rgb: bool = True
-    update_ir: bool = True
-
-
-@dataclass
 class DataConfig:
     root: str = "/home/duongtt/ws/DA/datasets/flir_data/align"
 
@@ -321,18 +298,15 @@ class TrainingConfig:
     distill: DistillConfig = field(default_factory=DistillConfig)
 
     ema: EMAConfig = field(default_factory=EMAConfig)
-    saga: SAGAConfig = field(default_factory=SAGAConfig)
     soft_saga: SoftSAGAConfig = field(default_factory=SoftSAGAConfig)
     mid_routing: MidRoutingConfig = field(default_factory=MidRoutingConfig)
     aug: AugConfig = field(default_factory=AugConfig)
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
     loss: LossConfig = field(default_factory=LossConfig)
-    teacher_update: TeacherUpdateConfig = field(default_factory=TeacherUpdateConfig)
 
     data: DataConfig = field(default_factory=DataConfig)
     loader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
 
-    step2_start: int = 2000
     max_iter: int = 10000
     total_iters: Optional[int] = None
     grad_clip: float = 10.0
@@ -355,19 +329,10 @@ class TrainingConfig:
             raise ValueError("max_iter must be positive")
         if self.grad_clip < 0 or self.log_interval <= 0 or self.eval_period <= 0:
             raise ValueError("training intervals and grad_clip are invalid")
-        if self.step2_start < 0:
-            raise ValueError("step2_start must be non-negative")
         if self.workflow not in {"curriculum", "rgb_baseline"}:
             raise ValueError("workflow must be 'curriculum' or 'rgb_baseline'")
         if self.teacher_mode not in {"rgb", "ir", "two_teacher"}:
             raise ValueError("teacher_mode must be 'rgb', 'ir', or 'two_teacher'")
-        curriculum_boundaries = (
-            self.curriculum.phase1_end,
-            self.curriculum.phase2_end,
-            self.curriculum.phase3_end,
-        )
-        self.distill.phase_boundaries = tuple(curriculum_boundaries)
-
     def get_phase(self, global_step: int) -> Phase:
         """Determines the phase using CurriculumConfig boundaries."""
         cfg = self.curriculum
