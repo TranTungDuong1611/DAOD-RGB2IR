@@ -82,7 +82,7 @@ class FCOSModelConfig:
     trainable_backbone_layers: int = 3
     min_sizes: Tuple[int, ...] = (640, 672, 704, 736, 768, 800)
     max_size: int = 1333
-    center_sampling_radius: float = 1.5
+    center_sampling_radius: float = 0.0
     score_thresh: float = 0.05
     nms_thresh: float = 0.6
     topk_candidates: int = 1000

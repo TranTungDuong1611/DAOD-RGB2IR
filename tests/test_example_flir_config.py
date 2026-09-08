@@ -23,6 +23,14 @@ class EntrypointConfigTests(unittest.TestCase):
         )
         self.assertEqual(config.model.max_size, 1333)
 
+    def test_default_center_sampling_matches_d3t(self):
+        with mock.patch.object(
+            sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
+        ):
+            config = make_training_config(parse_args())
+
+        self.assertEqual(config.model.center_sampling_radius, 0.0)
+
     def test_default_hm_settings_match_d3t(self):
         with mock.patch.object(
             sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
@@ -128,6 +136,7 @@ class EntrypointConfigTests(unittest.TestCase):
             "--lr-gamma", "0.2",
             "--min-sizes", "96", "112",
             "--max_size", "128",
+            "--center_sampling_radius", "2.0",
             "--eval_every", "7",
             "--weights", "none",
             "--classification-init", "random_head",
@@ -152,6 +161,7 @@ class EntrypointConfigTests(unittest.TestCase):
         self.assertEqual(config.eval_period, 7)
         self.assertEqual(config.model.min_sizes, (96, 112))
         self.assertEqual(config.model.max_size, 128)
+        self.assertEqual(config.model.center_sampling_radius, 2.0)
         self.assertIsNone(config.model.weights)
         self.assertFalse(config.model.pretrained_backbone)
         self.assertEqual(

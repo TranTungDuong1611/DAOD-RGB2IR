@@ -296,7 +296,7 @@ def parse_args():
         help="Training short-edge choices; evaluation uses the final value",
     )
     parser.add_argument("--max_size", type=int, default=1333)
-    parser.add_argument("--center_sampling_radius", type=float, default=1.5)
+    parser.add_argument("--center_sampling_radius", type=float, default=0.0)
     parser.add_argument("--score_thresh", type=float, default=0.05)
     parser.add_argument("--nms_thresh", type=float, default=0.6)
     parser.add_argument("--topk_candidates", type=int, default=1000)

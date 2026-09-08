@@ -75,6 +75,7 @@ class FactoryTests(unittest.TestCase):
         self.assertEqual(calls['trainable_backbone_layers'], 2)
         self.assertIsNone(calls['weights'])
         self.assertEqual(calls['min_size'], (64, 96))
+        self.assertEqual(calls['center_sampling_radius'], 0.0)
 
     def test_factory_configures_train_choice_and_eval_last_resize(self):
         wrapper = build_fcos_d3t_model(

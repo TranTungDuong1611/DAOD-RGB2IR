@@ -171,6 +171,37 @@ class TorchvisionFCOSAdapterTests(unittest.TestCase):
         )
         self.assertTrue(torch.equal(matched, torch.tensor([-1, -1])))
 
+    def test_zero_radius_disables_center_sampling_like_d3t(self):
+        adapter = build_adapter()
+        adapter.detector.center_sampling_radius = 0.0
+        anchors = torch.tensor([[0.0, 0.0, 8.0, 8.0]])
+        target = {
+            "boxes": torch.tensor([[0.0, 0.0, 32.0, 32.0]]),
+            "labels": torch.tensor([0]),
+        }
+
+        matched = adapter._match_anchors_to_targets(anchors, target, (1,))
+
+        self.assertEqual(matched.item(), 0)
+
+    def test_positive_radius_keeps_center_sampling_available(self):
+        adapter = build_adapter()
+        adapter.detector.center_sampling_radius = 1.5
+        anchors = torch.tensor(
+            [
+                [0.0, 0.0, 8.0, 8.0],
+                [12.0, 12.0, 20.0, 20.0],
+            ]
+        )
+        target = {
+            "boxes": torch.tensor([[0.0, 0.0, 32.0, 32.0]]),
+            "labels": torch.tensor([0]),
+        }
+
+        matched = adapter._match_anchors_to_targets(anchors, target, (2,))
+
+        self.assertTrue(torch.equal(matched, torch.tensor([-1, 0])))
+
     def test_prepare_supervised_uses_transformed_targets_and_detaches_iou(self):
         adapter = build_adapter()
         adapter.eval()

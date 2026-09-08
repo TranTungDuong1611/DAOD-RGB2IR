@@ -412,7 +412,7 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
         target: Mapping[str, Any],
         num_anchors_per_level: Sequence[int],
     ) -> Tensor:
-        """Port Torchvision 0.24.1 FCOS assignment into an isolated method."""
+        """Assign FCOS locations with D3T-compatible center sampling."""
 
         if anchors.ndim != 2 or anchors.shape[-1] != 4:
             raise ValueError("anchors must have shape [N, 4]")
@@ -433,9 +433,6 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
         anchor_centers = (anchors[:, :2] + anchors[:, 2:]) / 2
         anchor_sizes = anchors[:, 2] - anchors[:, 0]
         radius = float(self.detector.center_sampling_radius)
-        center_match = (
-            anchor_centers[:, None, :] - gt_centers[None, :, :]
-        ).abs().amax(dim=2) < radius * anchor_sizes[:, None]
 
         x, y = anchor_centers.unsqueeze(dim=2).unbind(dim=1)
         x0, y0, x1, y1 = gt_boxes.unsqueeze(dim=0).unbind(dim=2)
@@ -456,7 +453,12 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
             & (max_regression < upper_bound[:, None])
         )
 
-        candidate = center_match & inside_match & level_match
+        candidate = inside_match & level_match
+        if radius > 0:
+            center_match = (
+                anchor_centers[:, None, :] - gt_centers[None, :, :]
+            ).abs().amax(dim=2) < radius * anchor_sizes[:, None]
+            candidate &= center_match
         gt_areas = (
             (gt_boxes[:, 2] - gt_boxes[:, 0])
             * (gt_boxes[:, 3] - gt_boxes[:, 1])
