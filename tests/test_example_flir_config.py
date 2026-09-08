@@ -11,6 +11,38 @@ from models.torchvision_fcos_adapter import ClassificationInitMode
 
 
 class EntrypointConfigTests(unittest.TestCase):
+    def test_default_hm_settings_match_d3t(self):
+        with mock.patch.object(
+            sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
+        ):
+            config = make_training_config(parse_args())
+
+        self.assertEqual(config.distill.hm_alpha, 0.5)
+        self.assertEqual(config.distill.hm_beta, 0.5)
+        self.assertEqual(config.distill.un_regular_alpha, 1.0)
+
+    def test_cli_can_override_hm_settings(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "example_flir.py",
+                "--data_root",
+                "synthetic",
+                "--hm-alpha",
+                "0.25",
+                "--hm-beta",
+                "0.75",
+                "--un-regular-alpha",
+                "2.5",
+            ],
+        ):
+            config = make_training_config(parse_args())
+
+        self.assertEqual(config.distill.hm_alpha, 0.25)
+        self.assertEqual(config.distill.hm_beta, 0.75)
+        self.assertEqual(config.distill.un_regular_alpha, 2.5)
+
     def test_default_ema_start_matches_phase_two_start(self):
         with mock.patch.object(
             sys,

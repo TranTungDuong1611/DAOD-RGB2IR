@@ -92,9 +92,9 @@ def build_training_config(args) -> TrainingConfig:
             vfl_gamma=2.0,
         ),
         distill=DistillConfig(
-            hm_alpha=1.0,
-            hm_beta=1.0,
-            un_regular_alpha=4.0,
+            hm_alpha=args.hm_alpha,
+            hm_beta=args.hm_beta,
+            un_regular_alpha=args.un_regular_alpha,
             rgb_teacher=TeacherSchedule(
                 phase1=(0.010, 0.45),
                 phase2=(0.020, 0.35),
@@ -316,6 +316,9 @@ def parse_args():
     )
     parser.add_argument("--phase2-rgb-ratio", type=float, default=0.7)
     parser.add_argument("--phase3-rgb-ratio", type=float, default=0.3)
+    parser.add_argument("--hm-alpha", type=float, default=0.5)
+    parser.add_argument("--hm-beta", type=float, default=0.5)
+    parser.add_argument("--un-regular-alpha", type=float, default=1.0)
     parser.add_argument("--ema-alpha", type=float, default=0.9996)
     parser.add_argument(
         "--ema-start",

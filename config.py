@@ -60,11 +60,11 @@ class DistillConfig:
     ))
 
     # Harmony Measure (HM) parameters: (prob^alpha) * (iou^beta)
-    hm_alpha: float = 1.0
-    hm_beta: float = 1.0
+    hm_alpha: float = 0.5
+    hm_beta: float = 0.5
     
     # Uncertainty Weighting: weight = exp(-(1-HM) / un_regular_alpha)
-    un_regular_alpha: float = 4.0
+    un_regular_alpha: float = 1.0
 
     def __post_init__(self):
         if self.hm_alpha < 0 or self.hm_beta < 0 or self.un_regular_alpha <= 0:

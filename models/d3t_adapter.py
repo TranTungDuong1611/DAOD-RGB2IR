@@ -24,9 +24,9 @@ class DistillationSettings:
 
     top_ratio: float
     min_hm: float
-    hm_alpha: float = 1.0
-    hm_beta: float = 1.0
-    uncertainty_alpha: float = 4.0
+    hm_alpha: float = 0.5
+    hm_beta: float = 0.5
+    uncertainty_alpha: float = 1.0
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.top_ratio) or not 0.0 < self.top_ratio <= 1.0:
