@@ -317,7 +317,12 @@ def parse_args():
     parser.add_argument("--phase2-rgb-ratio", type=float, default=0.7)
     parser.add_argument("--phase3-rgb-ratio", type=float, default=0.3)
     parser.add_argument("--ema-alpha", type=float, default=0.9996)
-    parser.add_argument("--ema-start", type=int, default=6000)
+    parser.add_argument(
+        "--ema-start",
+        type=int,
+        default=None,
+        help="EMA initialization step; defaults to the start of phase 2",
+    )
     parser.add_argument("--hflip-prob", type=float, default=0.5)
     parser.add_argument("--blur-prob", type=float, default=0.5)
     parser.add_argument("--brightness-prob", type=float, default=0.3)

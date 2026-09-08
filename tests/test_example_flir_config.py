@@ -11,6 +11,41 @@ from models.torchvision_fcos_adapter import ClassificationInitMode
 
 
 class EntrypointConfigTests(unittest.TestCase):
+    def test_default_ema_start_matches_phase_two_start(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "example_flir.py",
+                "--data_root",
+                "synthetic",
+                "--total_iters",
+                "100",
+            ],
+        ):
+            config = make_training_config(parse_args())
+
+        self.assertEqual(config.curriculum.phase1_end, 20)
+        self.assertEqual(config.ema.start_steps, config.curriculum.phase1_end)
+
+    def test_explicit_ema_start_overrides_phase_boundary_default(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "example_flir.py",
+                "--data_root",
+                "synthetic",
+                "--total_iters",
+                "100",
+                "--ema-start",
+                "35",
+            ],
+        ):
+            config = make_training_config(parse_args())
+
+        self.assertEqual(config.ema.start_steps, 35)
+
     def test_default_score_threshold_matches_d3t_fcos_evaluation(self):
         with mock.patch.object(
             sys, "argv", ["example_flir.py", "--data_root", "synthetic"]

@@ -117,13 +117,15 @@ class FCOSModelConfig:
 class EMAConfig:
     """Exponential Moving Average settings for teacher update."""
     alpha: float = 0.996          # EMA decay factor (higher = slower teacher update)
-    start_steps: int = 6000      # ramp alpha up during early training
+    start_steps: Optional[int] = None
 
     def __post_init__(self):
         if not math.isfinite(self.alpha) or not 0.0 <= self.alpha <= 1.0:
             raise ValueError("EMA alpha must be in [0, 1]")
-        if not isinstance(self.start_steps, int) or self.start_steps < 0:
-            raise ValueError("EMA start_steps must be a non-negative integer")
+        if self.start_steps is not None and (
+            not isinstance(self.start_steps, int) or self.start_steps < 0
+        ):
+            raise ValueError("EMA start_steps must be None or a non-negative integer")
 
 
 @dataclass
@@ -333,6 +335,9 @@ class TrainingConfig:
             raise ValueError("workflow must be 'curriculum' or 'rgb_baseline'")
         if self.teacher_mode not in {"rgb", "ir", "two_teacher"}:
             raise ValueError("teacher_mode must be 'rgb', 'ir', or 'two_teacher'")
+        if self.ema.start_steps is None:
+            self.ema.start_steps = self.curriculum.phase1_end
+
     def get_phase(self, global_step: int) -> Phase:
         """Determines the phase using CurriculumConfig boundaries."""
         cfg = self.curriculum
