@@ -52,7 +52,18 @@ def build_training_config(args) -> TrainingConfig:
     """Map every training-relevant CLI argument into one effective config."""
 
     total_iters = int(args.total_iters)
-    phase1_end, phase2_end, phase3_end = _phase_boundaries(total_iters)
+    default_boundaries = _phase_boundaries(total_iters)
+    phase1_end = (
+        default_boundaries[0] if args.phase1_end is None else args.phase1_end
+    )
+    phase2_end = (
+        default_boundaries[1] if args.phase2_end is None else args.phase2_end
+    )
+    phase3_end = (
+        default_boundaries[2] if args.phase3_end is None else args.phase3_end
+    )
+    if phase3_end > total_iters:
+        raise ValueError("phase3_end must not exceed total_iters")
     weights = _weight_identifier(args.weights)
     pretrained_backbone = (
         bool(args.pretrained_backbone)
@@ -273,6 +284,15 @@ def parse_args():
     parser.add_argument("--data_root", required=True)
     parser.add_argument("--output_dir", default="./output_flir")
     parser.add_argument("--total_iters", type=int, default=10000)
+    parser.add_argument(
+        "--phase1-end", "--phase1_end", dest="phase1_end", type=int, default=None
+    )
+    parser.add_argument(
+        "--phase2-end", "--phase2_end", dest="phase2_end", type=int, default=None
+    )
+    parser.add_argument(
+        "--phase3-end", "--phase3_end", dest="phase3_end", type=int, default=None
+    )
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--eval_batch_size", type=int, default=4)
     parser.add_argument("--workers", type=int, default=4)

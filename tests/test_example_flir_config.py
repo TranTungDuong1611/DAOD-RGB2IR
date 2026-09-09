@@ -98,6 +98,31 @@ class EntrypointConfigTests(unittest.TestCase):
 
         self.assertEqual(config.ema.start_steps, 35)
 
+    def test_cli_can_set_explicit_curriculum_phase_boundaries(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "example_flir.py",
+                "--data_root",
+                "synthetic",
+                "--total_iters",
+                "40000",
+                "--phase1-end",
+                "2000",
+                "--phase2-end",
+                "10000",
+                "--phase3-end",
+                "25000",
+            ],
+        ):
+            config = make_training_config(parse_args())
+
+        self.assertEqual(config.curriculum.phase1_end, 2000)
+        self.assertEqual(config.curriculum.phase2_end, 10000)
+        self.assertEqual(config.curriculum.phase3_end, 25000)
+        self.assertEqual(config.ema.start_steps, 2000)
+
     def test_default_score_threshold_matches_d3t_fcos_evaluation(self):
         with mock.patch.object(
             sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
