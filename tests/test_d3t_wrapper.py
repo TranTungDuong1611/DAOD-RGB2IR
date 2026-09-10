@@ -22,8 +22,9 @@ class TinyAdapter(DetectorAdapter):
         self.count = count
         self.forward_calls = 0
 
-    def forward(self, images, targets=None, sample_ids=None):
+    def forward(self, images, targets=None, sample_ids=None, domain="rgb"):
         self.forward_calls += 1
+        self.last_domain = domain
         predictions = tuple(Predictions(
             self.weight.expand(self.count, 3),
             self.weight.expand(self.count, 4),
@@ -77,6 +78,13 @@ class WrapperTests(unittest.TestCase):
         model = D3TWrapper(TinyAdapter(5), TinyCriterion()).eval()
         self.assertEqual(model(self.images)[0]['boxes'].shape, (5, 4))
 
+    def test_raw_forwards_the_selected_domain_to_the_adapter(self):
+        model = D3TWrapper(TinyAdapter(), TinyCriterion())
+
+        model.raw(self.images, domain="ir")
+
+        self.assertEqual(model.adapter.last_domain, "ir")
+
     def test_requires_targets_in_training(self):
         with self.assertRaisesRegex(ValueError, 'targets'):
             D3TWrapper(TinyAdapter(), TinyCriterion())(self.images)
@@ -115,6 +123,21 @@ class WrapperTests(unittest.TestCase):
         copy = D3TWrapper(TinyAdapter(), TinyCriterion()).double()
         copy.load_state_dict(model.state_dict())
         self.assertEqual(copy.adapter.weight.item(), 1.0)
+
+    def test_distill_routes_student_and_teacher_domains_independently(self):
+        student = D3TWrapper(TinyAdapter(), TinyCriterion())
+        teacher = D3TWrapper(TinyAdapter(), TinyCriterion()).eval()
+
+        student.distill(
+            self.images,
+            teacher,
+            self.images,
+            student_domain="ir",
+            teacher_domain="rgb",
+        )
+
+        self.assertEqual(student.adapter.last_domain, "ir")
+        self.assertEqual(teacher.adapter.last_domain, "rgb")
 
     def test_prediction_shape_rejected(self):
         with self.assertRaisesRegex(ValueError, 'boxes'):

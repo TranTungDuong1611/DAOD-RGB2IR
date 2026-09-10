@@ -40,7 +40,7 @@ class TinyAdapter(DetectorAdapter):
         self.weight = nn.Parameter(torch.tensor(1.0))
         self.forward_calls = 0
 
-    def forward(self, images, targets=None, sample_ids=None):
+    def forward(self, images, targets=None, sample_ids=None, domain="rgb"):
         self.forward_calls += 1
         predictions = tuple(
             Predictions(

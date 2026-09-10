@@ -14,6 +14,7 @@ from .d3t_adapter import (
     DistillationSettings,
     Losses,
     Targets,
+    normalize_feature_domain,
 )
 
 
@@ -90,8 +91,10 @@ class D3TWrapper(nn.Module):
         targets: Optional[Targets] = None,
         sample_ids: Optional[Sequence[str]] = None,
         resize_short_edge: Optional[int] = None,
+        domain: str = "rgb",
     ) -> AdapterOutput:
         image_list = self._normalize_images(images)
+        resolved_domain = normalize_feature_domain(domain)
         if targets is not None and len(targets) != len(image_list):
             raise ValueError("targets must match the image batch length")
 
@@ -107,6 +110,7 @@ class D3TWrapper(nn.Module):
                 image_list,
                 targets,
                 sample_ids=resolved_ids,
+                domain=resolved_domain,
             )
         if len(output.predictions) != len(image_list):
             raise ValueError("Adapter output must match the image batch length")
@@ -147,10 +151,11 @@ class D3TWrapper(nn.Module):
         images: Sequence[Tensor] | Tensor,
         targets: Optional[Targets] = None,
         sample_ids: Optional[Sequence[str]] = None,
+        domain: str = "rgb",
     ):
         if self.training and targets is None:
             raise ValueError("Training requires targets; use raw() for unlabeled images")
-        output = self.raw(images, targets, sample_ids)
+        output = self.raw(images, targets, sample_ids, domain=domain)
         if not self.training:
             return self.adapter.postprocess(output)
         return self.supervised_from_output(output, targets)
@@ -163,6 +168,8 @@ class D3TWrapper(nn.Module):
         settings: Optional[DistillationSettings] = None,
         sample_ids: Optional[Sequence[str]] = None,
         teacher_sample_ids: Optional[Sequence[str]] = None,
+        student_domain: str = "rgb",
+        teacher_domain: str = "rgb",
     ) -> Losses:
         """Convenience one-teacher call; the trainer owns routing and EMA."""
 
@@ -180,12 +187,14 @@ class D3TWrapper(nn.Module):
             student_list,
             sample_ids=sample_ids,
             resize_short_edge=resize_short_edge,
+            domain=student_domain,
         )
         with torch.no_grad():
             teacher_output = teacher.raw(
                 teacher_list,
                 sample_ids=teacher_sample_ids,
                 resize_short_edge=resize_short_edge,
+                domain=teacher_domain,
             )
         return self.distill_from_outputs(
             student_output,

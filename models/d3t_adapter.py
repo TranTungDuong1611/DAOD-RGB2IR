@@ -18,6 +18,21 @@ Targets = Sequence[Mapping[str, Any]]
 Losses = Dict[str, Tensor]
 SampleIds = Tuple[str, ...]
 
+FEATURE_DOMAINS = frozenset({"rgb", "weak", "mid", "high", "ir"})
+
+
+def normalize_feature_domain(domain: str) -> str:
+    """Return a validated lowercase curriculum/domain identifier."""
+
+    if not isinstance(domain, str):
+        raise TypeError("domain must be a string")
+    normalized = domain.strip().lower()
+    if normalized not in FEATURE_DOMAINS:
+        raise ValueError(
+            f"domain must be one of {sorted(FEATURE_DOMAINS)}, got {domain!r}"
+        )
+    return normalized
+
 
 @dataclass(frozen=True)
 class DistillationSettings:
@@ -197,6 +212,7 @@ class DetectorAdapter(nn.Module, ABC):
         images: Sequence[Tensor],
         targets: Optional[Targets] = None,
         sample_ids: Optional[SampleIds] = None,
+        domain: str = "rgb",
     ) -> AdapterOutput:
         raise NotImplementedError
 

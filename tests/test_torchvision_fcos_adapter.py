@@ -11,6 +11,7 @@ from models.torchvision_fcos_adapter import (
     FCOSIoUHead,
     TorchvisionFCOSAdapter,
 )
+from models.ir_residual_neck import IRResidualNeck
 from loss.d3t_criterion import D3TLossCriterion
 from models.d3t_wrapper import D3TWrapper
 from torchvision.models.detection import FCOS
@@ -53,6 +54,29 @@ def build_adapter(min_size=64, max_size=128):
 
 
 class TorchvisionFCOSAdapterTests(unittest.TestCase):
+    def test_ir_residual_neck_runs_only_for_ir_domain(self):
+        class TrackingNeck(IRResidualNeck):
+            def __init__(self):
+                super().__init__(channels=64)
+                self.calls = []
+
+            def forward(self, features, *, is_ir):
+                self.calls.append(is_ir)
+                return super().forward(features, is_ir=is_ir)
+
+        neck = TrackingNeck()
+        base_adapter = build_adapter()
+        adapter = TorchvisionFCOSAdapter(
+            base_adapter.detector,
+            ir_residual_neck=neck,
+        )
+        image = torch.rand(3, 64, 64)
+
+        adapter([image], sample_ids=("rgb",), domain="rgb")
+        adapter([image], sample_ids=("ir",), domain="ir")
+
+        self.assertEqual(neck.calls, [False, True])
+
     def test_shared_resize_override_aligns_train_student_and_eval_teacher(self):
         student = D3TWrapper(
             build_adapter(min_size=(64, 96)), D3TLossCriterion()
