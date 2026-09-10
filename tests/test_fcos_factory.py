@@ -7,6 +7,7 @@ import torch
 from config import FCOSModelConfig, TrainingConfig
 from loss.d3t_criterion import D3TLossCriterion
 from models.d3t_wrapper import D3TWrapper
+from models.ir_residual_neck import IRResidualNeck
 from models.fcos_factory import (
     CHECKPOINT_SCHEMA_VERSION,
     build_checkpoint_metadata,
@@ -19,12 +20,15 @@ from torchvision.models.detection import fcos_resnet50_fpn
 
 
 def build_config(
-    mode=ClassificationInitMode.COCO_TOWER, teacher_mode="two_teacher"
+    mode=ClassificationInitMode.COCO_TOWER,
+    teacher_mode="two_teacher",
+    ir_residual_neck_enabled=False,
 ):
     return TrainingConfig(model=FCOSModelConfig(
         weights=None,
         pretrained_backbone=False,
         classification_init_mode=mode,
+        ir_residual_neck_enabled=ir_residual_neck_enabled,
         min_sizes=(64, 96),
         max_size=128,
     ), device='cpu', teacher_mode=teacher_mode)
@@ -42,6 +46,36 @@ class FactoryTests(unittest.TestCase):
         self.assertIs(wrapper.adapter.detector, sentinel)
         self.assertIsInstance(wrapper.criterion, D3TLossCriterion)
         self.assertEqual(wrapper.adapter.class_names, ('person', 'car', 'bicycle'))
+
+    def test_factory_builds_configured_ir_residual_neck(self):
+        config = build_config(ir_residual_neck_enabled=True)
+        config.model.ir_residual_bottleneck_channels = 32
+        config.model.ir_residual_norm_groups = 8
+        wrapper = build_fcos_d3t_model(
+            config,
+            base_detector=fcos_resnet50_fpn(
+                weights=None,
+                weights_backbone=None,
+                num_classes=91,
+            ),
+        )
+
+        self.assertIsInstance(wrapper.adapter.ir_residual_neck, IRResidualNeck)
+        block = wrapper.adapter.ir_residual_neck.adapters[0]
+        self.assertEqual(block.adapter[0].out_channels, 32)
+        self.assertEqual(block.adapter[1].num_groups, 8)
+
+    def test_factory_leaves_ir_residual_neck_disabled_by_default(self):
+        wrapper = build_fcos_d3t_model(
+            build_config(),
+            base_detector=fcos_resnet50_fpn(
+                weights=None,
+                weights_backbone=None,
+                num_classes=91,
+            ),
+        )
+
+        self.assertIsNone(wrapper.adapter.ir_residual_neck)
 
     def test_factory_honors_both_classification_modes(self):
         coco = build_fcos_d3t_model(build_config(ClassificationInitMode.COCO_TOWER),
@@ -144,6 +178,14 @@ class FactoryTests(unittest.TestCase):
         bad['classification_init_mode'] = ClassificationInitMode.RANDOM_HEAD.value
         with self.assertRaisesRegex(ValueError, 'classification'):
             validate_checkpoint_metadata(bad, config)
+
+    def test_checkpoint_metadata_rejects_incompatible_ir_neck(self):
+        enabled = build_config(ir_residual_neck_enabled=True)
+        metadata = build_checkpoint_metadata(enabled)
+
+        disabled = build_config(ir_residual_neck_enabled=False)
+        with self.assertRaisesRegex(ValueError, "IR residual neck"):
+            validate_checkpoint_metadata(metadata, disabled)
 
 
 if __name__ == '__main__':

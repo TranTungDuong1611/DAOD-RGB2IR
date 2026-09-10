@@ -87,7 +87,12 @@ class FCOSModelConfig:
     nms_thresh: float = 0.6
     topk_candidates: int = 1000
     detections_per_img: int = 100
-    
+
+    # Optional FPN residual adaptation used only for real infrared inputs.
+    ir_residual_neck_enabled: bool = False
+    ir_residual_bottleneck_channels: int = 64
+    ir_residual_norm_groups: int = 16
+
     # HM-Focal Loss (VFL) Hyperparameters
     vfl_alpha: float = 0.75
     vfl_gamma: float = 2.0
@@ -117,6 +122,20 @@ class FCOSModelConfig:
             raise ValueError("score_thresh and nms_thresh must be in [0, 1]")
         if self.topk_candidates <= 0 or self.detections_per_img <= 0:
             raise ValueError("detection top-k values must be positive")
+        if not isinstance(self.ir_residual_neck_enabled, bool):
+            raise TypeError("ir_residual_neck_enabled must be boolean")
+        if self.ir_residual_bottleneck_channels <= 0:
+            raise ValueError("ir_residual_bottleneck_channels must be positive")
+        if (
+            self.ir_residual_norm_groups <= 0
+            or self.ir_residual_bottleneck_channels
+            % self.ir_residual_norm_groups
+            != 0
+        ):
+            raise ValueError(
+                "ir_residual_norm_groups must divide "
+                "ir_residual_bottleneck_channels"
+            )
 
 @dataclass
 class EMAConfig:

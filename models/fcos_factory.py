@@ -15,6 +15,7 @@ from torchvision.models.detection import (
 from config import FCOSModelConfig, TrainingConfig
 from loss.d3t_criterion import D3TLossCriterion
 from .d3t_wrapper import D3TWrapper
+from .ir_residual_neck import IRResidualNeck
 from .torchvision_fcos_adapter import (
     ClassificationInitMode,
     FCOSIoUHead,
@@ -66,6 +67,13 @@ def build_checkpoint_metadata(config: TrainingConfig) -> dict[str, Any]:
         "class_names": list(config.model.class_names),
         "classification_init_mode": config.model.classification_init_mode.value,
         "teacher_mode": config.teacher_mode,
+        "ir_residual_neck": {
+            "enabled": config.model.ir_residual_neck_enabled,
+            "bottleneck_channels": (
+                config.model.ir_residual_bottleneck_channels
+            ),
+            "norm_groups": config.model.ir_residual_norm_groups,
+        },
         "config": serialize_effective_config(config),
     }
 
@@ -88,6 +96,23 @@ def validate_checkpoint_metadata(
         )
     if metadata.get("teacher_mode") != config.teacher_mode:
         raise ValueError("Checkpoint teacher mode does not match the effective config")
+    saved_neck = metadata.get(
+        "ir_residual_neck",
+        {
+            "enabled": False,
+            "bottleneck_channels": 64,
+            "norm_groups": 16,
+        },
+    )
+    expected_neck = {
+        "enabled": config.model.ir_residual_neck_enabled,
+        "bottleneck_channels": config.model.ir_residual_bottleneck_channels,
+        "norm_groups": config.model.ir_residual_norm_groups,
+    }
+    if saved_neck != expected_neck:
+        raise ValueError(
+            "Checkpoint IR residual neck settings do not match the effective config"
+        )
 
 
 def _make_base_detector(
@@ -156,9 +181,27 @@ def build_fcos_d3t_model(
         if hasattr(base_detector, name):
             setattr(base_detector, name, getattr(config.model, name))
 
+    ir_residual_neck = None
+    if config.model.ir_residual_neck_enabled:
+        fpn_channels = getattr(base_detector.backbone, "out_channels", None)
+        if not isinstance(fpn_channels, int) or fpn_channels <= 0:
+            raise ValueError(
+                "FCOS backbone must expose a positive integer out_channels "
+                "when the IR residual neck is enabled"
+            )
+        ir_residual_neck = IRResidualNeck(
+            channels=fpn_channels,
+            bottleneck_channels=(
+                config.model.ir_residual_bottleneck_channels
+            ),
+            num_levels=5,
+            norm_groups=config.model.ir_residual_norm_groups,
+        )
+
     adapter = TorchvisionFCOSAdapter(
         base_detector,
         class_names=config.model.class_names,
+        ir_residual_neck=ir_residual_neck,
     )
     criterion = D3TLossCriterion(
         alpha=config.model.vfl_alpha,

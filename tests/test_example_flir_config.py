@@ -123,6 +123,14 @@ class EntrypointConfigTests(unittest.TestCase):
         self.assertEqual(config.curriculum.phase3_end, 25000)
         self.assertEqual(config.ema.start_steps, 2000)
 
+    def test_ir_residual_neck_config_validates_group_divisibility(self):
+        with self.assertRaisesRegex(ValueError, "divide"):
+            FCOSModelConfig(
+                ir_residual_neck_enabled=True,
+                ir_residual_bottleneck_channels=30,
+                ir_residual_norm_groups=16,
+            )
+
     def test_default_score_threshold_matches_d3t_fcos_evaluation(self):
         with mock.patch.object(
             sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
