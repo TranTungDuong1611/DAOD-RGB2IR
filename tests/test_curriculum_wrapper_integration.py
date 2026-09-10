@@ -29,6 +29,7 @@ from models.d3t_adapter import (
     SupervisedBatch,
 )
 from models.d3t_wrapper import D3TWrapper
+from models.ir_residual_neck import IRResidualNeck
 from scheduler import CurriculumScheduler
 from trainer import CurriculumDomainAdaptationTrainer
 from ema import copy_student_to_teacher, ema_update
@@ -39,9 +40,11 @@ class TinyAdapter(DetectorAdapter):
         super().__init__()
         self.weight = nn.Parameter(torch.tensor(1.0))
         self.forward_calls = 0
+        self.domains = []
 
     def forward(self, images, targets=None, sample_ids=None, domain="rgb"):
         self.forward_calls += 1
+        self.domains.append(domain)
         predictions = tuple(
             Predictions(
                 self.weight.expand(2, 3),
@@ -226,6 +229,55 @@ def build_trainer(config):
 
 
 class CurriculumIntegrationTests(unittest.TestCase):
+    def test_real_ir_route_marks_student_and_teacher_as_ir(self):
+        config = build_config(
+            teacher_mode="ir",
+            ema=EMAConfig(alpha=0.0, start_steps=0),
+            curriculum=CurriculumConfig(
+                phase1_end=0,
+                phase2_end=0,
+                phase3_end=0,
+            ),
+            total_iters=1,
+        )
+        trainer, student, _, ir_teacher = build_trainer(config)
+
+        trainer.train_one_iteration()
+
+        self.assertEqual(student.adapter.domains, ["ir"])
+        self.assertEqual(ir_teacher.adapter.domains, ["ir"])
+
+    def test_rgb_warmup_keeps_ir_residual_domain_disabled(self):
+        config = build_config(
+            curriculum=CurriculumConfig(
+                phase1_end=1,
+                phase2_end=1,
+                phase3_end=1,
+            ),
+            total_iters=1,
+        )
+        trainer, student, _, _ = build_trainer(config)
+
+        trainer.train_one_iteration()
+
+        self.assertEqual(student.adapter.domains, ["rgb"])
+
+    def test_iteration_logs_all_ir_residual_scales(self):
+        config = build_config(total_iters=1)
+        trainer, student, _, _ = build_trainer(config)
+        student.adapter.ir_residual_neck = IRResidualNeck(
+            channels=4,
+            bottleneck_channels=4,
+            norm_groups=1,
+        )
+
+        logs = trainer.train_one_iteration()
+
+        self.assertEqual(
+            [logs[f"ir_neck_scale_p{level}"] for level in range(3, 8)],
+            [0.0] * 5,
+        )
+
     def test_trainer_uses_one_resize_choice_for_student_and_teacher(self):
         config = build_config(
             teacher_mode="rgb",

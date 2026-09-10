@@ -166,6 +166,8 @@ class CurriculumDomainAdaptationTrainer:
                 "teacher_images": teacher_images,
                 "targets": geometric_targets if route.use_gt else None,
                 "sample_ids": sample_ids,
+                "student_domain": route.student_saga_level,
+                "teacher_domain": route.teacher_saga_level,
             }
 
         if step_name in {"p3_ir_flow", "p4_ir_focus"}:
@@ -180,6 +182,10 @@ class CurriculumDomainAdaptationTrainer:
                 "teacher_images": teacher_images,
                 "targets": None,
                 "sample_ids": sample_ids,
+                # Both views originate from a real thermal frame. SAGA level
+                # names describe routing policy, not the physical input domain.
+                "student_domain": "ir",
+                "teacher_domain": "ir",
             }
         raise ValueError(f"Unsupported curriculum step: {step_name}")
 
@@ -276,7 +282,10 @@ class CurriculumDomainAdaptationTrainer:
             self.student, "select_training_resize_short_edge", None
         )
         resize_short_edge = None if select_resize is None else select_resize()
-        student_raw_kwargs = {"sample_ids": sample_ids}
+        student_raw_kwargs = {
+            "sample_ids": sample_ids,
+            "domain": data["student_domain"],
+        }
         if resize_short_edge is not None:
             student_raw_kwargs["resize_short_edge"] = resize_short_edge
         student_output = self.student.raw(
@@ -308,7 +317,10 @@ class CurriculumDomainAdaptationTrainer:
             for teacher_name in enabled_teacher_names:
                 teacher = self._teacher_for_name(teacher_name)
                 with torch.no_grad():
-                    teacher_raw_kwargs = {"sample_ids": sample_ids}
+                    teacher_raw_kwargs = {
+                        "sample_ids": sample_ids,
+                        "domain": data["teacher_domain"],
+                    }
                     if resize_short_edge is not None:
                         teacher_raw_kwargs["resize_short_edge"] = resize_short_edge
                     teacher_output = teacher.raw(
@@ -357,6 +369,17 @@ class CurriculumDomainAdaptationTrainer:
                 alpha=self.config.ema.alpha,
                 global_step=self.global_step,
             )
+
+        ir_neck = getattr(
+            getattr(self.student, "adapter", None),
+            "ir_residual_neck",
+            None,
+        )
+        if ir_neck is not None:
+            for level, adapter in enumerate(ir_neck.adapters, start=3):
+                logs[f"ir_neck_scale_p{level}"] = float(
+                    adapter.scale.detach().item()
+                )
 
         logs["total_loss"] = float(total_loss.detach().item())
         logs["step_type"] = step_name
