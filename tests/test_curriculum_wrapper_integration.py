@@ -15,6 +15,7 @@ from config import (
     EvalLoaderConfig,
     FCOSModelConfig,
     LossConfig,
+    StepRouting,
     TrainLoaderConfig,
     TrainingConfig,
     TeacherSchedule,
@@ -246,6 +247,20 @@ class CurriculumIntegrationTests(unittest.TestCase):
 
         self.assertEqual(student.adapter.domains, ["ir"])
         self.assertEqual(ir_teacher.adapter.domains, ["ir"])
+
+    def test_rgb_source_with_ir_saga_label_still_bypasses_ir_neck(self):
+        config = build_config(total_iters=1)
+        trainer, _, _, _ = build_trainer(config)
+        route = StepRouting(
+            use_gt=True,
+            student_saga_level="ir",
+            teacher_saga_level="ir",
+        )
+
+        data = trainer._prepare_data_by_route("p2_rgb_flow", route)
+
+        self.assertEqual(data["student_domain"], "rgb")
+        self.assertEqual(data["teacher_domain"], "rgb")
 
     def test_rgb_warmup_keeps_ir_residual_domain_disabled(self):
         config = build_config(

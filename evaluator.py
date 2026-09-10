@@ -259,14 +259,11 @@ class PhaseEvaluator:
                      for key, value in target.items()}
                     for target in targets
                 ]
-                try:
-                    predictions = model(
-                        images,
-                        sample_ids=sample_ids,
-                        domain=domain_name.lower(),
-                    )
-                except TypeError:
-                    predictions = model(images)
+                predictions = model(
+                    images,
+                    sample_ids=sample_ids,
+                    domain=domain_name.lower(),
+                )
                 self.evaluator.update(predictions, targets)
         metrics = self.evaluator.compute()
         logger.info(

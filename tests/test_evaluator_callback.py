@@ -44,6 +44,37 @@ class EvaluatorCallbackTests(unittest.TestCase):
 
         self.assertEqual(model.domains, ["ir"])
 
+    def test_internal_type_error_is_not_retried_without_ir_domain(self):
+        class BrokenModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def forward(self, images, sample_ids=None, domain="rgb"):
+                self.calls += 1
+                raise TypeError("internal model failure")
+
+        class EvaluatorStub:
+            def reset(self):
+                pass
+
+        model = BrokenModel()
+        phase_evaluator = PhaseEvaluator(
+            evaluator=EvaluatorStub(),
+            ir_val_loader=[],
+            device=torch.device("cpu"),
+        )
+        batch = (
+            torch.zeros(1, 3, 8, 8),
+            [{"boxes": torch.empty(0, 4), "labels": torch.empty(0, dtype=torch.long)}],
+            ("ir-1",),
+        )
+
+        with self.assertRaisesRegex(TypeError, "internal model failure"):
+            phase_evaluator._run_eval_on_loader(model, [batch], "IR")
+
+        self.assertEqual(model.calls, 1)
+
     def test_best_callback_runs_only_on_strict_ir_improvement(self):
         model = nn.Linear(1, 1)
         model.train()

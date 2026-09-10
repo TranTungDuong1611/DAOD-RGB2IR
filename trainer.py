@@ -166,8 +166,10 @@ class CurriculumDomainAdaptationTrainer:
                 "teacher_images": teacher_images,
                 "targets": geometric_targets if route.use_gt else None,
                 "sample_ids": sample_ids,
-                "student_domain": route.student_saga_level,
-                "teacher_domain": route.teacher_saga_level,
+                # SAGA changes appearance but the physical source is RGB.
+                # The IR residual neck is reserved for real thermal frames.
+                "student_domain": "rgb",
+                "teacher_domain": "rgb",
             }
 
         if step_name in {"p3_ir_flow", "p4_ir_focus"}:
