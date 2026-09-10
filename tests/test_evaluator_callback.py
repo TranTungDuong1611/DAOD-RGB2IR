@@ -8,6 +8,42 @@ from config import Phase
 
 
 class EvaluatorCallbackTests(unittest.TestCase):
+    def test_loader_domain_is_forwarded_to_the_model(self):
+        class RecordingModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.domains = []
+
+            def forward(self, images, sample_ids=None, domain="rgb"):
+                self.domains.append(domain)
+                return [{} for _ in images]
+
+        class EvaluatorStub:
+            def reset(self):
+                pass
+
+            def update(self, predictions, targets):
+                pass
+
+            def compute(self):
+                return {"mAP@0.5": 0.0}
+
+        model = RecordingModel()
+        phase_evaluator = PhaseEvaluator(
+            evaluator=EvaluatorStub(),
+            ir_val_loader=[],
+            device=torch.device("cpu"),
+        )
+        batch = (
+            torch.zeros(1, 3, 8, 8),
+            [{"boxes": torch.empty(0, 4), "labels": torch.empty(0, dtype=torch.long)}],
+            ("ir-1",),
+        )
+
+        phase_evaluator._run_eval_on_loader(model, [batch], "IR")
+
+        self.assertEqual(model.domains, ["ir"])
+
     def test_best_callback_runs_only_on_strict_ir_improvement(self):
         model = nn.Linear(1, 1)
         model.train()

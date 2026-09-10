@@ -170,6 +170,9 @@ class EntrypointConfigTests(unittest.TestCase):
             "--min-sizes", "96", "112",
             "--max_size", "128",
             "--center_sampling_radius", "2.0",
+            "--ir-residual-neck",
+            "--ir-residual-bottleneck-channels", "32",
+            "--ir-residual-norm-groups", "8",
             "--eval_every", "7",
             "--weights", "none",
             "--classification-init", "random_head",
@@ -195,6 +198,9 @@ class EntrypointConfigTests(unittest.TestCase):
         self.assertEqual(config.model.min_sizes, (96, 112))
         self.assertEqual(config.model.max_size, 128)
         self.assertEqual(config.model.center_sampling_radius, 2.0)
+        self.assertTrue(config.model.ir_residual_neck_enabled)
+        self.assertEqual(config.model.ir_residual_bottleneck_channels, 32)
+        self.assertEqual(config.model.ir_residual_norm_groups, 8)
         self.assertIsNone(config.model.weights)
         self.assertFalse(config.model.pretrained_backbone)
         self.assertEqual(

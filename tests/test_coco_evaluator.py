@@ -3,10 +3,37 @@ import unittest
 import numpy as np
 import torch
 
-from evaluate_coco import build_coco_inputs, summarize_coco_eval
+from evaluate_coco import _collect, build_coco_inputs, summarize_coco_eval
 
 
 class CocoEvaluatorTest(unittest.TestCase):
+    def test_collect_forwards_the_evaluation_domain(self):
+        class RecordingModel:
+            def __init__(self):
+                self.domains = []
+
+            def __call__(self, images, sample_ids=None, domain="rgb"):
+                self.domains.append(domain)
+                return [
+                    {
+                        "boxes": torch.empty(0, 4),
+                        "scores": torch.empty(0),
+                        "labels": torch.empty(0, dtype=torch.long),
+                    }
+                    for _ in images
+                ]
+
+        model = RecordingModel()
+        batch = (
+            torch.zeros(1, 3, 8, 8),
+            [{"boxes": torch.empty(0, 4), "labels": torch.empty(0, dtype=torch.long)}],
+            ("ir-1",),
+        )
+
+        _collect(model, [batch], torch.device("cpu"), domain="ir")
+
+        self.assertEqual(model.domains, ["ir"])
+
     def test_build_coco_inputs_converts_zero_based_labels_and_xyxy_boxes(self):
         predictions = [{
             "boxes": torch.tensor([[10.0, 20.0, 40.0, 60.0]]),

@@ -145,6 +145,15 @@ def _load_checkpoint_model(checkpoint_path: str, device: torch.device, score_thr
         nms_thresh=float(saved_model.get("nms_thresh", 0.6)),
         topk_candidates=int(saved_model.get("topk_candidates", 1000)),
         detections_per_img=100,
+        ir_residual_neck_enabled=bool(
+            saved_model.get("ir_residual_neck_enabled", False)
+        ),
+        ir_residual_bottleneck_channels=int(
+            saved_model.get("ir_residual_bottleneck_channels", 64)
+        ),
+        ir_residual_norm_groups=int(
+            saved_model.get("ir_residual_norm_groups", 16)
+        ),
         vfl_alpha=float(saved_model.get("vfl_alpha", 0.75)),
         vfl_gamma=float(saved_model.get("vfl_gamma", 2.0)),
         vfl_weight_type=str(saved_model.get("vfl_weight_type", "iou")),
@@ -177,13 +186,17 @@ def _build_loader(data_root: str, domain: str, batch_size: int, workers: int):
     )
 
 
-def _collect(model, loader, device: torch.device):
+def _collect(model, loader, device: torch.device, domain: str):
     predictions = []
     targets = []
     with torch.inference_mode():
         for batch_index, (images, batch_targets, sample_ids) in enumerate(loader, start=1):
             images = images.to(device, non_blocking=True)
-            output = model(images, sample_ids=sample_ids)
+            output = model(
+                images,
+                sample_ids=sample_ids,
+                domain=domain,
+            )
             predictions.extend(
                 {key: value.detach().cpu() for key, value in item.items()}
                 for item in output
@@ -222,7 +235,12 @@ def evaluate(args) -> dict[str, float]:
         "COCO evaluation: checkpoint=%s domain=%s images=%d device=%s",
         args.checkpoint, args.domain.upper(), len(loader.dataset), device,
     )
-    predictions, targets = _collect(model, loader, device)
+    predictions, targets = _collect(
+        model,
+        loader,
+        device,
+        domain=args.domain,
+    )
     dataset, detections = build_coco_inputs(predictions, targets, class_names)
 
     coco_gt = COCO()

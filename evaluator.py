@@ -260,7 +260,11 @@ class PhaseEvaluator:
                     for target in targets
                 ]
                 try:
-                    predictions = model(images, sample_ids=sample_ids)
+                    predictions = model(
+                        images,
+                        sample_ids=sample_ids,
+                        domain=domain_name.lower(),
+                    )
                 except TypeError:
                     predictions = model(images)
                 self.evaluator.update(predictions, targets)

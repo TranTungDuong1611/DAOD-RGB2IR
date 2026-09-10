@@ -97,6 +97,11 @@ def build_training_config(args) -> TrainingConfig:
             nms_thresh=args.nms_thresh,
             topk_candidates=args.topk_candidates,
             detections_per_img=args.detections_per_img,
+            ir_residual_neck_enabled=args.ir_residual_neck,
+            ir_residual_bottleneck_channels=(
+                args.ir_residual_bottleneck_channels
+            ),
+            ir_residual_norm_groups=args.ir_residual_norm_groups,
             vfl_alpha=0.75,
             vfl_gamma=2.0,
         ),
@@ -194,11 +199,13 @@ def main(args) -> None:
     logger.info("Training log -> %s", log_path)
     device = torch.device(config.device)
     logger.info(
-        "FLIR D3T: workflow=%s teacher_mode=%s mode=%s weights=%s device=%s total_iters=%d",
+        "FLIR D3T: workflow=%s teacher_mode=%s mode=%s weights=%s "
+        "ir_residual_neck=%s device=%s total_iters=%d",
         config.workflow,
         config.teacher_mode,
         config.model.classification_init_mode.value,
         config.model.weights or "none",
+        config.model.ir_residual_neck_enabled,
         device,
         config.total_iters,
     )
@@ -320,6 +327,28 @@ def parse_args():
     parser.add_argument("--topk_candidates", type=int, default=1000)
     parser.add_argument("--detections_per_img", type=int, default=100)
     parser.add_argument("--trainable_backbone_layers", type=int, default=3)
+    parser.add_argument(
+        "--ir-residual-neck",
+        dest="ir_residual_neck",
+        action="store_true",
+        help="Enable the residual FPN adapter only for real IR inputs",
+    )
+    parser.add_argument(
+        "--no-ir-residual-neck",
+        dest="ir_residual_neck",
+        action="store_false",
+    )
+    parser.set_defaults(ir_residual_neck=False)
+    parser.add_argument(
+        "--ir-residual-bottleneck-channels",
+        type=int,
+        default=64,
+    )
+    parser.add_argument(
+        "--ir-residual-norm-groups",
+        type=int,
+        default=16,
+    )
     parser.add_argument(
         "--weights",
         choices=("DEFAULT", "none"),
