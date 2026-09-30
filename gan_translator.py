@@ -213,7 +213,7 @@ class GANTranslator:
         return out.to(dtype=images.dtype, device=images.device)
 
     # ------------------------------------------------------------------
-    # Public interface (tương thích với SAGA.apply_to_batch)
+    # Public interface
     # ------------------------------------------------------------------
 
     def apply_to_batch(
@@ -226,7 +226,7 @@ class GANTranslator:
 
         Args:
             images      : [B, 3, H, W] float32, [0, 1]
-            batch_boxes : không dùng (tương thích interface SAGA)
+            batch_boxes : không dùng
 
         Returns:
             [B, 3, H, W] float32, [0, 1]  — grayscale 3-channel (như IR dataset)

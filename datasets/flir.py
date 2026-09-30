@@ -33,6 +33,7 @@ Domain adaptation roles:
   FLIRIRValDataset → evaluation     (labeled IR, mAP computation)
 """
 
+import random
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -136,6 +137,29 @@ def _read_split_file(split_file: Path) -> List[str]:
         return [line.strip() for line in f if line.strip()]
 
 
+def _split_disjoint(
+    stems: List[str],
+    source_frac: float = 0.5,
+    seed: int = 42,
+) -> Tuple[List[str], List[str]]:
+    """
+    Split a stem list into two DISJOINT halves: (source, target).
+
+    Per the D3T paper (sec. 4.1), the RGB source and thermal target must not
+    reuse the same aligned images, otherwise the model can "cheat" via the
+    pixel-aligned correspondence between RGB and IR. Since FLIR is aligned,
+    rgb_train and ir_train should be built from disjoint stem lists.
+
+      seed >= 0 : deterministic shuffle, then cut at `source_frac`.
+      seed <  0 : keep original order, take "first N" (paper's exact wording).
+    """
+    s = list(stems)
+    if seed >= 0:
+        random.Random(seed).shuffle(s)
+    k = int(round(len(s) * source_frac))
+    return s[:k], s[k:]
+
+
 # ---------------------------------------------------------------------------
 # Default transforms
 # ---------------------------------------------------------------------------
@@ -170,6 +194,9 @@ class FLIRRGBDataset(Dataset):
         split      : "train" or "validation"
         transform  : image transform (default: ToTensor)
         min_area   : skip boxes smaller than this (pixels²)
+        stems      : explicit stem list to use instead of reading
+                     align_{split}.txt (e.g. one half of a disjoint split).
+                     None (default) preserves the old behaviour.
     """
 
     def __init__(
@@ -178,13 +205,17 @@ class FLIRRGBDataset(Dataset):
         split: str = "train",
         transform: Optional[Callable] = None,
         min_area: float = 16.0,
+        stems: Optional[List[str]] = None,
     ) -> None:
         self.root      = Path(root)
         self.transform = transform or _default_rgb_transform()
         self.min_area  = min_area
 
-        split_file = self.root / f"align_{split}.txt"
-        self.stems = _read_split_file(split_file)
+        if stems is not None:
+            self.stems = list(stems)
+        else:
+            split_file = self.root / f"align_{split}.txt"
+            self.stems = _read_split_file(split_file)
 
         # Filter to stems where the RGB image actually exists
         self.stems = [
@@ -220,6 +251,9 @@ class FLIRIRDataset(Dataset):
         root      : path to the `align/` directory
         split     : "train" or "validation"
         transform : image transform (default: Grayscale→3ch, ToTensor)
+        stems     : explicit stem list to use instead of reading
+                    align_{split}.txt (e.g. the disjoint target half).
+                    None (default) preserves the old behaviour.
     """
 
     def __init__(
@@ -227,12 +261,16 @@ class FLIRIRDataset(Dataset):
         root: str,
         split: str = "train",
         transform: Optional[Callable] = None,
+        stems: Optional[List[str]] = None,
     ) -> None:
         self.root      = Path(root)
         self.transform = transform or _default_ir_transform()
 
-        split_file = self.root / f"align_{split}.txt"
-        all_stems  = _read_split_file(split_file)
+        if stems is not None:
+            all_stems = list(stems)
+        else:
+            split_file = self.root / f"align_{split}.txt"
+            all_stems  = _read_split_file(split_file)
 
         self.ir_paths = [
             self.root / "JPEGImages" / f"{s}.jpeg"

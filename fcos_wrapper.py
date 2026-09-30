@@ -32,7 +32,6 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torchvision.models.detection import FCOS, fcos_resnet50_fpn
 from torchvision.models.detection.fcos import FCOSClassificationHead
 
@@ -81,17 +80,39 @@ class FCOSDetector(nn.Module):
     # Helpers
     # ------------------------------------------------------------------
 
-    def get_backbone_features(self, images: torch.Tensor) -> torch.Tensor:
+    def dense_forward(self, images: torch.Tensor):
         """
-        Return [B, backbone_dim] globally-pooled ResNet layer4 features.
-        Used for adversarial domain alignment (GRL + DomainDiscriminator).
-        Runs backbone only — no FPN, no detection head.
+        Dense (no-NMS) forward pass — taps the wrapped torchvision FCOS's
+        internals directly to get per-location cls_logits / bbox_regression /
+        bbox_ctrness, plus boxes decoded from anchors. Used by the D3T-style
+        distillation loss in losses.py (dense_forward / get_distill_loss).
+
+        Args:
+            images : Tensor[B, C, H, W] (same convention as forward()).
+
+        Returns:
+            (cls_logits, bbox_regression, bbox_ctrness, boxes_xyxy, anchors)
+            each shaped (N, HWA, ...), dense over all feature-map locations.
         """
-        img_list    = self._to_image_list(images)
-        transformed, _ = self.model.transform(img_list)
-        body_out    = self.model.backbone.body(transformed.tensors)
-        layer4      = list(body_out.values())[-1]          # [B, 2048, H/32, W/32]
-        return F.adaptive_avg_pool2d(layer4, 1).flatten(1) # [B, 2048]
+        from collections import OrderedDict
+
+        image_list = self._to_image_list(images)
+        images_t, _ = self.model.transform(image_list, None)
+        feats = self.model.backbone(images_t.tensors)
+        if isinstance(feats, torch.Tensor):
+            feats = OrderedDict([("0", feats)])
+        feats = list(feats.values())
+        head_outputs = self.model.head(feats)
+        anchors = self.model.anchor_generator(images_t, feats)   # list[N] of (HWA,4)
+        anchors = torch.stack(anchors)                            # (N, HWA, 4)
+        boxes = self.model.box_coder.decode(head_outputs["bbox_regression"], anchors)
+        return (
+            head_outputs["cls_logits"],
+            head_outputs["bbox_regression"],
+            head_outputs["bbox_ctrness"],
+            boxes,
+            anchors,
+        )
 
     def _to_image_list(self, images: torch.Tensor) -> List[torch.Tensor]:
         """

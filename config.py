@@ -1,11 +1,12 @@
 """
-Configuration dataclasses for Curriculum Domain Adaptation framework.
+Configuration dataclasses for Block Domain Adaptation framework (D3T-style).
 
-3-phase training flow with **mixed-batch** Phase 2 and Phase 3:
-
-    Phase 1  → RGB only            (supervised warmup)
-    Phase 2  → mixed batch [RGB | MID]   (rgb_part keeps RGB, mid_part = GAN)
-    Phase 3  → mixed batch [MID | IR]    (mid_part = GAN, ir_part = unlabeled IR)
+BlockDomainScheduler (see scheduler.py) mixes 3 domains — rgb / mid (GAN
+bridge) / ir (real thermal) — whose ratio changes across a sequence of
+phases; within each phase, short cycles are split into contiguous
+rgb -> mid -> ir blocks. Training uses dense distillation (losses.py)
+against two frozen teachers (rgb_teacher / ir_teacher) instead of hard
+pseudo-labels.
 """
 
 from dataclasses import dataclass, field
@@ -36,7 +37,7 @@ class GANConfig:
 
 @dataclass
 class RGBAugConfig:
-    """Augmentation for RGB and MID (SAGA) images."""
+    """Augmentation for RGB and MID (GAN) images."""
     # --- Geometric (weak aug — applied to BOTH teacher and student) ---
     hflip_prob:                  float = 0.5
 
@@ -91,62 +92,58 @@ class IRAugConfig:
 
 
 @dataclass
-class CurriculumConfig:
+class BlockSchedulerConfig:
     """
-    Phase boundaries (in global iterations) for the 3-phase curriculum.
+    BlockDomainScheduler config — 3 domains (rgb / mid / ir) whose mixing ratio
+    changes across phases. Within each phase, iterations are grouped into short
+    `cycle_iters`-long cycles; each cycle is split into three CONTIGUOUS blocks
+    trained in order rgb -> mid -> ir, sized by the phase's ratio.
 
-    Phase 1: [0,          phase1_end)  → RGB only           (supervised warmup)
-    Phase 2: [phase1_end, phase2_end)  → mixed [RGB | MID]  (in-batch split)
-    Phase 3: [phase2_end, phase3_end)  → mixed [MID | IR]   (in-batch split)
-
-    In-batch split ratios:
-      phase2_rgb_ratio : fraction of each Phase-2 batch that's RGB (rest is MID).
-      phase3_mid_ratio : fraction of each Phase-3 batch that's MID (rest is IR).
-
-    Example (batch_size=8, phase2_rgb_ratio=0.5):
-      batch layout = [RGB, RGB, RGB, RGB | MID, MID, MID, MID]
+    ratio_schedule : "rgb:mid:ir" tuples per phase, comma-separated, e.g.
+                     "7:3:0,5:4:1,4:3:3,3:2:5,2:1:7,2:0:8"
+    cycle_iters    : length (in iters) of one rgb->mid->ir cycle within a phase.
     """
-    phase1_end: int = 3_000
-    phase2_end: int = 10_000
-    phase3_end: int = 17_000
-
-    phase2_rgb_ratio: float = 0.5
-    phase3_mid_ratio: float = 0.5
+    ratio_schedule: str = "7:3:0,5:4:1,4:3:3,3:2:5,2:1:7,2:0:8"
+    cycle_iters: int = 200
 
 
 @dataclass
-class LossConfig:
-    """Loss weights per phase."""
-    # Phase 1 — RGB warmup (no teacher pseudo in pure warmup)
-    p1_gt_weight:           float = 1.0
-    p1_pseudo_weight:       float = 0.0   # optional rgb_teacher pseudo on RGB (kept 0 in warmup)
-
-    # Phase 2 — mixed [RGB | MID]; GT applies to whole batch (both halves have GT)
-    p2_gt_weight:           float = 1.0
-    p2_rgb_teacher_weight:  float = 0.5
-    p2_ir_teacher_weight:   float = 0.5
-
-    # Phase 3 — mixed [MID | IR]; GT applies to MID slice ONLY (IR has no GT)
-    p3_gt_weight:           float = 1.0
-    p3_rgb_teacher_weight:  float = 0.5
-    p3_ir_teacher_weight:   float = 0.5
+class DistillConfig:
+    """Dense distillation (D3T-style) hyperparameters — FCOS only."""
+    ratio:     float = 0.01   # top-ratio region selection by harmony measure
+    hm_alpha:  float = 0.5    # hm = cls_prob^hm_alpha * iou^hm_beta
+    hm_beta:   float = 0.5
+    un_alpha:  float = 1.0    # uncertainty weighting: exp(-(1-hm)/un_alpha)
+    w_logits:  float = 4.0    # QFLv2 loss weight
+    w_deltas:  float = 1.0    # GIoU loss weight
+    w_quality: float = 1.0    # centerness/quality BCE loss weight
+    w_uhl:     float = 1.0    # VFL/UHL loss weight
 
 
 @dataclass
-class TeacherUpdateConfig:
-    """
-    Which teachers to EMA-update in each phase step.
+class TeacherWeightConfig:
+    """Two-teacher weighting for the unsupervised distillation loss.
 
-    Selected policy: only the "specialist" teacher updates per phase.
-      Phase 1 (rgb step)      : no EMA update (warmup)
-      Phase 2 (rgb_mid step)  : rgb_teacher only
-      Phase 3 (mid_ir step)   : ir_teacher  only
+    Each domain step distills against BOTH teachers: the one matching the
+    image's domain (w_match, high) and the cross-domain one (w_cross, low).
     """
-    p2_update_rgb_teacher: bool = True
-    p2_update_ir_teacher:  bool = False
+    w_match: float = 1.0
+    w_cross: float = 0.3
 
-    p3_update_rgb_teacher: bool = False
-    p3_update_ir_teacher:  bool = True
+
+@dataclass
+class DisjointSplitConfig:
+    """RGB-source / real-IR-target disjoint split of align_train (D3T paper 4.1)."""
+    enabled: bool = True
+    source_frac: float = 0.5
+    split_seed: int = -1   # -1 = "first N" (paper); >=0 = deterministic shuffle
+
+
+@dataclass
+class LambdaConfig:
+    """Ramp for the unsupervised (distillation) loss weight lambda."""
+    lambda_max: float = 1.0
+    ramp_iters: int = 6_000   # 0 = lambda fixed at lambda_max from the start
 
 
 # ---------------------------------------------------------------------------
@@ -155,16 +152,22 @@ class TeacherUpdateConfig:
 
 @dataclass
 class TrainingConfig:
-    """Master config for CurriculumDomainAdaptationTrainer."""
+    """Master config for BlockDomainAdaptationTrainer."""
     ema: EMAConfig = field(default_factory=EMAConfig)
     gan: GANConfig = field(default_factory=GANConfig)
     rgb_aug: RGBAugConfig = field(default_factory=RGBAugConfig)
     ir_aug: IRAugConfig = field(default_factory=IRAugConfig)
-    curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
-    loss: LossConfig = field(default_factory=LossConfig)
-    teacher_update: TeacherUpdateConfig = field(default_factory=TeacherUpdateConfig)
+    block_scheduler: BlockSchedulerConfig = field(default_factory=BlockSchedulerConfig)
+    distill: DistillConfig = field(default_factory=DistillConfig)
+    teacher_weight: TeacherWeightConfig = field(default_factory=TeacherWeightConfig)
+    disjoint_split: DisjointSplitConfig = field(default_factory=DisjointSplitConfig)
+    lambda_cfg: LambdaConfig = field(default_factory=LambdaConfig)
 
-    pseudo_label_conf_thresh: float = 0.7   # min score to keep a pseudo-label box
+    # Supervised GT loss weight, applied whenever a domain step has GT (rgb / mid)
+    gt_weight: float = 1.0
+    # Number of foreground classes — needed by dense distillation (losses.distill)
+    distill_num_classes: int = 3
+
     grad_clip: float = 10.0                 # max gradient norm (0 = disabled)
     device: str = "cuda"
     log_interval: int = 50                  # log every N iterations

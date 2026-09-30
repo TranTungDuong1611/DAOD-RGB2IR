@@ -1,294 +1,210 @@
 """
-Loss functions for each curriculum step.
+Dense distillation losses (D3T-style) for domain-adaptive FCOS training.
 
-3-phase mapping:
-  Phase 1  → compute_rgb_loss    (RGB only, GT supervised)
-  Phase 2  → compute_rgb_mid_loss (mixed batch [RGB | MID], GT on whole batch)
-  Phase 3  → compute_mid_ir_loss  (mixed batch [MID | IR], GT on MID slice only)
+Replaces the earlier hard pseudo-label pipeline (filter_pseudo_labels +
+compute_rgb_mid_loss / compute_mid_ir_loss) with DENSE distillation: instead
+of NMS-filtering teacher boxes into hard GT-like targets, we tap the FCOS
+head's dense per-location outputs (cls_logits, bbox_regression, bbox_ctrness)
+for both student (strong aug) and teacher (weak aug, no_grad) and compute a
+soft multi-term loss directly on the dense grid:
 
-Expected detector API (Faster-RCNN / FCOS / DINO style):
-  Training:  model(images, targets) → Dict[str, Tensor]  (named loss components)
-  Inference: model(images)          → List[Dict]          (boxes, labels, scores)
+  1. QFLv2   on cls_logits          (quality focal loss v2)
+  2. GIoU    on decoded boxes       (bbox_regression deltas)
+  3. BCE     on bbox_ctrness        (quality/centerness branch)
+  4. VFL/UHL on top-ratio region    (uncertainty-harmonized loss)
 
-All teacher forward passes run under torch.no_grad() — callers must not wrap
-this module in no_grad() since the student path needs gradients.
+Region selection uses the "harmony measure" hm = cls_prob^alpha * iou^beta
+(iou = sigmoid(centerness), since torchvision FCOS has no separate IoU head)
+and per-location uncertainty weighting exp(-(1-hm)/un_alpha).
+
+FCOS ONLY: dense_forward requires access to the torchvision FCOS internals
+(transform / backbone / head / anchor_generator / box_coder), which
+FasterRCNNDetector does not expose in a compatible shape (RPN + RoI heads,
+no dense per-location classification/centerness grid). Faster-RCNN training
+must keep using standard supervised losses; do not call get_distill_loss /
+dense_forward with a FasterRCNNDetector.
+
+Expected detector API (FCOS, batched-tensor wrapper — see fcos_wrapper.py):
+  Training:  model(images, targets) → Dict[str, Tensor]
+  Inference: model(images)          → List[Dict]
+  Dense:     model.dense_forward(images) → (cls_logits, bbox_reg, bbox_ctrness,
+                                             boxes_xyxy, anchors)
+
+All teacher forward passes must run under torch.no_grad() — callers must not
+wrap this module in no_grad() since the student path needs gradients.
 """
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Tuple
 
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
+from torchvision.ops import box_iou, generalized_box_iou_loss
 
-from config import LossConfig
+from config import DistillConfig
 
-# Global or per-class confidence threshold
-ThreshType = Union[float, Dict[int, float]]
-
-_DEFAULT_THRESH = 0.7   # fallback for classes absent from per-class dict
+DenseOutput = Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
 
 
-# ---------------------------------------------------------------------------
-# Pseudo-label filtering
-# ---------------------------------------------------------------------------
-
-def filter_pseudo_labels(
-    predictions: List[Dict[str, torch.Tensor]],
-    conf_thresh: ThreshType = 0.7,
-) -> List[Dict[str, torch.Tensor]]:
+def dense_forward(model, images) -> DenseOutput:
     """
-    Filter teacher predictions by confidence score.
+    Dense (no-NMS) FCOS forward pass.
 
     Args:
-        predictions : output of model(images) in inference mode
-                      each dict has "boxes" [N,4], "labels" [N], "scores" [N]
-        conf_thresh : float  — global threshold applied to all classes
-                      Dict[int, float] — per-class threshold; classes absent
-                      from the dict fall back to _DEFAULT_THRESH (0.7)
+        model  : an FCOSDetector (see fcos_wrapper.py) — must expose
+                 `.dense_forward(images)` which taps the wrapped torchvision
+                 FCOS's transform/backbone/head/anchor_generator/box_coder.
+        images : Tensor[B, C, H, W] or List[Tensor[C, H, W]] (whatever the
+                 wrapper's dense_forward accepts).
 
     Returns:
-        filtered list of dicts (same length as predictions, empty dicts possible)
+        (cls_logits, bbox_regression, bbox_ctrness, boxes_xyxy, anchors)
+        each shaped (N, HWA, ...) — dense per-location, no NMS.
     """
-    pseudo = []
-    for pred in predictions:
-        scores = pred.get("scores", torch.zeros(0))
-        if scores.numel() == 0:
-            pseudo.append({
-                "boxes":  torch.zeros(0, 4, device=scores.device),
-                "labels": torch.zeros(0, dtype=torch.long, device=scores.device),
-                "scores": scores,
-            })
+    return model.dense_forward(images)
+
+
+def QFLv2(
+    pred_sigmoid: torch.Tensor,
+    teacher_sigmoid: torch.Tensor,
+    weight: torch.Tensor = None,
+    beta: float = 2.0,
+    reduction: str = "sum",
+) -> torch.Tensor:
+    """Quality Focal Loss v2. `weight` is used only as a pos/valid mask (>0 / >=0)."""
+    pt = pred_sigmoid
+    zerolabel = pt.new_zeros(pt.shape)
+    loss = F.binary_cross_entropy(pred_sigmoid, zerolabel, reduction="none") * pt.pow(beta)
+    pos = weight > 0
+    pt = teacher_sigmoid[pos] - pred_sigmoid[pos]
+    loss[pos] = F.binary_cross_entropy(
+        pred_sigmoid[pos], teacher_sigmoid[pos], reduction="none"
+    ) * pt.pow(beta)
+    valid = weight >= 0
+    if reduction == "mean":
+        loss = loss[valid].mean()
+    elif reduction == "sum":
+        loss = loss[valid].sum()
+    return loss
+
+
+def vfl_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    alpha: float = 0.75,
+    gamma: float = 2.0,
+) -> torch.Tensor:
+    """Varifocal Loss (weight_type='iou'), reduction=mean."""
+    pred_sigmoid = pred.sigmoid()
+    target = target.type_as(pred)
+    focal_weight = target * (target > 0.0).float() + \
+        alpha * (pred_sigmoid - target).abs().pow(gamma) * (target <= 0.0).float()
+    loss = F.binary_cross_entropy_with_logits(pred, target, reduction="none") * focal_weight
+    return loss.mean()
+
+
+def get_distill_loss(
+    student_out: DenseOutput,
+    teacher_out: DenseOutput,
+    num_classes: int,
+    ratio: float,
+    hm_alpha: float,
+    hm_beta: float,
+    un_alpha: float,
+    w_logits: float,
+    w_deltas: float,
+    w_quality: float,
+    w_uhl: float,
+) -> torch.Tensor:
+    """Sum of the 4 weighted D3T distillation loss terms. Returns a scalar."""
+    s_logits, s_deltas, s_ctr, s_boxes, _ = student_out
+    t_logits, t_deltas, t_ctr, t_boxes, _ = teacher_out
+    N = s_logits.shape[0]
+
+    s_logits_f = s_logits.reshape(-1, num_classes)
+    t_logits_f = t_logits.reshape(-1, num_classes)
+    s_ctr_f = s_ctr.reshape(-1, 1)
+    t_ctr_f = t_ctr.reshape(-1, 1)
+    s_boxes_f = s_boxes.reshape(-1, 4)
+    t_boxes_f = t_boxes.reshape(-1, 4)
+
+    # ── Region selection by harmony measure (teacher only, no grad) ──────────
+    with torch.no_grad():
+        count_num = max(1, int(t_logits_f.size(0) * ratio))
+        t_probs = t_logits_f.sigmoid()
+        cls_prob = t_probs.max(1)[0]
+        iou = t_ctr_f.sigmoid().squeeze(1)
+        hm = cls_prob.pow(hm_alpha) * iou.pow(hm_beta)
+        sorted_vals, sorted_inds = torch.topk(hm, hm.numel())
+        mask = torch.zeros_like(hm)
+        mask[sorted_inds[:count_num]] = 1.0
+        fg_num = sorted_vals[:count_num].sum().clamp(min=1.0)
+        b_mask = mask > 0.0
+
+    # ── Uncertainty weighting (detached) ──────────────────────────────────────
+    cls_prob = t_probs.max(1)[0]
+    iou = t_ctr_f.sigmoid().squeeze(1)
+    hm = cls_prob.pow(hm_alpha) * iou.pow(hm_beta)
+    loss_weight = torch.exp(-((1.0 - hm) / un_alpha)).detach()
+
+    # ── 1) logits: QFLv2 (dense, normalized by fg_num) ────────────────────────
+    loss_logits = QFLv2(
+        s_logits_f.sigmoid(), t_probs, weight=loss_weight, reduction="sum"
+    ) / fg_num
+
+    # ── 2) deltas: GIoU between student/teacher decoded boxes (dense, weighted) ─
+    giou = generalized_box_iou_loss(s_boxes_f, t_boxes_f, reduction="none", eps=1e-7)
+    loss_deltas = (giou * loss_weight).mean()
+
+    # ── 3) quality: BCE centerness student vs teacher (dense, weighted) ──────
+    loss_quality = F.binary_cross_entropy(
+        s_ctr_f.sigmoid(), t_ctr_f.sigmoid(),
+        weight=loss_weight.unsqueeze(1), reduction="mean",
+    )
+
+    # ── 4) UHL: VFL with target = IoU of neighboring boxes, on top-ratio region ─
+    n_b_mask = b_mask.view(N, -1)
+    n_s_logits = s_logits
+    t_probs_n = t_probs.view(N, -1, num_classes)
+    logits_list, targets_list = [], []
+    for idx in range(N):
+        m = n_b_mask[idx]
+        if m.sum() <= 1:
             continue
+        pos_boxes = s_boxes[idx][m].detach()
+        ious = box_iou(pos_boxes, pos_boxes)
+        ious.fill_diagonal_(0)
+        ious_max, _ = ious.max(dim=1)
+        loss_mask = ious_max > 0
+        cls_iou_targets = torch.zeros_like(n_s_logits[idx][m])
+        pseudo_labels = t_probs_n[idx].max(1)[1][m]
+        cls_iou_targets[loss_mask, pseudo_labels[loss_mask]] = ious_max[loss_mask]
+        logits_list.append(n_s_logits[idx][m][loss_mask])
+        targets_list.append(cls_iou_targets[loss_mask])
 
-        if isinstance(conf_thresh, dict):
-            labels = pred["labels"]
-            keep = torch.tensor(
-                [scores[i].item() >= conf_thresh.get(int(labels[i].item()), _DEFAULT_THRESH)
-                 for i in range(len(scores))],
-                dtype=torch.bool,
-                device=scores.device,
-            )
-        else:
-            keep = scores >= conf_thresh
+    if logits_list and sum(t.shape[0] for t in logits_list) > 0:
+        loss_uhl = vfl_loss(torch.cat(logits_list), torch.cat(targets_list))
+    else:
+        loss_uhl = s_logits.sum() * 0.0
 
-        pseudo.append({
-            "boxes":  pred["boxes"][keep],
-            "labels": pred["labels"][keep],
-            "scores": pred["scores"][keep],
-        })
-    return pseudo
+    return (
+        w_logits * loss_logits
+        + w_deltas * loss_deltas
+        + w_quality * loss_quality
+        + w_uhl * loss_uhl
+    )
+
+
+def distill(student_out: DenseOutput, teacher_out: DenseOutput,
+            num_classes: int, cfg: DistillConfig) -> torch.Tensor:
+    """Convenience wrapper: calls get_distill_loss with a DistillConfig."""
+    return get_distill_loss(
+        student_out, teacher_out, num_classes=num_classes,
+        ratio=cfg.ratio, hm_alpha=cfg.hm_alpha, hm_beta=cfg.hm_beta,
+        un_alpha=cfg.un_alpha, w_logits=cfg.w_logits, w_deltas=cfg.w_deltas,
+        w_quality=cfg.w_quality, w_uhl=cfg.w_uhl,
+    )
 
 
 def _sum_loss_dict(loss_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
-    """Sum all scalar tensors in a detector loss dict."""
+    """Sum all scalar tensors in a detector loss dict (used for the supervised GT loss)."""
     return sum(v for v in loss_dict.values())
-
-
-# ---------------------------------------------------------------------------
-# Phase 1 — RGB warmup loss
-# ---------------------------------------------------------------------------
-
-def compute_rgb_loss(
-    student: nn.Module,
-    images: torch.Tensor,
-    gt_targets: List[Dict[str, torch.Tensor]],
-    rgb_teacher: Optional[nn.Module] = None,
-    config: Optional[LossConfig] = None,
-    conf_thresh: ThreshType = 0.7,
-    teacher_images: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """
-    Phase 1 RGB supervised loss.
-
-      L = p1_gt_weight·L_gt  +  p1_pseudo_weight·L_pseudo(rgb_teacher)
-
-    teacher_images: if provided, teacher infers on this (weak aug);
-                    student trains on `images` (strong aug). If None, both use `images`.
-    """
-    if config is None:
-        config = LossConfig()
-
-    t_images = teacher_images if teacher_images is not None else images
-
-    components: List[torch.Tensor] = []
-    log: Dict[str, float] = {}
-
-    # --- Supervised GT loss (always active) ---
-    if config.p1_gt_weight > 0.0:
-        gt_loss = _sum_loss_dict(student(images, gt_targets)) * config.p1_gt_weight
-        components.append(gt_loss)
-        log["p1_gt_loss"] = gt_loss.item()
-
-    # --- Optional pseudo-label loss from rgb_teacher (off by default in warmup) ---
-    if rgb_teacher is not None and config.p1_pseudo_weight > 0.0:
-        with torch.no_grad():
-            pseudo_preds = rgb_teacher(t_images)
-        pseudo_targets = filter_pseudo_labels(pseudo_preds, conf_thresh)
-        pseudo_loss = _sum_loss_dict(student(images, pseudo_targets)) * config.p1_pseudo_weight
-        components.append(pseudo_loss)
-        log["p1_pseudo_loss"] = pseudo_loss.item()
-
-    total_loss = sum(components) if components else images.sum() * 0.0
-    log["p1_total_loss"] = total_loss.item()
-    return total_loss, log
-
-
-# ---------------------------------------------------------------------------
-# Phase 2 — mixed [RGB | MID] loss
-# ---------------------------------------------------------------------------
-
-def compute_rgb_mid_loss(
-    student: nn.Module,
-    mixed_images: torch.Tensor,                         # student sees this (strong aug)
-    gt_targets: List[Dict[str, torch.Tensor]],          # GT for ALL B images (both halves have GT)
-    n_rgb: int,                                         # split index (RGB | MID)
-    rgb_teacher: nn.Module,
-    ir_teacher: nn.Module,
-    config: Optional[LossConfig] = None,
-    conf_thresh: ThreshType = 0.7,
-    teacher_images: Optional[torch.Tensor] = None,      # teacher sees this (weak aug)
-) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """
-    Phase 2 mixed-batch loss.
-
-      L = p2_gt           · L_gt(whole batch)
-        + p2_rgb_teacher  · L_pseudo(rgb_teacher on whole batch)
-        + p2_ir_teacher   · L_pseudo(ir_teacher  on whole batch)
-
-    Both halves of the batch have GT (MID inherits boxes from the RGB it was
-    derived from), so the GT loss applies to all B images.
-    """
-    if config is None:
-        config = LossConfig()
-
-    t_images = teacher_images if teacher_images is not None else mixed_images
-
-    components: List[torch.Tensor] = []
-    log: Dict[str, float] = {"n_rgb": float(n_rgb), "n_mid": float(mixed_images.shape[0] - n_rgb)}
-
-    # --- GT loss on whole batch ---
-    if config.p2_gt_weight > 0.0 and gt_targets is not None:
-        loss = _sum_loss_dict(student(mixed_images, gt_targets)) * config.p2_gt_weight
-        components.append(loss)
-        log["p2_gt_loss"] = loss.item()
-
-    # --- rgb_teacher pseudo on whole batch ---
-    if config.p2_rgb_teacher_weight > 0.0:
-        with torch.no_grad():
-            preds = rgb_teacher(t_images)
-        pseudo = filter_pseudo_labels(preds, conf_thresh)
-        loss = _sum_loss_dict(student(mixed_images, pseudo)) * config.p2_rgb_teacher_weight
-        components.append(loss)
-        log["p2_rgb_teacher_loss"] = loss.item()
-
-    # --- ir_teacher pseudo on whole batch ---
-    if config.p2_ir_teacher_weight > 0.0:
-        with torch.no_grad():
-            preds = ir_teacher(t_images)
-        pseudo = filter_pseudo_labels(preds, conf_thresh)
-        loss = _sum_loss_dict(student(mixed_images, pseudo)) * config.p2_ir_teacher_weight
-        components.append(loss)
-        log["p2_ir_teacher_loss"] = loss.item()
-
-    total_loss = sum(components) if components else mixed_images.sum() * 0.0
-    log["p2_total_loss"] = total_loss.item()
-    return total_loss, log
-
-
-# ---------------------------------------------------------------------------
-# Phase 3 — mixed [MID | IR] loss
-# ---------------------------------------------------------------------------
-
-def compute_mid_ir_loss(
-    student: nn.Module,
-    mixed_images: torch.Tensor,                          # student sees this (strong aug)
-    mid_targets: List[Dict[str, torch.Tensor]],          # GT only for MID slice (length = n_mid)
-    n_mid: int,                                          # split index (MID | IR)
-    rgb_teacher: nn.Module,
-    ir_teacher: nn.Module,
-    config: Optional[LossConfig] = None,
-    conf_thresh: ThreshType = 0.7,
-    teacher_images: Optional[torch.Tensor] = None,       # teacher sees this (weak aug)
-) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """
-    Phase 3 mixed-batch loss.
-
-      L = p3_gt           · L_gt(MID slice ONLY)         # IR has no GT
-        + p3_rgb_teacher  · L_pseudo(rgb_teacher on whole batch)
-        + p3_ir_teacher   · L_pseudo(ir_teacher  on whole batch)
-
-    The GT loss runs as a SEPARATE student forward on the MID slice — this
-    avoids feeding empty targets for the IR slice into the detector.
-    """
-    if config is None:
-        config = LossConfig()
-
-    t_images = teacher_images if teacher_images is not None else mixed_images
-    B = mixed_images.shape[0]
-
-    components: List[torch.Tensor] = []
-    log: Dict[str, float] = {"n_mid": float(n_mid), "n_ir": float(B - n_mid)}
-
-    # --- GT loss on MID slice only ---
-    if config.p3_gt_weight > 0.0 and n_mid > 0 and mid_targets:
-        mid_slice = mixed_images[:n_mid]
-        loss = _sum_loss_dict(student(mid_slice, mid_targets)) * config.p3_gt_weight
-        components.append(loss)
-        log["p3_gt_loss"] = loss.item()
-
-    # --- rgb_teacher pseudo on whole batch ---
-    if config.p3_rgb_teacher_weight > 0.0:
-        with torch.no_grad():
-            preds = rgb_teacher(t_images)
-        pseudo = filter_pseudo_labels(preds, conf_thresh)
-        loss = _sum_loss_dict(student(mixed_images, pseudo)) * config.p3_rgb_teacher_weight
-        components.append(loss)
-        log["p3_rgb_teacher_loss"] = loss.item()
-
-    # --- ir_teacher pseudo on whole batch ---
-    if config.p3_ir_teacher_weight > 0.0:
-        with torch.no_grad():
-            preds = ir_teacher(t_images)
-        pseudo = filter_pseudo_labels(preds, conf_thresh)
-        loss = _sum_loss_dict(student(mixed_images, pseudo)) * config.p3_ir_teacher_weight
-        components.append(loss)
-        log["p3_ir_teacher_loss"] = loss.item()
-
-    total_loss = sum(components) if components else mixed_images.sum() * 0.0
-    log["p3_total_loss"] = total_loss.item()
-    return total_loss, log
-
-
-# ---------------------------------------------------------------------------
-# Phase 4 — IR focus loss
-# ---------------------------------------------------------------------------
-
-def compute_ir_loss(
-    student: nn.Module,
-    ir_images: torch.Tensor,
-    ir_teacher: nn.Module,
-    config: Optional[LossConfig] = None,
-    conf_thresh: ThreshType = 0.7,
-    teacher_images: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """
-    Phase 4 IR unsupervised loss — ir_teacher pseudo-labels only.
-
-    teacher_images: if provided, teacher infers on this (weak aug);
-                    student trains on ir_images (strong aug).
-                    If None, both use ir_images.
-    """
-    if config is None:
-        config = LossConfig()
-
-    t_images = teacher_images if teacher_images is not None else ir_images
-    log: Dict[str, float] = {}
-
-    with torch.no_grad():
-        ir_preds = ir_teacher(t_images)
-    ir_pseudo = filter_pseudo_labels(ir_preds, conf_thresh)
-
-    total_loss = _sum_loss_dict(student(ir_images, ir_pseudo)) * config.p4_ir_teacher_weight
-
-    log["p4_ir_teacher_loss"] = total_loss.item()
-    log["p4_total_loss"]      = total_loss.item()
-    return total_loss, log
