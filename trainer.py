@@ -13,11 +13,12 @@ from torch.utils.data import DataLoader
 
 from config import Phase, StepRouting, TrainingConfig
 from ema import copy_student_to_teacher, ema_update
-from models.d3t_adapter import CriterionResult, DistillationSettings
+from models.d3t_adapter import DistillationSettings
 from models.d3t_wrapper import D3TWrapper
 from scheduler import CurriculumScheduler, DomainStep
 from data.augmentations import StudentAugmentor
 from training.data_flow import RouteDataFlow
+from training.loss_flow import LossFlow, component_weight
 from training.observability import collect_ir_neck_scales, log_iteration
 
 logger = logging.getLogger(__name__)
@@ -140,27 +141,11 @@ class CurriculumDomainAdaptationTrainer:
 
     @staticmethod
     def _component_weight(name: str, config) -> float:
-        if "uhl" in name:
-            return config.weight_uhl
-        if "quality" in name:
-            return config.weight_quality
-        if "box" in name or "delta" in name:
-            return config.weight_deltas
-        if "cls" in name or "logit" in name:
-            return config.weight_logits
-        return 1.0
-
-    @staticmethod
-    def _as_result(value) -> CriterionResult:
-        if isinstance(value, CriterionResult):
-            return value
-        if isinstance(value, dict):
-            return CriterionResult(value, {})
-        raise TypeError("wrapper distillation must return CriterionResult")
-
-    @staticmethod
-    def _add_loss(total, value):
-        return value if total is None else total + value
+        """Keep the existing helper while passing explicit weights to the executor."""
+        return component_weight(
+            name, uhl=config.weight_uhl, quality=config.weight_quality,
+            deltas=config.weight_deltas, logits=config.weight_logits,
+        )
 
     def train_one_iteration(self) -> Dict[str, float]:
         self.student.train()
@@ -195,22 +180,21 @@ class CurriculumDomainAdaptationTrainer:
         student_output = self.student.raw(
             data["student_images"], targets, **student_raw_kwargs
         )
-        total_loss = None
-        logs: Dict[str, float] = {}
+        # The executor receives resolved weights, never the training config.
+        losses = LossFlow(
+            uhl=self.config.loss.weight_uhl,
+            quality=self.config.loss.weight_quality,
+            deltas=self.config.loss.weight_deltas,
+            logits=self.config.loss.weight_logits,
+        )
         sup_weight, distill_weight = self.config.loss.get_phase_weights(phase)
         if self.config.workflow == "rgb_baseline":
             sup_weight, distill_weight = 1.0, 0.0
 
         if targets is not None and route.use_gt and sup_weight > 0:
-            supervised_losses = self.student.supervised_from_output(
-                student_output, targets
+            losses.supervised(
+                self.student, student_output, targets, phase_weight=sup_weight
             )
-            for name, value in supervised_losses.items():
-                weighted = value * sup_weight * self._component_weight(
-                    name, self.config.loss
-                )
-                total_loss = self._add_loss(total_loss, weighted)
-                logs[f"sup_{name}"] = float(weighted.detach().item())
 
         if (
             self.config.workflow != "rgb_baseline"
@@ -230,23 +214,17 @@ class CurriculumDomainAdaptationTrainer:
                     teacher_output = teacher.raw(
                         data["teacher_images"], **teacher_raw_kwargs
                     )
-                result = self._as_result(
-                    self.student.distill_from_outputs(
-                        student_output,
-                        teacher_output,
-                        self._distillation_settings(teacher_name, phase),
-                    )
+                losses.distill(
+                    self.student,
+                    student_output,
+                    teacher_output,
+                    self._distillation_settings(teacher_name, phase),
+                    teacher_name=teacher_name,
+                    phase_weight=distill_weight,
                 )
-                suffix = f"_{teacher_name}"
-                for name, value in result.losses.items():
-                    weighted = value * distill_weight * self._component_weight(
-                        name, self.config.loss
-                    )
-                    total_loss = self._add_loss(total_loss, weighted)
-                    logs[f"{name}{suffix}"] = float(weighted.detach().item())
-                for name, value in result.metrics.items():
-                    if isinstance(value, torch.Tensor) and value.numel() == 1:
-                        logs[f"{name}{suffix}"] = float(value.detach().item())
+
+        total_loss = losses.total_loss
+        logs = losses.logs
 
         if total_loss is None:
             total_loss = torch.zeros((), device=self.device)
