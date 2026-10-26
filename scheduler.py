@@ -58,6 +58,17 @@ class CurriculumScheduler:
         else: # PHASE4_IR_FOCUS
             return "p4_ir_focus"
 
+    @staticmethod
+    def get_source_domain(step_name: str) -> str:
+        """Resolve the existing physical source policy, including RGB-backed P2 IR."""
+        if step_name in {
+            "p1_rgb_supervised", "p2_rgb_flow", "p2_ir_flow", "p3_rgb_flow",
+        }:
+            return "rgb"
+        if step_name in {"p3_ir_flow", "p4_ir_focus"}:
+            return "ir"
+        raise ValueError(f"Unsupported curriculum step: {step_name}")
+
     def _alternate(self, phase, primary: DomainStep, secondary: DomainStep, ratio: float) -> DomainStep:
         """Helper to alternate between two steps based on a ratio."""
         period = self._ratio_to_period(ratio)
