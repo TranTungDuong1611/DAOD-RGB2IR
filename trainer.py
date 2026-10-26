@@ -12,11 +12,11 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
 from config import Phase, StepRouting, TrainingConfig
-from ema import copy_student_to_teacher, ema_update
 from models.d3t_adapter import DistillationSettings
 from models.d3t_wrapper import D3TWrapper
 from scheduler import CurriculumScheduler, DomainStep
 from data.augmentations import StudentAugmentor
+from training import teachers
 from training.data_flow import RouteDataFlow
 from training.loss_flow import LossFlow, component_weight
 from training.observability import collect_ir_neck_scales, log_iteration
@@ -59,15 +59,12 @@ class CurriculumDomainAdaptationTrainer:
         self.loss_history = defaultdict(list)
         self.ema_initialized = False
 
+    def _teacher_models(self):
+        # References stay on the trainer so checkpoint keys and ownership are unchanged.
+        return {"rgb": self.rgb_teacher, "ir": self.ir_teacher}
+
     def _setup_models(self) -> None:
-        self.student.to(self.device)
-        for teacher in (self.rgb_teacher, self.ir_teacher):
-            if teacher is None:
-                continue
-            teacher.to(self.device)
-            teacher.eval()
-            for parameter in teacher.parameters():
-                parameter.requires_grad = False
+        teachers.prepare_models(self.student, self._teacher_models(), device=self.device)
 
     def _alpha_map(self):
         ss_cfg = self.config.soft_saga
@@ -99,19 +96,13 @@ class CurriculumDomainAdaptationTrainer:
             return
         if self.global_step < self.config.ema.start_steps:
             return
-        active_teachers = {
-            "rgb": self.rgb_teacher,
-            "ir": self.ir_teacher,
-        }
         if self.config.teacher_mode == "two_teacher":
             active_names = ("rgb", "ir")
         else:
             active_names = (self.config.teacher_mode,)
-        for name in active_names:
-            teacher = active_teachers[name]
-            if teacher is None:
-                raise ValueError(f"EMA start requires the '{name}' teacher")
-            copy_student_to_teacher(teacher, self.student)
+        teachers.initialize_teachers(
+            self.student, self._teacher_models(), names=active_names
+        )
         self.ema_initialized = True
 
     def _enabled_teacher_names(self, route: StepRouting) -> tuple[str, ...]:
@@ -122,11 +113,7 @@ class CurriculumDomainAdaptationTrainer:
         return tuple(name for name in route.teacher_names if name in enabled)
 
     def _teacher_for_name(self, name: str) -> nn.Module:
-        teacher = {"rgb": self.rgb_teacher, "ir": self.ir_teacher}.get(name)
-        if teacher is None:
-            raise ValueError(f"teacher '{name}' is not configured")
-        teacher.eval()
-        return teacher
+        return teachers.get_teacher(self._teacher_models(), name)
 
     def _distillation_settings(self, teacher_name: str, phase: Phase):
         schedule = getattr(self.config.distill, f"{teacher_name}_teacher")
@@ -204,16 +191,13 @@ class CurriculumDomainAdaptationTrainer:
             enabled_teacher_names = self._enabled_teacher_names(route)
             for teacher_name in enabled_teacher_names:
                 teacher = self._teacher_for_name(teacher_name)
-                with torch.no_grad():
-                    teacher_raw_kwargs = {
-                        "sample_ids": sample_ids,
-                        "domain": data["teacher_domain"],
-                    }
-                    if resize_short_edge is not None:
-                        teacher_raw_kwargs["resize_short_edge"] = resize_short_edge
-                    teacher_output = teacher.raw(
-                        data["teacher_images"], **teacher_raw_kwargs
-                    )
+                teacher_output = teachers.forward_teacher(
+                    teacher,
+                    data["teacher_images"],
+                    sample_ids=sample_ids,
+                    domain=data["teacher_domain"],
+                    resize_short_edge=resize_short_edge,
+                )
                 losses.distill(
                     self.student,
                     student_output,
@@ -245,7 +229,7 @@ class CurriculumDomainAdaptationTrainer:
             and self.ema_initialized
             and route.ema_target in self._enabled_teacher_names(route)
         ):
-            ema_update(
+            teachers.update_teacher(
                 self._teacher_for_name(route.ema_target),
                 self.student,
                 alpha=self.config.ema.alpha,
