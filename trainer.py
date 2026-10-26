@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from config import Phase, StepRouting, TrainingConfig
 from models.d3t_adapter import DistillationSettings
-from models.d3t_wrapper import D3TWrapper
+from models.d3t_wrapper import D3TWrapper as D3TWrapper
 from scheduler import CurriculumScheduler, DomainStep
 from data.augmentations import StudentAugmentor
 from training import teachers

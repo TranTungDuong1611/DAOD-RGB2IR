@@ -24,11 +24,7 @@ from config import (
 )
 from data import FLIR_CLASSES, NUM_CLASSES
 from models.torchvision_fcos_adapter import ClassificationInitMode
-# Preserve the existing helper import for local callers while bootstrap owns assembly.
-from training.bootstrap import (
-    build_training,
-    move_model_trio_to_device as _move_model_trio_to_device,
-)
+from training.bootstrap import build_training, move_model_trio_to_device
 from training.observability import configure_training_logging
 
 
@@ -180,6 +176,8 @@ def build_training_config(args) -> TrainingConfig:
 
 # Backward-compatible name used by earlier local launch scripts.
 make_training_config = build_training_config
+# Keep the previous helper name available to existing local callers.
+_move_model_trio_to_device = move_model_trio_to_device
 
 
 def main(args) -> None:
