@@ -9,7 +9,7 @@ from trainer import CurriculumDomainAdaptationTrainer
 
 class TrainingLoggingTests(unittest.TestCase):
     def test_configure_writes_child_logger_to_output_logs(self):
-        from training_logging import configure_training_logging
+        from training.observability import configure_training_logging
 
         with tempfile.TemporaryDirectory() as output_dir:
             try:
@@ -54,7 +54,7 @@ class TrainingLoggingTests(unittest.TestCase):
         self.assertIn("sup_loss_cls=0.7500", message)
 
     def test_reconfigure_closes_the_previous_run_file(self):
-        from training_logging import configure_training_logging
+        from training.observability import configure_training_logging
 
         with tempfile.TemporaryDirectory() as output_dir:
             try:

@@ -29,7 +29,7 @@ from models.fcos_factory import build_fcos_d3t_trio
 from models.torchvision_fcos_adapter import ClassificationInitMode
 from optimization import build_lr_scheduler, build_optimizer
 from trainer import CurriculumDomainAdaptationTrainer
-from training_logging import configure_training_logging
+from training.observability import configure_training_logging
 
 
 logger = logging.getLogger(__name__)
