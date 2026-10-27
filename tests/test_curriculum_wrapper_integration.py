@@ -336,7 +336,7 @@ class CurriculumIntegrationTests(unittest.TestCase):
             )
 
             trainer.save_checkpoint("resume.pth")
-            with mock.patch("trainer.copy_student_to_teacher") as hard_copy:
+            with mock.patch("training.teachers.copy_student_to_teacher") as hard_copy:
                 trainer.load_checkpoint(
                     f"{output_dir}/resume.pth"
                 )
