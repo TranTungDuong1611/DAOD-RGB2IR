@@ -435,7 +435,7 @@ class CurriculumIntegrationTests(unittest.TestCase):
         self.assertIn(scheduler.get_next_step(2), {"p2_rgb_flow", "p2_ir_flow"})
         self.assertIn(scheduler.get_next_step(3), {"p3_rgb_flow", "p3_ir_flow"})
         self.assertIn(scheduler.get_next_step(4), {"p3_rgb_flow", "p3_ir_flow"})
-        self.assertEqual(scheduler.get_next_step(5), "p4_ir_focus")
+        self.assertEqual(scheduler.get_next_step(5), "p4_rgb_supervised")
 
 
 if __name__ == "__main__":
