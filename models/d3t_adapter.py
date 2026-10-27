@@ -53,6 +53,9 @@ class CriterionResult:
 
     losses: Losses
     metrics: Mapping[str, Tensor] = field(default_factory=dict)
+    # Optional read-only observations of the exact KD selection, split by image.
+    # Consumers must never feed audit annotations back into these masks.
+    selected_masks: Optional[Tuple[Tensor, ...]] = None
 
 
 @dataclass(frozen=True)
