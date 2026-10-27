@@ -4,7 +4,7 @@ from collections import defaultdict
 import logging
 import os
 import time
-from typing import Any, Dict, Iterable, Optional, Sequence
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -17,6 +17,7 @@ from models.d3t_adapter import CriterionResult, DistillationSettings
 from models.d3t_wrapper import D3TWrapper
 from scheduler import CurriculumScheduler, DomainStep
 from data.augmentations import StudentAugmentor
+from training.data_flow import RouteDataFlow
 from training.observability import log_iteration
 
 logger = logging.getLogger(__name__)
@@ -48,8 +49,9 @@ class CurriculumDomainAdaptationTrainer:
         self.augmentor = StudentAugmentor(config)
 
         self._setup_models()
-        self._rgb_iter = iter(self._infinite(rgb_loader))
-        self._ir_iter = None if ir_loader is None else iter(self._infinite(ir_loader))
+        self.data_flow = RouteDataFlow(
+            rgb_loader, ir_loader, device=self.device, augmentor=self.augmentor
+        )
         self.scheduler = CurriculumScheduler(config)
         self.global_step = 0
         self.best_map = 0.0
@@ -66,66 +68,6 @@ class CurriculumDomainAdaptationTrainer:
             for parameter in teacher.parameters():
                 parameter.requires_grad = False
 
-    @staticmethod
-    def _infinite(loader: Iterable):
-        while True:
-            yielded = False
-            for batch in loader:
-                yielded = True
-                yield batch
-            if not yielded:
-                raise ValueError("training DataLoader is empty")
-
-    def _move_images(self, images):
-        if isinstance(images, torch.Tensor):
-            return images.to(self.device)
-        return tuple(image.to(self.device) for image in images)
-
-    def _move_targets(self, targets):
-        moved = []
-        for target in targets:
-            moved.append({
-                key: value.to(self.device) if isinstance(value, torch.Tensor) else value
-                for key, value in target.items()
-            })
-        return moved
-
-    @staticmethod
-    def _ids_from_targets(targets) -> tuple[str, ...]:
-        ids = tuple(target.get("stem") for target in targets)
-        if any(not isinstance(value, str) or not value.strip() for value in ids):
-            raise ValueError("labeled batches must carry one non-empty sample stem per image")
-        return ids
-
-    def _unpack_rgb_batch(self, batch):
-        if not isinstance(batch, (tuple, list)) or len(batch) not in (2, 3):
-            raise ValueError("RGB loader must return (images, targets[, sample_ids])")
-        images, targets = batch[0], list(batch[1])
-        ids = tuple(batch[2]) if len(batch) == 3 else self._ids_from_targets(targets)
-        if len(ids) != len(targets):
-            raise ValueError("RGB sample_ids must match target count")
-        return self._move_images(images), self._move_targets(targets), ids
-
-    def _unpack_ir_batch(self, batch):
-        if not isinstance(batch, (tuple, list)) or len(batch) not in (1, 2, 3):
-            raise ValueError("IR loader must return (images[, sample_ids])")
-        images = self._move_images(batch[0])
-        if len(batch) >= 2:
-            ids = tuple(batch[1])
-        else:
-            raise ValueError("unlabeled IR batches must carry sample_ids")
-        image_count = images.shape[0] if isinstance(images, torch.Tensor) else len(images)
-        if len(ids) != image_count or any(not isinstance(value, str) or not value.strip() for value in ids):
-            raise ValueError("IR sample_ids must contain one non-empty ID per image")
-        return images, ids
-
-    def _get_saga_images(self, images, targets, alpha: float):
-        if targets is None:
-            return images.clone()
-        from saga import SoftSAGA
-        boxes_list = [target["boxes"] for target in targets]
-        return SoftSAGA().apply_to_batch(images, boxes_list, alpha)
-
     def _alpha_map(self):
         ss_cfg = self.config.soft_saga
         return {
@@ -137,52 +79,19 @@ class CurriculumDomainAdaptationTrainer:
         }
 
     def _prepare_data_by_route(self, step_name: str, route: StepRouting):
-        """Create aligned student/teacher views from exactly one source batch."""
-
+        """Resolve configured values before delegating data execution."""
+        source_domain = self.scheduler.get_source_domain(step_name)
         alpha_map = self._alpha_map()
-        rgb_source_steps = {
-            "p1_rgb_supervised",
-            "p2_rgb_flow",
-            "p2_ir_flow",
-            "p3_rgb_flow",
-        }
-        if step_name in rgb_source_steps:
-            images, targets, sample_ids = self._unpack_rgb_batch(next(self._rgb_iter))
-            geometric_images, geometric_targets, _ = self.augmentor.apply_weak_aug(
-                images, targets
-            )
-            student_images = self._get_saga_images(
-                geometric_images,
-                geometric_targets,
-                alpha_map[route.student_saga_level],
-            )
-            teacher_images = self._get_saga_images(
-                geometric_images,
-                geometric_targets,
-                alpha_map[route.teacher_saga_level],
-            )
-            student_images = self.augmentor.apply_photometric_aug(student_images)
-            return {
-                "student_images": student_images,
-                "teacher_images": teacher_images,
-                "targets": geometric_targets if route.use_gt else None,
-                "sample_ids": sample_ids,
-            }
-
-        if step_name in {"p3_ir_flow", "p4_ir_focus"}:
-            if self._ir_iter is None:
-                raise ValueError("IR route requested without an IR DataLoader")
-            images, sample_ids = self._unpack_ir_batch(next(self._ir_iter))
-            geometric_images, _, _ = self.augmentor.apply_weak_aug(images)
-            teacher_images = geometric_images.clone()
-            student_images = self.augmentor.apply_photometric_aug(geometric_images)
-            return {
-                "student_images": student_images,
-                "teacher_images": teacher_images,
-                "targets": None,
-                "sample_ids": sample_ids,
-            }
-        raise ValueError(f"Unsupported curriculum step: {step_name}")
+        return self.data_flow.prepare(
+            source_domain=source_domain,
+            use_gt=route.use_gt,
+            student_alpha=(
+                alpha_map[route.student_saga_level] if source_domain == "rgb" else None
+            ),
+            teacher_alpha=(
+                alpha_map[route.teacher_saga_level] if source_domain == "rgb" else None
+            ),
+        )
 
     def _ensure_ema_initialized(self) -> None:
         if self.ema_initialized:
