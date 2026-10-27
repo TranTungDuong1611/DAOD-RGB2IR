@@ -4,7 +4,7 @@ from collections import defaultdict
 import logging
 import os
 import time
-from typing import Any, Dict, Iterable, Optional, Sequence
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -12,11 +12,14 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
 from config import Phase, StepRouting, TrainingConfig
-from ema import copy_student_to_teacher, ema_update
-from models.d3t_adapter import CriterionResult, DistillationSettings
-from models.d3t_wrapper import D3TWrapper
+from models.d3t_adapter import DistillationSettings
+from models.d3t_wrapper import D3TWrapper as D3TWrapper
 from scheduler import CurriculumScheduler, DomainStep
 from data.augmentations import StudentAugmentor
+from training import teachers
+from training.data_flow import RouteDataFlow
+from training.loss_flow import LossFlow, component_weight
+from training.observability import collect_ir_neck_scales, log_iteration
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,8 @@ class CurriculumDomainAdaptationTrainer:
         phase_evaluator: Any = None,
         lr_scheduler: Any = None,
     ) -> None:
+        # Retain the live dependencies and effective configuration on the
+        # orchestrator so execution modules receive resolved inputs per step.
         self.student = student
         self.rgb_teacher = rgb_teacher
         self.ir_teacher = ir_teacher
@@ -46,86 +51,30 @@ class CurriculumDomainAdaptationTrainer:
         self.lr_scheduler = lr_scheduler
         self.augmentor = StudentAugmentor(config)
 
+        # Prepare model state before constructing lazy data cursors. Their
+        # creation order is kept stable to preserve the existing RNG behavior.
         self._setup_models()
-        self._rgb_iter = iter(self._infinite(rgb_loader))
-        self._ir_iter = None if ir_loader is None else iter(self._infinite(ir_loader))
+        self.data_flow = RouteDataFlow(
+            rgb_loader, ir_loader, device=self.device, augmentor=self.augmentor
+        )
+        # Own the progress and lifecycle state that must survive checkpoint
+        # save/resume; execution modules do not maintain competing copies.
         self.scheduler = CurriculumScheduler(config)
         self.global_step = 0
         self.best_map = 0.0
         self.loss_history = defaultdict(list)
         self.ema_initialized = False
 
+    def _teacher_models(self):
+        # References stay on the trainer so checkpoint keys and ownership are unchanged.
+        return {"rgb": self.rgb_teacher, "ir": self.ir_teacher}
+
     def _setup_models(self) -> None:
-        self.student.to(self.device)
-        for teacher in (self.rgb_teacher, self.ir_teacher):
-            if teacher is None:
-                continue
-            teacher.to(self.device)
-            teacher.eval()
-            for parameter in teacher.parameters():
-                parameter.requires_grad = False
-
-    @staticmethod
-    def _infinite(loader: Iterable):
-        while True:
-            yielded = False
-            for batch in loader:
-                yielded = True
-                yield batch
-            if not yielded:
-                raise ValueError("training DataLoader is empty")
-
-    def _move_images(self, images):
-        if isinstance(images, torch.Tensor):
-            return images.to(self.device)
-        return tuple(image.to(self.device) for image in images)
-
-    def _move_targets(self, targets):
-        moved = []
-        for target in targets:
-            moved.append({
-                key: value.to(self.device) if isinstance(value, torch.Tensor) else value
-                for key, value in target.items()
-            })
-        return moved
-
-    @staticmethod
-    def _ids_from_targets(targets) -> tuple[str, ...]:
-        ids = tuple(target.get("stem") for target in targets)
-        if any(not isinstance(value, str) or not value.strip() for value in ids):
-            raise ValueError("labeled batches must carry one non-empty sample stem per image")
-        return ids
-
-    def _unpack_rgb_batch(self, batch):
-        if not isinstance(batch, (tuple, list)) or len(batch) not in (2, 3):
-            raise ValueError("RGB loader must return (images, targets[, sample_ids])")
-        images, targets = batch[0], list(batch[1])
-        ids = tuple(batch[2]) if len(batch) == 3 else self._ids_from_targets(targets)
-        if len(ids) != len(targets):
-            raise ValueError("RGB sample_ids must match target count")
-        return self._move_images(images), self._move_targets(targets), ids
-
-    def _unpack_ir_batch(self, batch):
-        if not isinstance(batch, (tuple, list)) or len(batch) not in (1, 2, 3):
-            raise ValueError("IR loader must return (images[, sample_ids])")
-        images = self._move_images(batch[0])
-        if len(batch) >= 2:
-            ids = tuple(batch[1])
-        else:
-            raise ValueError("unlabeled IR batches must carry sample_ids")
-        image_count = images.shape[0] if isinstance(images, torch.Tensor) else len(images)
-        if len(ids) != image_count or any(not isinstance(value, str) or not value.strip() for value in ids):
-            raise ValueError("IR sample_ids must contain one non-empty ID per image")
-        return images, ids
-
-    def _get_saga_images(self, images, targets, alpha: float):
-        if targets is None:
-            return images.clone()
-        from saga import SoftSAGA
-        boxes_list = [target["boxes"] for target in targets]
-        return SoftSAGA().apply_to_batch(images, boxes_list, alpha)
+        teachers.prepare_models(self.student, self._teacher_models(), device=self.device)
 
     def _alpha_map(self):
+        # Resolve appearance-level names from config before invoking data flow;
+        # these levels describe SAGA strength, not the physical input domain.
         ss_cfg = self.config.soft_saga
         return {
             "rgb": 1.0,
@@ -136,82 +85,41 @@ class CurriculumDomainAdaptationTrainer:
         }
 
     def _prepare_data_by_route(self, step_name: str, route: StepRouting):
-        """Create aligned student/teacher views from exactly one source batch."""
-
+        """Resolve configured values before delegating data execution."""
+        source_domain = self.scheduler.get_source_domain(step_name)
         alpha_map = self._alpha_map()
-        rgb_source_steps = {
-            "p1_rgb_supervised",
-            "p2_rgb_flow",
-            "p2_ir_flow",
-            "p3_rgb_flow",
-        }
-        if step_name in rgb_source_steps:
-            images, targets, sample_ids = self._unpack_rgb_batch(next(self._rgb_iter))
-            geometric_images, geometric_targets, _ = self.augmentor.apply_weak_aug(
-                images, targets
-            )
-            student_images = self._get_saga_images(
-                geometric_images,
-                geometric_targets,
-                alpha_map[route.student_saga_level],
-            )
-            teacher_images = self._get_saga_images(
-                geometric_images,
-                geometric_targets,
-                alpha_map[route.teacher_saga_level],
-            )
-            student_images = self.augmentor.apply_photometric_aug(student_images)
-            return {
-                "student_images": student_images,
-                "teacher_images": teacher_images,
-                "targets": geometric_targets if route.use_gt else None,
-                "sample_ids": sample_ids,
-                # SAGA changes appearance but the physical source is RGB.
-                # The IR residual neck is reserved for real thermal frames.
-                "student_domain": "rgb",
-                "teacher_domain": "rgb",
-            }
-
-        if step_name in {"p3_ir_flow", "p4_ir_focus"}:
-            if self._ir_iter is None:
-                raise ValueError("IR route requested without an IR DataLoader")
-            images, sample_ids = self._unpack_ir_batch(next(self._ir_iter))
-            geometric_images, _, _ = self.augmentor.apply_weak_aug(images)
-            teacher_images = geometric_images.clone()
-            student_images = self.augmentor.apply_photometric_aug(geometric_images)
-            return {
-                "student_images": student_images,
-                "teacher_images": teacher_images,
-                "targets": None,
-                "sample_ids": sample_ids,
-                # Both views originate from a real thermal frame. SAGA level
-                # names describe routing policy, not the physical input domain.
-                "student_domain": "ir",
-                "teacher_domain": "ir",
-            }
-        raise ValueError(f"Unsupported curriculum step: {step_name}")
+        return self.data_flow.prepare(
+            source_domain=source_domain,
+            use_gt=route.use_gt,
+            student_alpha=(
+                alpha_map[route.student_saga_level] if source_domain == "rgb" else None
+            ),
+            teacher_alpha=(
+                alpha_map[route.teacher_saga_level] if source_domain == "rgb" else None
+            ),
+        )
 
     def _ensure_ema_initialized(self) -> None:
+        # Decide whether initialization is due from persisted state and config.
+        # A resumed, initialized run must continue without another hard copy.
         if self.ema_initialized:
             return
         if self.global_step < self.config.ema.start_steps:
             return
-        active_teachers = {
-            "rgb": self.rgb_teacher,
-            "ir": self.ir_teacher,
-        }
+        # Select the enabled references here, then ask the teacher executor to
+        # copy weights; schedule decisions remain on the orchestration side.
         if self.config.teacher_mode == "two_teacher":
             active_names = ("rgb", "ir")
         else:
             active_names = (self.config.teacher_mode,)
-        for name in active_names:
-            teacher = active_teachers[name]
-            if teacher is None:
-                raise ValueError(f"EMA start requires the '{name}' teacher")
-            copy_student_to_teacher(teacher, self.student)
+        teachers.initialize_teachers(
+            self.student, self._teacher_models(), names=active_names
+        )
         self.ema_initialized = True
 
     def _enabled_teacher_names(self, route: StepRouting) -> tuple[str, ...]:
+        # Intersect this route's teacher requests with the experiment's enabled
+        # teacher mode while preserving the configured route order.
         if self.config.teacher_mode == "two_teacher":
             enabled = {"rgb", "ir"}
         else:
@@ -219,13 +127,11 @@ class CurriculumDomainAdaptationTrainer:
         return tuple(name for name in route.teacher_names if name in enabled)
 
     def _teacher_for_name(self, name: str) -> nn.Module:
-        teacher = {"rgb": self.rgb_teacher, "ir": self.ir_teacher}.get(name)
-        if teacher is None:
-            raise ValueError(f"teacher '{name}' is not configured")
-        teacher.eval()
-        return teacher
+        return teachers.get_teacher(self._teacher_models(), name)
 
     def _distillation_settings(self, teacher_name: str, phase: Phase):
+        # Resolve teacher-specific selection thresholds and shared KD settings
+        # for this phase before passing them to the loss executor.
         schedule = getattr(self.config.distill, f"{teacher_name}_teacher")
         top_ratio, min_hm = schedule.get_params(phase)
         return DistillationSettings(
@@ -238,29 +144,15 @@ class CurriculumDomainAdaptationTrainer:
 
     @staticmethod
     def _component_weight(name: str, config) -> float:
-        if "uhl" in name:
-            return config.weight_uhl
-        if "quality" in name:
-            return config.weight_quality
-        if "box" in name or "delta" in name:
-            return config.weight_deltas
-        if "cls" in name or "logit" in name:
-            return config.weight_logits
-        return 1.0
-
-    @staticmethod
-    def _as_result(value) -> CriterionResult:
-        if isinstance(value, CriterionResult):
-            return value
-        if isinstance(value, dict):
-            return CriterionResult(value, {})
-        raise TypeError("wrapper distillation must return CriterionResult")
-
-    @staticmethod
-    def _add_loss(total, value):
-        return value if total is None else total + value
+        """Keep the existing helper while passing explicit weights to the executor."""
+        return component_weight(
+            name, uhl=config.weight_uhl, quality=config.weight_quality,
+            deltas=config.weight_deltas, logits=config.weight_logits,
+        )
 
     def train_one_iteration(self) -> Dict[str, float]:
+        # Route selection: the baseline uses its fixed supervised route, while
+        # curriculum training asks the scheduler for the current step's route.
         self.student.train()
         if self.config.workflow == "rgb_baseline":
             step_name: DomainStep = "p1_rgb_supervised"
@@ -271,15 +163,20 @@ class CurriculumDomainAdaptationTrainer:
         if self.config.workflow == "rgb_baseline":
             route = self.config.mid_routing.p1_rgb_supervised
 
+        # Data preparation: obtain one source batch with aligned student/teacher
+        # views, optional GT, and explicit sample/domain information.
         data = self._prepare_data_by_route(step_name, route)
         targets = data["targets"]
         sample_ids = data["sample_ids"]
         iteration_lr = float(self.optimizer.param_groups[0]["lr"])
         self.optimizer.zero_grad(set_to_none=True)
 
+        # Establish teacher references before any forward that can consume them.
         if self.config.workflow != "rgb_baseline":
             self._ensure_ema_initialized()
 
+        # Student forward: choose resize once and reuse this raw output for
+        # every applicable loss, avoiding a second student forward for KD.
         select_resize = getattr(
             self.student, "select_training_resize_short_edge", None
         )
@@ -293,23 +190,27 @@ class CurriculumDomainAdaptationTrainer:
         student_output = self.student.raw(
             data["student_images"], targets, **student_raw_kwargs
         )
-        total_loss = None
-        logs: Dict[str, float] = {}
+        # Loss setup: resolve phase/component weights in the orchestrator and
+        # give the executor a fresh accumulator for this iteration only.
+        losses = LossFlow(
+            uhl=self.config.loss.weight_uhl,
+            quality=self.config.loss.weight_quality,
+            deltas=self.config.loss.weight_deltas,
+            logits=self.config.loss.weight_logits,
+        )
         sup_weight, distill_weight = self.config.loss.get_phase_weights(phase)
         if self.config.workflow == "rgb_baseline":
             sup_weight, distill_weight = 1.0, 0.0
 
+        # Supervised contribution: use transformed GT only when this route and
+        # the effective phase weight request it.
         if targets is not None and route.use_gt and sup_weight > 0:
-            supervised_losses = self.student.supervised_from_output(
-                student_output, targets
+            losses.supervised(
+                self.student, student_output, targets, phase_weight=sup_weight
             )
-            for name, value in supervised_losses.items():
-                weighted = value * sup_weight * self._component_weight(
-                    name, self.config.loss
-                )
-                total_loss = self._add_loss(total_loss, weighted)
-                logs[f"sup_{name}"] = float(weighted.detach().item())
 
+        # Distillation contribution: use only enabled, initialized references.
+        # Each teacher consumes the paired view with the student's resize.
         if (
             self.config.workflow != "rgb_baseline"
             and self.ema_initialized
@@ -318,37 +219,32 @@ class CurriculumDomainAdaptationTrainer:
             enabled_teacher_names = self._enabled_teacher_names(route)
             for teacher_name in enabled_teacher_names:
                 teacher = self._teacher_for_name(teacher_name)
-                with torch.no_grad():
-                    teacher_raw_kwargs = {
-                        "sample_ids": sample_ids,
-                        "domain": data["teacher_domain"],
-                    }
-                    if resize_short_edge is not None:
-                        teacher_raw_kwargs["resize_short_edge"] = resize_short_edge
-                    teacher_output = teacher.raw(
-                        data["teacher_images"], **teacher_raw_kwargs
-                    )
-                result = self._as_result(
-                    self.student.distill_from_outputs(
-                        student_output,
-                        teacher_output,
-                        self._distillation_settings(teacher_name, phase),
-                    )
+                teacher_output = teachers.forward_teacher(
+                    teacher,
+                    data["teacher_images"],
+                    sample_ids=sample_ids,
+                    domain=data["teacher_domain"],
+                    resize_short_edge=resize_short_edge,
                 )
-                suffix = f"_{teacher_name}"
-                for name, value in result.losses.items():
-                    weighted = value * distill_weight * self._component_weight(
-                        name, self.config.loss
-                    )
-                    total_loss = self._add_loss(total_loss, weighted)
-                    logs[f"{name}{suffix}"] = float(weighted.detach().item())
-                for name, value in result.metrics.items():
-                    if isinstance(value, torch.Tensor) and value.numel() == 1:
-                        logs[f"{name}{suffix}"] = float(value.detach().item())
+                losses.distill(
+                    self.student,
+                    student_output,
+                    teacher_output,
+                    self._distillation_settings(teacher_name, phase),
+                    teacher_name=teacher_name,
+                    phase_weight=distill_weight,
+                )
+
+        # Preserve the existing optimizer eligibility rule, including a scalar
+        # fallback when this route produced no differentiable contributions.
+        total_loss = losses.total_loss
+        logs = losses.logs
 
         if total_loss is None:
             total_loss = torch.zeros((), device=self.device)
         did_step = False
+        # Student update: backward, clipping, optimizer, and LR scheduling stay
+        # together and keep their original order within a successful step.
         if total_loss.requires_grad and bool(torch.isfinite(total_loss).item()):
             total_loss.backward()
             if self.config.grad_clip > 0:
@@ -360,28 +256,23 @@ class CurriculumDomainAdaptationTrainer:
                 self.lr_scheduler.step()
             did_step = True
 
+        # Teacher update: follow an eligible student update with EMA only for
+        # the teacher targeted by this route and enabled by the experiment.
         if (
             did_step
             and self.ema_initialized
             and route.ema_target in self._enabled_teacher_names(route)
         ):
-            ema_update(
+            teachers.update_teacher(
                 self._teacher_for_name(route.ema_target),
                 self.student,
                 alpha=self.config.ema.alpha,
                 global_step=self.global_step,
             )
 
-        ir_neck = getattr(
-            getattr(self.student, "adapter", None),
-            "ir_residual_neck",
-            None,
-        )
-        if ir_neck is not None:
-            for level, adapter in enumerate(ir_neck.adapters, start=3):
-                logs[f"ir_neck_scale_p{level}"] = float(
-                    adapter.scale.detach().item()
-                )
+        # Observation and progress: collect detached values after updates, then
+        # advance the global step once and return the existing metric payload.
+        logs.update(collect_ir_neck_scales(self.student))
 
         logs["total_loss"] = float(total_loss.detach().item())
         logs["step_type"] = step_name
@@ -401,11 +292,15 @@ class CurriculumDomainAdaptationTrainer:
             self.config.workflow,
         )
         for _ in range(self.global_step, self.config.max_iter):
+            # Execute one iteration before applying the existing log, validation,
+            # and checkpoint cadence to the resulting global step.
             started = time.time()
             logs = self.train_one_iteration()
             if self.global_step % self.config.log_interval == 0:
                 logs["iter_time"] = time.time() - started
                 self._log(logs)
+            # Delegate evaluation triggers and best-model callbacks to the
+            # evaluator, then retain the best score in trainer checkpoint state.
             if self.phase_evaluator is not None:
                 phase = self.config.get_phase(self.global_step)
                 results = self.phase_evaluator.step(
@@ -413,12 +308,16 @@ class CurriculumDomainAdaptationTrainer:
                 )
                 if results and "mAP@0.5" in results:
                     self.best_map = max(self.best_map, results["mAP@0.5"])
+            # Preserve the current periodic snapshot cadence alongside the
+            # separately triggered best-model and final-model saves.
             if self.global_step > 0 and self.global_step % 5000 == 0:
                 self.save_checkpoint(f"checkpoint_{self.global_step:06d}.pth")
 
     def save_checkpoint(self, filename: str) -> None:
         from models.fcos_factory import build_checkpoint_metadata
 
+        # Snapshot model, optimization, routing, and evaluation progress together
+        # using the existing payload keys consumed by resume and evaluation.
         os.makedirs(self.config.output_dir, exist_ok=True)
         path = os.path.join(self.config.output_dir, filename)
         payload = {
@@ -447,6 +346,8 @@ class CurriculumDomainAdaptationTrainer:
     def load_checkpoint(self, path: str) -> None:
         from models.fcos_factory import validate_checkpoint_metadata
 
+        # Validate experiment compatibility and required teacher states before
+        # restoring model tensors, keeping the current rejection behavior.
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         metadata = checkpoint.get("metadata")
         if metadata is None:
@@ -466,6 +367,8 @@ class CurriculumDomainAdaptationTrainer:
             raise ValueError(
                 f"Checkpoint is missing state for configured teacher(s): {missing}"
             )
+        # Restore learned state first, followed by optimization and routing
+        # state, so the next iteration continues with the saved update schedule.
         self.student.load_state_dict(checkpoint["student"])
         for name, teacher in configured_teachers.items():
             if teacher is not None:
@@ -478,6 +381,8 @@ class CurriculumDomainAdaptationTrainer:
             if lr_scheduler_state is None:
                 raise ValueError("Checkpoint is missing LR scheduler state")
             self.lr_scheduler.load_state_dict(lr_scheduler_state)
+        # Restore evaluation history and lifecycle flags, including the EMA
+        # initialization flag that prevents an unintended teacher reset.
         evaluator_state = checkpoint.get("phase_evaluator")
         if (
             evaluator_state is not None
@@ -491,23 +396,4 @@ class CurriculumDomainAdaptationTrainer:
         logger.info("Resumed from step %s", self.global_step)
 
     def _log(self, log: Dict[str, Any]) -> None:
-        components = []
-        for key, value in sorted(log.items()):
-            if (
-                key != "total_loss"
-                and isinstance(value, float)
-                and ("loss" in key or "kd_" in key)
-            ):
-                components.append(f"{key}={value:.4f}")
-        message = (
-            f"[{int(log.get('global_step', self.global_step)):06d}] "
-            f"Phase: {log.get('phase', 'N/A'):<22} | "
-            f"Route: {log.get('step_type', 'N/A'):<18} | "
-            f"Loss: {log.get('total_loss', 0.0):.4f} | "
-            f"LR: {log.get('lr', 0.0):.6g}"
-        )
-        if isinstance(log.get("iter_time"), (int, float)):
-            message += f" | Time: {log['iter_time']:.3f}s"
-        if components:
-            message += " | " + " | ".join(components)
-        logger.info(message)
+        log_iteration(log, self.global_step, logger=logger)

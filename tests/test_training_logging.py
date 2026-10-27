@@ -9,7 +9,7 @@ from trainer import CurriculumDomainAdaptationTrainer
 
 class TrainingLoggingTests(unittest.TestCase):
     def test_configure_writes_child_logger_to_output_logs(self):
-        from training_logging import configure_training_logging
+        from training.observability import configure_training_logging
 
         with tempfile.TemporaryDirectory() as output_dir:
             try:
@@ -54,16 +54,23 @@ class TrainingLoggingTests(unittest.TestCase):
         self.assertIn("sup_loss_cls=0.7500", message)
 
     def test_reconfigure_closes_the_previous_run_file(self):
-        from training_logging import configure_training_logging
+        from training.observability import configure_training_logging
 
         with tempfile.TemporaryDirectory() as output_dir:
             try:
                 previous_path = configure_training_logging(output_dir)
+                previous_handler = next(
+                    handler for handler in logging.getLogger().handlers
+                    if isinstance(handler, logging.FileHandler)
+                    and Path(handler.baseFilename) == previous_path
+                )
+                previous_stream = previous_handler.stream
                 current_path = configure_training_logging(output_dir)
 
-                previous_path.unlink()
-
-                self.assertFalse(previous_path.exists())
+                # Check our file ownership directly: Windows watchers may still
+                # hold a file briefly after the logging handler has closed it.
+                self.assertTrue(previous_stream.closed)
+                self.assertNotIn(previous_handler, logging.getLogger().handlers)
                 self.assertTrue(current_path.is_file())
                 owned_handlers = [
                     handler
