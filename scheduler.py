@@ -2,7 +2,8 @@ from fractions import Fraction
 from typing import Literal
 from config import Phase 
 
-# Định nghĩa các bước để Trainer biết loại ảnh và nhãn cần dùng
+# Route identifiers describe the curriculum action; physical source selection
+# is resolved separately so an IR-named route can still use RGB/SAGA inputs.
 DomainStep = Literal[
     "p1_rgb_supervised",    # Student(RGB+GT)
     "p2_rgb_flow",          # Student(SAGA-Weak) + Teacher(RGB) + GT
@@ -31,14 +32,17 @@ class CurriculumScheduler:
         """
         Main logic to decide what the Student and Teachers see in this iteration.
         """
-        # Call the phase logic from the Master Config
+        # Resolve the phase from configured iteration boundaries before choosing
+        # a route. Phase transitions do not consume either data loader here.
         phase = self.config.get_phase(global_step)
 
         if phase == self.Phase.PHASE1_RGB_WARMUP:
+            # Warmup stays on the labeled RGB path without teacher-driven routing.
             return "p1_rgb_supervised"
 
         elif phase == self.Phase.PHASE2_TRANSITION:
-            # Phase 2: RGB dominant (e.g., 80% RGB flow, 20% IR flow)
+            # Transition alternates two RGB-backed view policies using the
+            # configured RGB-route proportion, while retaining GT on both.
             return self._alternate(
                 phase=self.Phase.PHASE2_TRANSITION,
                 primary="p2_rgb_flow",
@@ -47,7 +51,8 @@ class CurriculumScheduler:
             )
 
         elif phase == self.Phase.PHASE3_ADAPTATION:
-            # The configured value is always the RGB route ratio.
+            # Adaptation alternates the RGB/SAGA route and real unlabeled IR.
+            # The configured proportion continues to mean the RGB-route share.
             return self._alternate(
                 phase=self.Phase.PHASE3_ADAPTATION,
                 primary="p3_rgb_flow",
@@ -56,11 +61,14 @@ class CurriculumScheduler:
             )
 
         else: # PHASE4_IR_FOCUS
+            # Final focus always selects the real-IR distillation route.
             return "p4_ir_focus"
 
     @staticmethod
     def get_source_domain(step_name: str) -> str:
         """Resolve the existing physical source policy, including RGB-backed P2 IR."""
+        # Supply data flow with the actual loader domain, independently of the
+        # teacher name or SAGA appearance level carried by the route settings.
         if step_name in {
             "p1_rgb_supervised", "p2_rgb_flow", "p2_ir_flow", "p3_rgb_flow",
         }:
@@ -71,6 +79,8 @@ class CurriculumScheduler:
 
     def _alternate(self, phase, primary: DomainStep, secondary: DomainStep, ratio: float) -> DomainStep:
         """Helper to alternate between two steps based on a ratio."""
+        # Keep a deterministic per-phase route sequence. Persisted counters
+        # allow resume to continue its position instead of restarting the cycle.
         period = self._ratio_to_period(ratio)
         n_primary = round(period * ratio)
 
@@ -90,6 +100,7 @@ class CurriculumScheduler:
         return Fraction(float(ratio)).limit_denominator(100).denominator
 
     def state_dict(self):
+        # Persist route-selection progress independently from model/LR state.
         return {phase.name: count for phase, count in self._counters.items()}
 
     def load_state_dict(self, state):
