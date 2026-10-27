@@ -89,3 +89,22 @@ def test_audit_rejects_misaligned_masks_instead_of_truncating_batch():
 
     with pytest.raises(ValueError, match="align"):
         evaluate_pseudo_labels(build_adapter(), fixture_output(), (), (), iou_threshold=.5)
+
+
+def test_correct_dense_duplicates_cover_one_object_and_nonfinite_rows_stay_invalid():
+    from training.pseudo_label_eval import evaluate_pseudo_labels
+
+    output = fixture_output()
+    prediction, = output.predictions
+    prediction.class_logits[1] = prediction.class_logits[0]
+    prediction.boxes[2, 0] = float("nan")
+    target = {"boxes": torch.tensor([[1., 1., 3., 3.]]), "labels": torch.tensor([0])}
+    metrics = evaluate_pseudo_labels(
+        build_adapter(), output, (torch.ones(3, dtype=torch.bool),),
+        (IRAnnotation("available", target),), iou_threshold=.5
+    )
+    assert metrics["valid_rows"] == 2
+    assert metrics["valid_fraction"] == pytest.approx(2 / 3)
+    assert metrics["covered_gt"] == 1
+    assert metrics["gt_coverage"] == 1.
+    assert metrics["nonfinite_selected_rows"] == 1
