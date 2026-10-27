@@ -22,6 +22,8 @@ class LossFlow:
     """Accumulate one iteration's losses without selecting phases or teachers."""
 
     def __init__(self, *, uhl: float, quality: float, deltas: float, logits: float):
+        # Each instance belongs to one iteration. Resolve configuration upstream
+        # and keep its differentiable total separate from detached log values.
         self._weights = dict(uhl=uhl, quality=quality, deltas=deltas, logits=logits)
         self.total_loss = None
         self.logs = {}
@@ -35,6 +37,8 @@ class LossFlow:
         self.logs[log_name] = float(weighted.detach().item())
 
     def supervised(self, student, student_output, targets, *, phase_weight: float):
+        # Reuse the existing student forward to compute GT losses; apply the
+        # supplied phase/component weights through the shared accumulator.
         for name, value in student.supervised_from_output(student_output, targets).items():
             self._add(name, value, phase_weight, f"sup_{name}")
 
@@ -42,13 +46,20 @@ class LossFlow:
         self, student, student_output, teacher_output, settings,
         *, teacher_name: str, phase_weight: float,
     ):
+        # The caller has already selected and forwarded this teacher. Delegate
+        # prediction matching and loss formulas to the existing wrapper/criterion.
         result = student.distill_from_outputs(student_output, teacher_output, settings)
+        # Normalize the supported result contracts before recording losses and
+        # diagnostics, preserving compatibility with wrappers that return a dict.
         if isinstance(result, dict):
             result = CriterionResult(result, {})
         if not isinstance(result, CriterionResult):
             raise TypeError("wrapper distillation must return CriterionResult")
+        # Teacher-specific names keep contributions distinct when aggregating
+        # multiple distillation results into the same iteration total.
         for name, value in result.losses.items():
             self._add(name, value, phase_weight, f"{name}_{teacher_name}")
+        # Diagnostics are observations only; they never contribute to backward.
         for name, value in result.metrics.items():
             if isinstance(value, torch.Tensor) and value.numel() == 1:
                 self.logs[f"{name}_{teacher_name}"] = float(value.detach().item())

@@ -28,6 +28,8 @@ def build_training(
     config: TrainingConfig, *, logger: logging.Logger
 ) -> CurriculumDomainAdaptationTrainer:
     """Build and wire the existing factories in their original order."""
+    # Data assembly: create all source/target training and validation loaders
+    # from the effective config, then expose their sizes in the existing log.
     device = torch.device(config.device)
     loaders = build_dataloaders(config)
     rgb_train_loader = loaders["rgb_train"]
@@ -42,6 +44,8 @@ def build_training(
         len(ir_val_loader.dataset),
     )
 
+    # Model assembly: build the student and configured teachers before binding
+    # optimization state to the student's actual device-resident parameters.
     student, rgb_teacher, ir_teacher = move_model_trio_to_device(
         *build_fcos_d3t_trio(config),
         device,
@@ -49,6 +53,8 @@ def build_training(
     optimizer = build_optimizer(student, config)
     lr_scheduler = build_lr_scheduler(optimizer, config)
 
+    # Evaluation assembly: pair the existing AP50 metric implementation with
+    # domain loaders, evaluation cadence, and best-result tracking.
     evaluator = DetectionEvaluator(
         num_classes=NUM_CLASSES,
         class_names=list(FLIR_CLASSES),
@@ -62,6 +68,8 @@ def build_training(
         eval_every_n=config.eval_period,
         vis_dir=os.path.join(config.output_dir, "vis"),
     )
+    # Wire the assembled dependencies into the orchestrator. Run lifecycle
+    # decisions such as resume, initial evaluation, and final save stay outside.
     trainer = CurriculumDomainAdaptationTrainer(
         student=student,
         rgb_teacher=rgb_teacher,
@@ -74,7 +82,8 @@ def build_training(
         lr_scheduler=lr_scheduler,
     )
 
-    # Bind the callback before initial evaluation or resume, as in the entrypoint.
+    # Connect an evaluator improvement to saving the complete training state.
+    # Bind it before initial evaluation or resume, as in the original entrypoint.
     def on_best_found(results):
         trainer.save_checkpoint("best_model.pth")
         logger.info(
@@ -84,4 +93,5 @@ def build_training(
 
     phase_evaluator.register_best_fn(on_best_found)
 
+    # Return a ready-to-run object without starting training during assembly.
     return trainer
