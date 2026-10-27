@@ -17,6 +17,7 @@ from models.d3t_adapter import CriterionResult, DistillationSettings
 from models.d3t_wrapper import D3TWrapper
 from scheduler import CurriculumScheduler, DomainStep
 from data.augmentations import StudentAugmentor
+from training.observability import log_iteration
 
 logger = logging.getLogger(__name__)
 
@@ -466,23 +467,5 @@ class CurriculumDomainAdaptationTrainer:
         logger.info("Resumed from step %s", self.global_step)
 
     def _log(self, log: Dict[str, Any]) -> None:
-        components = []
-        for key, value in sorted(log.items()):
-            if (
-                key != "total_loss"
-                and isinstance(value, float)
-                and ("loss" in key or "kd_" in key)
-            ):
-                components.append(f"{key}={value:.4f}")
-        message = (
-            f"[{int(log.get('global_step', self.global_step)):06d}] "
-            f"Phase: {log.get('phase', 'N/A'):<22} | "
-            f"Route: {log.get('step_type', 'N/A'):<18} | "
-            f"Loss: {log.get('total_loss', 0.0):.4f} | "
-            f"LR: {log.get('lr', 0.0):.6g}"
-        )
-        if isinstance(log.get("iter_time"), (int, float)):
-            message += f" | Time: {log['iter_time']:.3f}s"
-        if components:
-            message += " | " + " | ".join(components)
-        logger.info(message)
+        # Presentation stays separate from iteration execution and log cadence.
+        log_iteration(log, self.global_step, logger=logger)
