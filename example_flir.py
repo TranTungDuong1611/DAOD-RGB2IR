@@ -2,7 +2,6 @@
 
 import argparse
 import logging
-import os
 
 import torch
 
@@ -23,13 +22,10 @@ from config import (
     TrainLoaderConfig,
     TrainingConfig,
 )
-from data import FLIR_CLASSES, NUM_CLASSES, build_dataloaders
-from evaluator import DetectionEvaluator, PhaseEvaluator
-from models.fcos_factory import build_fcos_d3t_trio
+from data import FLIR_CLASSES, NUM_CLASSES
 from models.torchvision_fcos_adapter import ClassificationInitMode
-from optimization import build_lr_scheduler, build_optimizer
-from trainer import CurriculumDomainAdaptationTrainer
-from training_logging import configure_training_logging
+from training.bootstrap import build_training, move_model_trio_to_device
+from training.observability import configure_training_logging
 
 
 logger = logging.getLogger(__name__)
@@ -51,6 +47,8 @@ def _weight_identifier(value: str):
 def build_training_config(args) -> TrainingConfig:
     """Map every training-relevant CLI argument into one effective config."""
 
+    # Resolve iteration boundaries and weight identifiers before building the
+    # effective configuration consumed by bootstrap and checkpoint metadata.
     total_iters = int(args.total_iters)
     default_boundaries = _phase_boundaries(total_iters)
     phase1_end = (
@@ -72,6 +70,7 @@ def build_training_config(args) -> TrainingConfig:
     )
 
 
+    # Collect phase boundaries and route proportions for the curriculum scheduler.
     curriculum = CurriculumConfig(
         phase1_end=phase1_end,
         phase2_end=phase2_end,
@@ -81,6 +80,7 @@ def build_training_config(args) -> TrainingConfig:
     )
 
     return TrainingConfig(
+        # Preserve baseline detector construction, transform, and inference settings.
         model=FCOSModelConfig(
             num_classes=NUM_CLASSES,
             class_names=tuple(FLIR_CLASSES),
@@ -100,6 +100,7 @@ def build_training_config(args) -> TrainingConfig:
             vfl_alpha=0.75,
             vfl_gamma=2.0,
         ),
+        # Teacher-specific KD selection schedules and shared distillation settings.
         distill=DistillConfig(
             hm_alpha=args.hm_alpha,
             hm_beta=args.hm_beta,
@@ -118,6 +119,7 @@ def build_training_config(args) -> TrainingConfig:
             ),
         ),
         curriculum=curriculum,
+        # Phase and component weights are resolved upstream of loss execution.
         loss=LossConfig(
             p1_sup_weight=1.0,
             p1_distill_weight=0.0,
@@ -132,6 +134,8 @@ def build_training_config(args) -> TrainingConfig:
             weight_quality=1.0,
             weight_uhl=1.0,
         ),
+        # Keep update schedules and view-generation parameters in configuration;
+        # executors receive the values selected by the trainer for each step.
         optimizer=OptimizerConfig(
             base_lr=args.lr,
             warmup_iters=args.warmup_iters,
@@ -151,6 +155,7 @@ def build_training_config(args) -> TrainingConfig:
             brightness_prob=args.brightness_prob,
             contrast_prob=args.contrast_prob,
         ),
+        # Dataset location and loader settings used by bootstrap's factories.
         data=DataConfig(root=args.data_root),
         loader=DataLoaderConfig(
             train=TrainLoaderConfig(
@@ -162,6 +167,7 @@ def build_training_config(args) -> TrainingConfig:
                 num_workers=args.workers,
             ),
         ),
+        # Run lifecycle, output, workflow, and monitoring cadence settings.
         max_iter=total_iters,
         total_iters=total_iters,
         output_dir=args.output_dir,
@@ -175,20 +181,13 @@ def build_training_config(args) -> TrainingConfig:
 
 # Backward-compatible name used by earlier local launch scripts.
 make_training_config = build_training_config
-
-
-def _move_model_trio_to_device(student, rgb_teacher, ir_teacher, device):
-    """Move the student and whichever teachers are enabled to one device."""
-
-    student = student.to(device)
-    if rgb_teacher is not None:
-        rgb_teacher = rgb_teacher.to(device)
-    if ir_teacher is not None:
-        ir_teacher = ir_teacher.to(device)
-    return student, rgb_teacher, ir_teacher
+# Preserve the helper name used by existing launch scripts and tests.
+_move_model_trio_to_device = move_model_trio_to_device
 
 
 def main(args) -> None:
+    # Configure the experiment's existing log destinations before constructing
+    # the dependencies that emit setup and progress messages.
     config = make_training_config(args)
     log_path = configure_training_logging(config.output_dir)
     logger.info("Training log -> %s", log_path)
@@ -203,60 +202,14 @@ def main(args) -> None:
         config.total_iters,
     )
 
-    loaders = build_dataloaders(config)
-    rgb_train_loader = loaders["rgb_train"]
-    ir_train_loader = loaders["ir_train"]
-    rgb_val_loader = loaders["rgb_val"]
-    ir_val_loader = loaders["ir_val"]
-    logger.info(
-        "RGB train=%d, IR train=%d, RGB val=%d, IR val=%d",
-        len(rgb_train_loader.dataset),
-        len(ir_train_loader.dataset),
-        len(rgb_val_loader.dataset),
-        len(ir_val_loader.dataset),
-    )
+    # Bootstrap wires dependencies; this entrypoint retains the sequence of
+    # resume/initial evaluation, training, interruption handling, and final save.
+    trainer = build_training(config, logger=logger)
+    student = trainer.student
+    phase_evaluator = trainer.phase_evaluator
 
-    student, rgb_teacher, ir_teacher = _move_model_trio_to_device(
-        *build_fcos_d3t_trio(config),
-        device,
-    )
-    optimizer = build_optimizer(student, config)
-    lr_scheduler = build_lr_scheduler(optimizer, config)
-
-    evaluator = DetectionEvaluator(
-        num_classes=NUM_CLASSES,
-        class_names=list(FLIR_CLASSES),
-        iou_thresholds=[0.5],
-    )
-    phase_evaluator = PhaseEvaluator(
-        evaluator=evaluator,
-        ir_val_loader=ir_val_loader,
-        rgb_val_loader=rgb_val_loader,
-        device=device,
-        eval_every_n=config.eval_period,
-        vis_dir=os.path.join(config.output_dir, "vis"),
-    )
-    trainer = CurriculumDomainAdaptationTrainer(
-        student=student,
-        rgb_teacher=rgb_teacher,
-        ir_teacher=ir_teacher,
-        optimizer=optimizer,
-        config=config,
-        rgb_loader=rgb_train_loader,
-        ir_loader=ir_train_loader,
-        phase_evaluator=phase_evaluator,
-        lr_scheduler=lr_scheduler,
-    )
-
-    def on_best_found(results):
-        trainer.save_checkpoint("best_model.pth")
-        logger.info(
-            "New best IR mAP@0.5 saved: %.4f",
-            results.get("mAP@0.5", 0.0),
-        )
-
-    phase_evaluator.register_best_fn(on_best_found)
-
+    # Resume saved progress or evaluate the initial model using the original
+    # mutually exclusive paths and initial phase label.
     if args.resume:
         trainer.load_checkpoint(args.resume)
     else:
@@ -268,6 +221,8 @@ def main(args) -> None:
             trigger_reason="initial",
         )
 
+    # Retain final persistence and history reporting on normal completion,
+    # interruption, or an exception raised inside the training loop.
     try:
         trainer.train()
     except KeyboardInterrupt:
@@ -278,6 +233,8 @@ def main(args) -> None:
 
 
 def parse_args():
+    # Declare launch options here; build_training_config translates them into
+    # one effective configuration before any training dependency is assembled.
     parser = argparse.ArgumentParser(
         description="Curriculum D3T training for aligned FLIR RGB/IR data"
     )
