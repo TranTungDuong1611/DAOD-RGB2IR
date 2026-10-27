@@ -47,6 +47,8 @@ def _weight_identifier(value: str):
 def build_training_config(args) -> TrainingConfig:
     """Map every training-relevant CLI argument into one effective config."""
 
+    # Resolve iteration boundaries and weight identifiers before building the
+    # effective configuration consumed by bootstrap and checkpoint metadata.
     total_iters = int(args.total_iters)
     default_boundaries = _phase_boundaries(total_iters)
     phase1_end = (
@@ -68,6 +70,7 @@ def build_training_config(args) -> TrainingConfig:
     )
 
 
+    # Collect phase boundaries and route proportions for the curriculum scheduler.
     curriculum = CurriculumConfig(
         phase1_end=phase1_end,
         phase2_end=phase2_end,
@@ -77,6 +80,7 @@ def build_training_config(args) -> TrainingConfig:
     )
 
     return TrainingConfig(
+        # Preserve baseline detector construction, transform, and inference settings.
         model=FCOSModelConfig(
             num_classes=NUM_CLASSES,
             class_names=tuple(FLIR_CLASSES),
@@ -96,6 +100,7 @@ def build_training_config(args) -> TrainingConfig:
             vfl_alpha=0.75,
             vfl_gamma=2.0,
         ),
+        # Teacher-specific KD selection schedules and shared distillation settings.
         distill=DistillConfig(
             hm_alpha=args.hm_alpha,
             hm_beta=args.hm_beta,
@@ -114,6 +119,7 @@ def build_training_config(args) -> TrainingConfig:
             ),
         ),
         curriculum=curriculum,
+        # Phase and component weights are resolved upstream of loss execution.
         loss=LossConfig(
             p1_sup_weight=1.0,
             p1_distill_weight=0.0,
@@ -128,6 +134,8 @@ def build_training_config(args) -> TrainingConfig:
             weight_quality=1.0,
             weight_uhl=1.0,
         ),
+        # Keep update schedules and view-generation parameters in configuration;
+        # executors receive the values selected by the trainer for each step.
         optimizer=OptimizerConfig(
             base_lr=args.lr,
             warmup_iters=args.warmup_iters,
@@ -147,6 +155,7 @@ def build_training_config(args) -> TrainingConfig:
             brightness_prob=args.brightness_prob,
             contrast_prob=args.contrast_prob,
         ),
+        # Dataset location and loader settings used by bootstrap's factories.
         data=DataConfig(root=args.data_root),
         loader=DataLoaderConfig(
             train=TrainLoaderConfig(
@@ -158,6 +167,7 @@ def build_training_config(args) -> TrainingConfig:
                 num_workers=args.workers,
             ),
         ),
+        # Run lifecycle, output, workflow, and monitoring cadence settings.
         max_iter=total_iters,
         total_iters=total_iters,
         output_dir=args.output_dir,
@@ -176,6 +186,8 @@ _move_model_trio_to_device = move_model_trio_to_device
 
 
 def main(args) -> None:
+    # Configure the experiment's existing log destinations before constructing
+    # the dependencies that emit setup and progress messages.
     config = make_training_config(args)
     log_path = configure_training_logging(config.output_dir)
     logger.info("Training log -> %s", log_path)
@@ -190,11 +202,14 @@ def main(args) -> None:
         config.total_iters,
     )
 
-    # Bootstrap wires dependencies; run lifecycle decisions remain in this entrypoint.
+    # Bootstrap wires dependencies; this entrypoint retains the sequence of
+    # resume/initial evaluation, training, interruption handling, and final save.
     trainer = build_training(config, logger=logger)
     student = trainer.student
     phase_evaluator = trainer.phase_evaluator
 
+    # Resume saved progress or evaluate the initial model using the original
+    # mutually exclusive paths and initial phase label.
     if args.resume:
         trainer.load_checkpoint(args.resume)
     else:
@@ -206,6 +221,8 @@ def main(args) -> None:
             trigger_reason="initial",
         )
 
+    # Retain final persistence and history reporting on normal completion,
+    # interruption, or an exception raised inside the training loop.
     try:
         trainer.train()
     except KeyboardInterrupt:
@@ -216,6 +233,8 @@ def main(args) -> None:
 
 
 def parse_args():
+    # Declare launch options here; build_training_config translates them into
+    # one effective configuration before any training dependency is assembled.
     parser = argparse.ArgumentParser(
         description="Curriculum D3T training for aligned FLIR RGB/IR data"
     )

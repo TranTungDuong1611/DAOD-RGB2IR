@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from config import Phase, StepRouting, TrainingConfig
 from models.d3t_adapter import DistillationSettings
-from models.d3t_wrapper import D3TWrapper
+from models.d3t_wrapper import D3TWrapper as D3TWrapper
 from scheduler import CurriculumScheduler, DomainStep
 from data.augmentations import StudentAugmentor
 from training import teachers
@@ -39,6 +39,8 @@ class CurriculumDomainAdaptationTrainer:
         phase_evaluator: Any = None,
         lr_scheduler: Any = None,
     ) -> None:
+        # Retain the live dependencies and effective configuration on the
+        # orchestrator so execution modules receive resolved inputs per step.
         self.student = student
         self.rgb_teacher = rgb_teacher
         self.ir_teacher = ir_teacher
@@ -49,10 +51,14 @@ class CurriculumDomainAdaptationTrainer:
         self.lr_scheduler = lr_scheduler
         self.augmentor = StudentAugmentor(config)
 
+        # Prepare model state before constructing lazy data cursors. Their
+        # creation order is kept stable to preserve the existing RNG behavior.
         self._setup_models()
         self.data_flow = RouteDataFlow(
             rgb_loader, ir_loader, device=self.device, augmentor=self.augmentor
         )
+        # Own the progress and lifecycle state that must survive checkpoint
+        # save/resume; execution modules do not maintain competing copies.
         self.scheduler = CurriculumScheduler(config)
         self.global_step = 0
         self.best_map = 0.0
@@ -60,13 +66,15 @@ class CurriculumDomainAdaptationTrainer:
         self.ema_initialized = False
 
     def _teacher_models(self):
-        # Keep live references on the trainer to preserve model/checkpoint ownership.
+        # References stay on the trainer so checkpoint keys and ownership are unchanged.
         return {"rgb": self.rgb_teacher, "ir": self.ir_teacher}
 
     def _setup_models(self) -> None:
         teachers.prepare_models(self.student, self._teacher_models(), device=self.device)
 
     def _alpha_map(self):
+        # Resolve appearance-level names from config before invoking data flow;
+        # these levels describe SAGA strength, not the physical input domain.
         ss_cfg = self.config.soft_saga
         return {
             "rgb": 1.0,
@@ -92,10 +100,14 @@ class CurriculumDomainAdaptationTrainer:
         )
 
     def _ensure_ema_initialized(self) -> None:
+        # Decide whether initialization is due from persisted state and config.
+        # A resumed, initialized run must continue without another hard copy.
         if self.ema_initialized:
             return
         if self.global_step < self.config.ema.start_steps:
             return
+        # Select the enabled references here, then ask the teacher executor to
+        # copy weights; schedule decisions remain on the orchestration side.
         if self.config.teacher_mode == "two_teacher":
             active_names = ("rgb", "ir")
         else:
@@ -106,6 +118,8 @@ class CurriculumDomainAdaptationTrainer:
         self.ema_initialized = True
 
     def _enabled_teacher_names(self, route: StepRouting) -> tuple[str, ...]:
+        # Intersect this route's teacher requests with the experiment's enabled
+        # teacher mode while preserving the configured route order.
         if self.config.teacher_mode == "two_teacher":
             enabled = {"rgb", "ir"}
         else:
@@ -116,6 +130,8 @@ class CurriculumDomainAdaptationTrainer:
         return teachers.get_teacher(self._teacher_models(), name)
 
     def _distillation_settings(self, teacher_name: str, phase: Phase):
+        # Resolve teacher-specific selection thresholds and shared KD settings
+        # for this phase before passing them to the loss executor.
         schedule = getattr(self.config.distill, f"{teacher_name}_teacher")
         top_ratio, min_hm = schedule.get_params(phase)
         return DistillationSettings(
@@ -135,6 +151,8 @@ class CurriculumDomainAdaptationTrainer:
         )
 
     def train_one_iteration(self) -> Dict[str, float]:
+        # Route selection: the baseline uses its fixed supervised route, while
+        # curriculum training asks the scheduler for the current step's route.
         self.student.train()
         if self.config.workflow == "rgb_baseline":
             step_name: DomainStep = "p1_rgb_supervised"
@@ -145,26 +163,34 @@ class CurriculumDomainAdaptationTrainer:
         if self.config.workflow == "rgb_baseline":
             route = self.config.mid_routing.p1_rgb_supervised
 
+        # Data preparation: obtain one source batch with aligned student/teacher
+        # views, optional GT, and explicit sample identity.
         data = self._prepare_data_by_route(step_name, route)
         targets = data["targets"]
         sample_ids = data["sample_ids"]
         iteration_lr = float(self.optimizer.param_groups[0]["lr"])
         self.optimizer.zero_grad(set_to_none=True)
 
+        # Establish teacher references before any forward that can consume them.
         if self.config.workflow != "rgb_baseline":
             self._ensure_ema_initialized()
 
+        # Student forward: choose resize once and reuse this raw output for
+        # every applicable loss, avoiding a second student forward for KD.
         select_resize = getattr(
             self.student, "select_training_resize_short_edge", None
         )
         resize_short_edge = None if select_resize is None else select_resize()
-        student_raw_kwargs = {"sample_ids": sample_ids}
+        student_raw_kwargs = {
+            "sample_ids": sample_ids,
+        }
         if resize_short_edge is not None:
             student_raw_kwargs["resize_short_edge"] = resize_short_edge
         student_output = self.student.raw(
             data["student_images"], targets, **student_raw_kwargs
         )
-        # Resolve configuration here; the loss executor only receives values.
+        # Loss setup: resolve phase/component weights in the orchestrator and
+        # give the executor a fresh accumulator for this iteration only.
         losses = LossFlow(
             uhl=self.config.loss.weight_uhl,
             quality=self.config.loss.weight_quality,
@@ -175,11 +201,15 @@ class CurriculumDomainAdaptationTrainer:
         if self.config.workflow == "rgb_baseline":
             sup_weight, distill_weight = 1.0, 0.0
 
+        # Supervised contribution: use transformed GT only when this route and
+        # the effective phase weight request it.
         if targets is not None and route.use_gt and sup_weight > 0:
             losses.supervised(
                 self.student, student_output, targets, phase_weight=sup_weight
             )
 
+        # Distillation contribution: use only enabled, initialized references.
+        # Each teacher consumes the paired view with the student's resize.
         if (
             self.config.workflow != "rgb_baseline"
             and self.ema_initialized
@@ -203,12 +233,16 @@ class CurriculumDomainAdaptationTrainer:
                     phase_weight=distill_weight,
                 )
 
+        # Preserve the existing optimizer eligibility rule, including a scalar
+        # fallback when this route produced no differentiable contributions.
         total_loss = losses.total_loss
         logs = losses.logs
 
         if total_loss is None:
             total_loss = torch.zeros((), device=self.device)
         did_step = False
+        # Student update: backward, clipping, optimizer, and LR scheduling stay
+        # together and keep their original order within a successful step.
         if total_loss.requires_grad and bool(torch.isfinite(total_loss).item()):
             total_loss.backward()
             if self.config.grad_clip > 0:
@@ -220,6 +254,8 @@ class CurriculumDomainAdaptationTrainer:
                 self.lr_scheduler.step()
             did_step = True
 
+        # Teacher update: follow an eligible student update with EMA only for
+        # the teacher targeted by this route and enabled by the experiment.
         if (
             did_step
             and self.ema_initialized
@@ -232,6 +268,8 @@ class CurriculumDomainAdaptationTrainer:
                 global_step=self.global_step,
             )
 
+        # Observation and progress: collect detached values after updates, then
+        # advance the global step once and return the existing metric payload.
         logs["total_loss"] = float(total_loss.detach().item())
         logs["step_type"] = step_name
         logs["phase"] = phase.name
@@ -250,11 +288,15 @@ class CurriculumDomainAdaptationTrainer:
             self.config.workflow,
         )
         for _ in range(self.global_step, self.config.max_iter):
+            # Execute one iteration before applying the existing log, validation,
+            # and checkpoint cadence to the resulting global step.
             started = time.time()
             logs = self.train_one_iteration()
             if self.global_step % self.config.log_interval == 0:
                 logs["iter_time"] = time.time() - started
                 self._log(logs)
+            # Delegate evaluation triggers and best-model callbacks to the
+            # evaluator, then retain the best score in trainer checkpoint state.
             if self.phase_evaluator is not None:
                 phase = self.config.get_phase(self.global_step)
                 results = self.phase_evaluator.step(
@@ -262,12 +304,16 @@ class CurriculumDomainAdaptationTrainer:
                 )
                 if results and "mAP@0.5" in results:
                     self.best_map = max(self.best_map, results["mAP@0.5"])
+            # Preserve the current periodic snapshot cadence alongside the
+            # separately triggered best-model and final-model saves.
             if self.global_step > 0 and self.global_step % 5000 == 0:
                 self.save_checkpoint(f"checkpoint_{self.global_step:06d}.pth")
 
     def save_checkpoint(self, filename: str) -> None:
         from models.fcos_factory import build_checkpoint_metadata
 
+        # Snapshot model, optimization, routing, and evaluation progress together
+        # using the existing payload keys consumed by resume and evaluation.
         os.makedirs(self.config.output_dir, exist_ok=True)
         path = os.path.join(self.config.output_dir, filename)
         payload = {
@@ -296,6 +342,8 @@ class CurriculumDomainAdaptationTrainer:
     def load_checkpoint(self, path: str) -> None:
         from models.fcos_factory import validate_checkpoint_metadata
 
+        # Validate experiment compatibility and required teacher states before
+        # restoring model tensors, keeping the current rejection behavior.
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         metadata = checkpoint.get("metadata")
         if metadata is None:
@@ -315,6 +363,8 @@ class CurriculumDomainAdaptationTrainer:
             raise ValueError(
                 f"Checkpoint is missing state for configured teacher(s): {missing}"
             )
+        # Restore learned state first, followed by optimization and routing
+        # state, so the next iteration continues with the saved update schedule.
         self.student.load_state_dict(checkpoint["student"])
         for name, teacher in configured_teachers.items():
             if teacher is not None:
@@ -327,6 +377,8 @@ class CurriculumDomainAdaptationTrainer:
             if lr_scheduler_state is None:
                 raise ValueError("Checkpoint is missing LR scheduler state")
             self.lr_scheduler.load_state_dict(lr_scheduler_state)
+        # Restore evaluation history and lifecycle flags, including the EMA
+        # initialization flag that prevents an unintended teacher reset.
         evaluator_state = checkpoint.get("phase_evaluator")
         if (
             evaluator_state is not None
@@ -340,5 +392,4 @@ class CurriculumDomainAdaptationTrainer:
         logger.info("Resumed from step %s", self.global_step)
 
     def _log(self, log: Dict[str, Any]) -> None:
-        # Presentation stays separate from iteration execution and log cadence.
         log_iteration(log, self.global_step, logger=logger)
