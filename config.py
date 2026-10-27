@@ -184,7 +184,13 @@ class MidRoutingConfig:
         teacher_names=("ir",),
     ))
 
-    # PHASE 4: IR Focus
+    # PHASE 4: supervised RGB steps retain source-domain supervision, while
+    # the existing IR route continues distillation and IR-teacher EMA updates.
+    p4_rgb_supervised: StepRouting = field(default_factory=lambda: StepRouting(
+        ema_target="none", use_gt=True,
+        student_saga_level="rgb", teacher_saga_level="rgb", teacher_names=(),
+    ))
+
     p4_ir_focus: StepRouting = field(default_factory=lambda: StepRouting(
         ema_target="ir", use_gt=False, student_saga_level="ir", teacher_saga_level="ir",
         teacher_names=("ir",),
@@ -218,6 +224,7 @@ class CurriculumConfig:
 
     phase2_rgb_sampling_ratio: float = 0.7 
     phase3_rgb_sampling_ratio: float = 0.3  
+    phase4_rgb_sampling_ratio: float = 0.2
 
     def __post_init__(self):
         boundaries = (self.phase1_end, self.phase2_end, self.phase3_end)
@@ -225,7 +232,10 @@ class CurriculumConfig:
             raise ValueError("phase boundaries must be non-negative integers")
         if tuple(boundaries) != tuple(sorted(boundaries)):
             raise ValueError("phase boundaries must be increasing")
-        for name in ("phase2_rgb_sampling_ratio", "phase3_rgb_sampling_ratio"):
+        for name in (
+            "phase2_rgb_sampling_ratio", "phase3_rgb_sampling_ratio",
+            "phase4_rgb_sampling_ratio",
+        ):
             value = getattr(self, name)
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be in [0, 1]")
@@ -255,8 +265,8 @@ class LossConfig:
     p3_sup_weight: float = 0.8      # Reduce GT reliance (only used in RGB flow)
     p3_distill_weight: float = 1.0
 
-    # Phase 4: IR Focus (Pure Distill)
-    p4_sup_weight: float = 0.0      # No GT used
+    # Phase 4: GT applies only to RGB steps; unlabeled IR still uses KD only.
+    p4_sup_weight: float = 1.0
     p4_distill_weight: float = 1.0
 
     def get_phase_weights(self, phase: Phase) -> Tuple[float, float]:
