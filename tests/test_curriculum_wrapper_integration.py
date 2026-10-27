@@ -226,6 +226,87 @@ def build_trainer(config):
 
 
 class CurriculumIntegrationTests(unittest.TestCase):
+    def _phase4_config(self, *, ratio=0.2, output_dir="outputs"):
+        config = build_config(
+            curriculum=CurriculumConfig(
+                phase1_end=0, phase2_end=0, phase3_end=0,
+                phase4_rgb_sampling_ratio=ratio,
+            ),
+            ema=EMAConfig(alpha=0.0, start_steps=0),
+            total_iters=10, output_dir=output_dir,
+        )
+        # Exercise the experiment's actual default supervised weight with an
+        # independently known classification contribution from TinyCriterion.
+        config.loss = LossConfig(weight_logits=4.0)
+        return config
+
+    def test_phase4_rgb_step_uses_gt_without_kd_or_ema(self):
+        trainer, student, rgb_teacher, ir_teacher = build_trainer(self._phase4_config())
+        with mock.patch.object(student, "raw", wraps=student.raw) as student_raw:
+            logs = trainer.train_one_iteration()
+
+        self.assertEqual(logs["step_type"], "p4_rgb_supervised")
+        self.assertEqual(student_raw.call_args.kwargs["sample_ids"], ("rgb-0",))
+        self.assertEqual(student_raw.call_args.args[1][0]["stem"], "rgb-0")
+        torch.testing.assert_close(
+            student_raw.call_args.args[0], torch.full((1, 3, 16, 16), 0.5)
+        )
+        self.assertEqual(logs["sup_loss_cls"], 4.0)
+        self.assertEqual(logs["total_loss"], 4.0)
+        self.assertAlmostEqual(student.adapter.weight.item(), 0.2, places=6)
+        self.assertEqual(student.criterion.distill_calls, 0)
+        self.assertEqual(rgb_teacher.adapter.forward_calls, 0)
+        self.assertEqual(ir_teacher.adapter.forward_calls, 0)
+        self.assertEqual(rgb_teacher.adapter.weight.item(), 1.0)
+        self.assertEqual(ir_teacher.adapter.weight.item(), 1.0)
+
+    def test_phase4_ir_step_keeps_kd_and_updates_only_ir_teacher(self):
+        trainer, student, rgb_teacher, ir_teacher = build_trainer(self._phase4_config())
+        trainer.train_one_iteration()
+        with mock.patch.object(student, "raw", wraps=student.raw) as student_raw:
+            logs = trainer.train_one_iteration()
+
+        self.assertEqual(logs["step_type"], "p4_ir_focus")
+        self.assertEqual(student_raw.call_args.kwargs["sample_ids"], ("ir-0",))
+        self.assertIsNone(student_raw.call_args.args[1])
+        self.assertFalse(any(name.startswith("sup_") for name in logs))
+        self.assertIn("loss_kd_cls_ir", logs)
+        self.assertEqual(student.criterion.distill_calls, 1)
+        self.assertEqual(ir_teacher.adapter.forward_calls, 1)
+        self.assertAlmostEqual(student.adapter.weight.item(), 0.84, places=6)
+        self.assertEqual(ir_teacher.adapter.weight.item(), student.adapter.weight.item())
+        self.assertEqual(rgb_teacher.adapter.weight.item(), 1.0)
+
+    def test_phase4_zero_rgb_ratio_runs_only_the_existing_ir_flow(self):
+        trainer, student, rgb_teacher, ir_teacher = build_trainer(
+            self._phase4_config(ratio=0.0)
+        )
+        logs = [trainer.train_one_iteration() for _ in range(5)]
+
+        self.assertEqual([log["step_type"] for log in logs], ["p4_ir_focus"] * 5)
+        self.assertTrue(all("loss_kd_cls_ir" in log for log in logs))
+        self.assertTrue(all(not any(name.startswith("sup_") for name in log) for log in logs))
+        self.assertEqual(student.criterion.distill_calls, 5)
+        self.assertEqual(rgb_teacher.adapter.forward_calls, 0)
+        self.assertEqual(ir_teacher.adapter.forward_calls, 5)
+
+    def test_phase4_checkpoint_resumes_the_rgb_ir_cycle(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            config = self._phase4_config(output_dir=output_dir)
+            trainer, _, _, _ = build_trainer(config)
+            for _ in range(3):
+                trainer.train_one_iteration()
+            trainer.save_checkpoint("phase4.pth")
+            resumed, _, _, _ = build_trainer(config)
+            resumed.load_checkpoint(f"{output_dir}/phase4.pth")
+
+            self.assertEqual(resumed.global_step, 3)
+            self.assertTrue(resumed.ema_initialized)
+            self.assertEqual(
+                [resumed.train_one_iteration()["step_type"] for _ in range(3)],
+                ["p4_ir_focus", "p4_ir_focus", "p4_rgb_supervised"],
+            )
+
     def test_trainer_uses_one_resize_choice_for_student_and_teacher(self):
         config = build_config(
             teacher_mode="rgb",
