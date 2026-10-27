@@ -337,6 +337,22 @@ class DataLoaderConfig:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class PseudoLabelEvalConfig:
+    """Audit cadence and label location; these settings never control KD."""
+
+    enabled: bool = False
+    interval: int = 500
+    iou_threshold: float = 0.5
+    annotation_dir: Optional[str] = None
+
+    def __post_init__(self):
+        if isinstance(self.interval, bool) or not isinstance(self.interval, int) or self.interval <= 0:
+            raise ValueError("pseudo-label evaluation interval must be a positive integer")
+        if not math.isfinite(self.iou_threshold) or not 0. <= self.iou_threshold <= 1.:
+            raise ValueError("pseudo-label evaluation IoU threshold must be in [0, 1]")
+
+
+@dataclass
 class TrainingConfig:
     """Master config for CurriculumDomainAdaptationTrainer."""
     model: FCOSModelConfig = field(default_factory=FCOSModelConfig)
@@ -352,6 +368,7 @@ class TrainingConfig:
 
     data: DataConfig = field(default_factory=DataConfig)
     loader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
+    pseudo_label_eval: PseudoLabelEvalConfig = field(default_factory=PseudoLabelEvalConfig)
 
     max_iter: int = 10000
     total_iters: Optional[int] = None
