@@ -10,6 +10,23 @@ from config import FCOSModelConfig
 from models.torchvision_fcos_adapter import ClassificationInitMode
 
 
+class DomainNeckEntrypointTests(unittest.TestCase):
+    def test_cli_enables_domain_neck_with_explicit_dimensions(self):
+        with mock.patch.object(sys, "argv", ["example_flir.py", "--data_root", "synthetic",
+            "--domain-neck", "--domain-neck-bottleneck-channels", "32", "--domain-neck-se-reduction", "8"]):
+            config = make_training_config(parse_args())
+        self.assertTrue(config.model.domain_neck_enabled)
+        self.assertEqual(config.model.domain_neck_bottleneck_channels, 32)
+        self.assertEqual(config.model.domain_neck_se_reduction, 8)
+
+    def test_default_and_explicit_disable_preserve_no_neck_baseline(self):
+        for flags in ([], ["--domain-neck", "--no-domain-neck"]):
+            with self.subTest(flags=flags), mock.patch.object(sys, "argv",
+                ["example_flir.py", "--data_root", "synthetic", *flags]):
+                config = make_training_config(parse_args())
+            self.assertFalse(config.model.domain_neck_enabled)
+
+
 class EntrypointConfigTests(unittest.TestCase):
     def test_default_resize_schedule_matches_d3t(self):
         with mock.patch.object(

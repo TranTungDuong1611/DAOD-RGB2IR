@@ -10,6 +10,8 @@ import torch
 from torch.utils.data import DataLoader
 from torchvision.ops import box_iou
 
+from models.domain_residual_neck import normalize_domain
+
 logger = logging.getLogger(__name__)
 
 
@@ -248,6 +250,7 @@ class PhaseEvaluator:
         raise ValueError("evaluation batch must contain images and targets")
 
     def _run_eval_on_loader(self, model, loader, domain_name) -> Dict:
+        domain = normalize_domain(domain_name)
         self.evaluator.reset()
         started = time.time()
         with torch.no_grad():
@@ -259,10 +262,15 @@ class PhaseEvaluator:
                      for key, value in target.items()}
                     for target in targets
                 ]
-                try:
-                    predictions = model(images, sample_ids=sample_ids)
-                except TypeError:
-                    predictions = model(images)
+                if getattr(model, "supports_domain_routing", False):
+                    predictions = model(images, sample_ids=sample_ids, domain=domain)
+                else:
+                    # Preserve legacy model support without hiding errors in
+                    # domain-aware attention by retrying with the RGB default.
+                    try:
+                        predictions = model(images, sample_ids=sample_ids)
+                    except TypeError:
+                        predictions = model(images)
                 self.evaluator.update(predictions, targets)
         metrics = self.evaluator.compute()
         logger.info(
