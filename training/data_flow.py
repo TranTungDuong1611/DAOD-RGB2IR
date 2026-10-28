@@ -96,6 +96,7 @@ class RouteDataFlow:
         use_gt: bool,
         student_alpha: float | None,
         teacher_alpha: float | None,
+        capture_geometry: bool = False,
     ):
         """Execute the supplied source/augmentation settings on one batch."""
         if source_domain == "rgb":
@@ -133,15 +134,20 @@ class RouteDataFlow:
             if self._ir_iter is None:
                 raise ValueError("IR route requested without an IR DataLoader")
             images, sample_ids = self._unpack_ir_batch(next(self._ir_iter))
-            geometric_images, _, _ = self.augmentor.apply_weak_aug(images)
+            geometric_images, _, did_flip = self.augmentor.apply_weak_aug(images)
             teacher_images = geometric_images.clone()
             student_images = self.augmentor.apply_photometric_aug(geometric_images)
             # Publish aligned target views and identity without supervised GT.
             # The model keeps the baseline detector's existing forward interface.
-            return {
+            result = {
                 "student_images": student_images,
                 "teacher_images": teacher_images,
                 "targets": None,
                 "sample_ids": sample_ids,
             }
+            # Audit geometry is a separate side channel. IR supervised targets
+            # remain absent even when annotations are available for diagnostics.
+            if capture_geometry:
+                result["diagnostic_hflip"] = did_flip
+            return result
         raise ValueError(f"Unsupported physical source domain: {source_domain}")

@@ -1,12 +1,11 @@
 """Detector-neutral supervised and distillation losses for D3T."""
 
 import math
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence
 
 import torch
 from torch import Tensor
 import torch.nn.functional as F
-from torch import nn
 
 from models.d3t_adapter import (
     CriterionResult,
@@ -318,6 +317,7 @@ class D3TLossCriterion(D3TCriterion):
                     "loss_kd_uhl": zero,
                 },
                 metrics=metrics,
+                selected_masks=(),
             )
 
         total_rows = student_cls.shape[0]
@@ -387,6 +387,11 @@ class D3TLossCriterion(D3TCriterion):
                 "loss_kd_uhl": loss_kd_uhl,
             },
             metrics=self._metrics(device, int(selected.sum().item()), total_rows, hm_sum),
+            # Reuse the mask above rather than recomputing top-k for diagnostics.
+            # Splitting preserves batch-global selection and per-image identity.
+            selected_masks=tuple(selected.detach().split(
+                [p.class_logits.shape[0] for p in pair.teacher]
+            )),
         )
 
 

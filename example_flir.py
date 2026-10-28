@@ -17,6 +17,7 @@ from config import (
     LossConfig,
     OptimizerConfig,
     Phase,
+    PseudoLabelEvalConfig,
     SoftSAGAConfig,
     TeacherSchedule,
     TrainLoaderConfig,
@@ -177,6 +178,11 @@ def build_training_config(args) -> TrainingConfig:
         teacher_mode=args.teacher_mode,
         log_interval=args.log_interval,
         eval_period=args.eval_every,
+        pseudo_label_eval=PseudoLabelEvalConfig(
+            enabled=args.eval_pseudo_labels,
+            interval=args.pseudo_label_eval_interval,
+            iou_threshold=args.pseudo_label_iou_threshold,
+        ),
     )
 
 
@@ -333,6 +339,12 @@ def parse_args():
     parser.add_argument("--brightness-prob", type=float, default=0.3)
     parser.add_argument("--contrast-prob", type=float, default=0.3)
     parser.add_argument("--eval_every", type=int, default=500)
+    # Audit labels are independent of supervised targets and student validation.
+    parser.add_argument("--eval-pseudo-labels", action="store_true",
+                        help="Compare selected KD rows with IR GT; never train on IR GT")
+    parser.add_argument("--pseudo-label-eval-interval", type=int, default=500,
+                        help="Global iteration interval; defer to the next eligible IR batch")
+    parser.add_argument("--pseudo-label-iou-threshold", type=float, default=0.5)
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--device", default="cuda")
