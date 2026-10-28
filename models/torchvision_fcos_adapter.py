@@ -18,6 +18,8 @@ import torch.nn.functional as F
 
 from torchvision.models.detection.fcos import FCOSClassificationHead, FCOSHead
 
+from .domain_residual_neck import DomainResidualNeck, normalize_domain
+
 from .d3t_adapter import (
     AdapterOutput,
     DetectorAdapter,
@@ -207,6 +209,7 @@ class FCOSAdapterContext:
     raw_head_outputs: Mapping[str, Tensor]
     sample_ids: Optional[Tuple[str, ...]] = None
     class_names: Tuple[str, ...] = ("person", "car", "bicycle")
+    domain: str = "rgb"
 
     @property
     def transformed_image_sizes(self) -> Tuple[Tuple[int, int], ...]:
@@ -233,10 +236,13 @@ def _aligned_box_iou(pred_boxes: Tensor, target_boxes: Tensor, eps: float = 1e-7
 class TorchvisionFCOSAdapter(DetectorAdapter):
     """Run Torchvision FCOS once and expose D3T-compatible tensors."""
 
+    supports_domain_routing = True
+
     def __init__(
         self,
         detector: nn.Module,
         class_names: Sequence[str] = ("person", "car", "bicycle"),
+        domain_neck: Optional[DomainResidualNeck] = None,
     ) -> None:
         super().__init__()
         required = (
@@ -258,6 +264,7 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
             raise ValueError("class_names must be unique")
 
         self.detector = detector
+        self.domain_neck = domain_neck
         self.class_names = names
         self.num_classes = len(names)
 
@@ -315,7 +322,9 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
         images: Sequence[Tensor] | Tensor,
         targets: Optional[Targets] = None,
         sample_ids: Optional[Tuple[str, ...]] = None,
+        domain: str = "rgb",
     ) -> AdapterOutput:
+        resolved_domain = normalize_domain(domain)
         image_list = self._normalize_images(images)
         target_list = None if targets is None else list(targets)
         if target_list is not None and len(target_list) != len(image_list):
@@ -333,6 +342,8 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
         features = self.detector.backbone(transformed_images.tensors)
         if isinstance(features, Tensor):
             features = OrderedDict([("0", features)])
+        if self.domain_neck is not None:
+            features = self.domain_neck(features, domain=resolved_domain)
         feature_list = tuple(features.values())
         head_outputs = self.detector.head(feature_list)
         expected_keys = {"cls_logits", "bbox_regression", "quality_logits"}
@@ -401,6 +412,7 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
             raw_head_outputs=head_outputs,
             sample_ids=resolved_ids,
             class_names=self.class_names,
+            domain=resolved_domain,
         )
         return AdapterOutput(
             tuple(predictions), context=context, sample_ids=resolved_ids
