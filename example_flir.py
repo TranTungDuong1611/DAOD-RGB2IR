@@ -78,6 +78,7 @@ def build_training_config(args) -> TrainingConfig:
         phase3_end=phase3_end,
         phase2_rgb_sampling_ratio=args.phase2_rgb_ratio,
         phase3_rgb_sampling_ratio=args.phase3_rgb_ratio,
+        phase4_rgb_sampling_ratio=args.phase4_rgb_ratio,
     )
 
     return TrainingConfig(
@@ -128,7 +129,7 @@ def build_training_config(args) -> TrainingConfig:
             p2_distill_weight=0.7,
             p3_sup_weight=0.5,
             p3_distill_weight=1.0,
-            p4_sup_weight=0.0,
+            p4_sup_weight=1.0,
             p4_distill_weight=1.0,
             weight_logits=4.0,
             weight_deltas=1.0,
@@ -321,6 +322,10 @@ def parse_args():
     )
     parser.add_argument("--phase2-rgb-ratio", type=float, default=0.7)
     parser.add_argument("--phase3-rgb-ratio", type=float, default=0.3)
+    parser.add_argument(
+        "--phase4-rgb-ratio", type=float, default=0.2,
+        help="Fraction of phase-4 steps using supervised RGB; use 0 for IR-only",
+    )
     parser.add_argument("--hm-alpha", type=float, default=0.5)
     parser.add_argument("--hm-beta", type=float, default=0.5)
     parser.add_argument("--un-regular-alpha", type=float, default=1.0)

@@ -6,11 +6,50 @@ import torch
 from torch import nn
 
 from example_flir import _move_model_trio_to_device, make_training_config, parse_args
-from config import FCOSModelConfig
+from config import CurriculumConfig, FCOSModelConfig, Phase
 from models.torchvision_fcos_adapter import ClassificationInitMode
 
 
 class EntrypointConfigTests(unittest.TestCase):
+    def test_phase4_rgb_sampling_rejects_invalid_fractions(self):
+        for ratio in (-0.1, 1.1, float("nan"), float("inf")):
+            with self.subTest(ratio=ratio):
+                with self.assertRaises(ValueError):
+                    CurriculumConfig(phase4_rgb_sampling_ratio=ratio)
+
+    def test_phase4_rgb_sampling_defaults_to_twenty_percent(self):
+        with mock.patch.object(
+            sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
+        ):
+            config = make_training_config(parse_args())
+        self.assertEqual(getattr(config.curriculum, "phase4_rgb_sampling_ratio", None), 0.2)
+
+    def test_cli_can_disable_phase4_rgb_sampling(self):
+        with mock.patch.object(
+            sys, "argv",
+            ["example_flir.py", "--data_root", "synthetic", "--phase4-rgb-ratio", "0"],
+        ):
+            try:
+                args = parse_args()
+            except SystemExit:
+                self.fail("The phase-4 RGB ratio option must be accepted by the CLI")
+        config = make_training_config(args)
+        self.assertEqual(config.curriculum.phase4_rgb_sampling_ratio, 0.0)
+
+    def test_phase4_rgb_route_provides_supervision_without_teacher_updates(self):
+        with mock.patch.object(
+            sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
+        ):
+            config = make_training_config(parse_args())
+
+        route = config.mid_routing.get_routing("p4_rgb_supervised")
+        self.assertTrue(route.use_gt)
+        self.assertEqual(route.student_saga_level, "rgb")
+        self.assertEqual(route.teacher_saga_level, "rgb")
+        self.assertEqual(route.teacher_names, ())
+        self.assertEqual(route.ema_target, "none")
+        self.assertEqual(config.loss.get_phase_weights(Phase.PHASE4_IR_FOCUS), (1.0, 1.0))
+
     def test_default_resize_schedule_matches_d3t(self):
         with mock.patch.object(
             sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
