@@ -38,10 +38,6 @@ class D3TWrapper(nn.Module):
 
         return self.adapter.select_training_resize_short_edge()
 
-    @property
-    def supports_domain_routing(self) -> bool:
-        return self.adapter.supports_domain_routing
-
     @staticmethod
     def _normalize_images(images: Sequence[Tensor] | Tensor) -> Tuple[Tensor, ...]:
         if isinstance(images, Tensor):
@@ -100,11 +96,6 @@ class D3TWrapper(nn.Module):
     ) -> AdapterOutput:
         image_list = self._normalize_images(images)
         resolved_domain = normalize_domain(domain)
-        domain_kwargs = {}
-        if self.supports_domain_routing:
-            domain_kwargs["domain"] = resolved_domain
-        elif resolved_domain != "rgb":
-            raise ValueError("this detector adapter does not support domain routing")
         if targets is not None and len(targets) != len(image_list):
             raise ValueError("targets must match the image batch length")
 
@@ -120,7 +111,7 @@ class D3TWrapper(nn.Module):
                 image_list,
                 targets,
                 sample_ids=resolved_ids,
-                **domain_kwargs,
+                domain=resolved_domain,
             )
         if len(output.predictions) != len(image_list):
             raise ValueError("Adapter output must match the image batch length")

@@ -236,8 +236,6 @@ def _aligned_box_iou(pred_boxes: Tensor, target_boxes: Tensor, eps: float = 1e-7
 class TorchvisionFCOSAdapter(DetectorAdapter):
     """Run Torchvision FCOS once and expose D3T-compatible tensors."""
 
-    supports_domain_routing = True
-
     def __init__(
         self,
         detector: nn.Module,

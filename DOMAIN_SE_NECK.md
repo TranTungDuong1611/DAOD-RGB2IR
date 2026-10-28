@@ -27,6 +27,8 @@ Theo lựa chọn của người dùng, đường skip là convolution học đ�
 
 Tên teacher không chọn nhánh. Ví dụ route `p2_ir_flow` dùng IR teacher nhưng input là RGB qua SAGA nên cả hai forward chọn RGB. `thermal` là alias cho `ir` khi gọi module/model trực tiếp. Domain keyword mặc định là `rgb`; inference IR phải truyền `domain="ir"`.
 
+Interface thống nhất: mọi detector adapter nhận `domain` trong `forward`; wrapper, trainer, teacher và evaluator truyền trực tiếp tham số này. Adapter/model tùy biến cũng cần nhận `domain`, không có cờ kiểm tra khả năng hỗ trợ hoặc fallback bỏ qua domain.
+
 Student dùng cùng optimizer đang có. Nhánh không được chọn có gradient `None` và không được SGD cập nhật trong iteration đó; convolution chung và detection head vẫn nhận gradient. Attention weights là output theo input, còn tham số convolution sinh attention được optimizer học. Teacher chạy no-grad, được khởi tạo từ student và cập nhật bằng EMA hiện có trên toàn bộ model, gồm cả hai nhánh attention. Các nhánh của teacher có thể thay đổi qua EMA dù không được dùng trong forward của iteration đó.
 
 ## Chạy training

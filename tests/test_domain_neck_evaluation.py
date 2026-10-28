@@ -14,8 +14,6 @@ from models.fcos_factory import build_checkpoint_metadata, build_fcos_d3t_model
 
 
 class DomainEvaluationModel(nn.Module):
-    supports_domain_routing = True
-
     def __init__(self):
         super().__init__()
         self.rgb_se, self.ir_se = SEBlock(1, 1), SEBlock(1, 1)

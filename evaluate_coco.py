@@ -191,10 +191,7 @@ def _collect(model, loader, device: torch.device, domain: str = "ir"):
     with torch.inference_mode():
         for batch_index, (images, batch_targets, sample_ids) in enumerate(loader, start=1):
             images = images.to(device, non_blocking=True)
-            kwargs = {"sample_ids": sample_ids}
-            if getattr(model, "supports_domain_routing", False):
-                kwargs["domain"] = domain
-            output = model(images, **kwargs)
+            output = model(images, sample_ids=sample_ids, domain=domain)
             predictions.extend(
                 {key: value.detach().cpu() for key, value in item.items()}
                 for item in output

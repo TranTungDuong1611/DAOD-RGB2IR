@@ -262,15 +262,7 @@ class PhaseEvaluator:
                      for key, value in target.items()}
                     for target in targets
                 ]
-                if getattr(model, "supports_domain_routing", False):
-                    predictions = model(images, sample_ids=sample_ids, domain=domain)
-                else:
-                    # Preserve legacy model support without hiding errors in
-                    # domain-aware attention by retrying with the RGB default.
-                    try:
-                        predictions = model(images, sample_ids=sample_ids)
-                    except TypeError:
-                        predictions = model(images)
+                predictions = model(images, sample_ids=sample_ids, domain=domain)
                 self.evaluator.update(predictions, targets)
         metrics = self.evaluator.compute()
         logger.info(

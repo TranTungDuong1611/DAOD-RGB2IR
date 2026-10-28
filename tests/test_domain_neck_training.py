@@ -19,8 +19,6 @@ from test_curriculum_wrapper_integration import build_config, RGBDataset, IRData
 
 class SmallDomainAdapter(DetectorAdapter):
     """Real neck and loss graph with a minimal detector-neutral prediction head."""
-    supports_domain_routing = True
-
     def __init__(self):
         super().__init__()
         self.domain_neck = DomainResidualNeck(4, 4, se_reduction=2)

@@ -22,8 +22,9 @@ class TinyAdapter(DetectorAdapter):
         self.count = count
         self.forward_calls = 0
 
-    def forward(self, images, targets=None, sample_ids=None):
+    def forward(self, images, targets=None, sample_ids=None, domain="rgb"):
         self.forward_calls += 1
+        self.last_domain = domain
         predictions = tuple(Predictions(
             self.weight.expand(self.count, 3),
             self.weight.expand(self.count, 4),
@@ -65,6 +66,16 @@ class WrapperTests(unittest.TestCase):
     def setUp(self):
         self.images = [torch.zeros(3, 8, 8)]
         self.targets = [{'boxes': torch.empty(0, 4), 'labels': torch.empty(0, dtype=torch.long)}]
+
+    def test_raw_forwards_normalized_ir_domain_without_capability_flag(self):
+        model = D3TWrapper(TinyAdapter(), TinyCriterion())
+        model.raw(self.images, domain="thermal")
+        self.assertEqual(model.adapter.last_domain, "ir")
+
+    def test_default_forward_passes_rgb_domain_to_adapter(self):
+        model = D3TWrapper(TinyAdapter(), TinyCriterion())
+        model(self.images, self.targets)
+        self.assertEqual(model.adapter.last_domain, "rgb")
 
     def test_supervised_keeps_native_loss_and_gradient(self):
         model = D3TWrapper(TinyAdapter(), TinyCriterion())

@@ -183,9 +183,8 @@ class CurriculumDomainAdaptationTrainer:
         resize_short_edge = None if select_resize is None else select_resize()
         student_raw_kwargs = {
             "sample_ids": sample_ids,
+            "domain": data["student_domain"],
         }
-        if getattr(self.student, "supports_domain_routing", False):
-            student_raw_kwargs["domain"] = data["student_domain"]
         if resize_short_edge is not None:
             student_raw_kwargs["resize_short_edge"] = resize_short_edge
         student_output = self.student.raw(
