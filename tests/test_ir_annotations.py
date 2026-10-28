@@ -70,3 +70,22 @@ def test_ir_reader_rejects_xml_dimensions_from_a_different_image(tmp_path):
     )
     record, = IRAnnotationReader(tmp_path).read(("a",), ((10, 20),), hflipped=False)
     assert record.status == "invalid"
+
+
+@pytest.mark.parametrize("root_tag", ["annotation", "Annotation"])
+def test_ir_reader_accepts_flir_annotation_root_casing(tmp_path, root_tag):
+    from data.ir_annotations import IRAnnotationReader
+
+    # Real FLIR exports use a capitalized root with lowercase child elements.
+    # Keep image dimensions and a box from the reported failing sample.
+    stem = "FLIR_01726_PreviewData"
+    (tmp_path / "Annotations" / f"{stem}.xml").write_text(
+        f"<{root_tag}><size><width>640</width><height>512</height></size>"
+        "<object><name>car</name><bndbox>"
+        "<xmin>526</xmin><ymin>225</ymin><xmax>638</xmax><ymax>328</ymax>"
+        f"</bndbox></object></{root_tag}>"
+    )
+    record, = IRAnnotationReader(tmp_path).read((stem,), ((512, 640),), hflipped=False)
+    assert record.status == "available"
+    torch.testing.assert_close(record.target["boxes"], torch.tensor([[526., 225., 638., 328.]]))
+    assert record.target["labels"].tolist() == [1]
