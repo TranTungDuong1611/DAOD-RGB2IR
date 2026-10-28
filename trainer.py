@@ -16,12 +16,10 @@ from models.d3t_adapter import DistillationSettings
 from models.d3t_wrapper import D3TWrapper as D3TWrapper
 from scheduler import CurriculumScheduler, DomainStep
 from data.augmentations import StudentAugmentor
-from data.ir_annotations import IRAnnotationReader
 from training import teachers
 from training.data_flow import RouteDataFlow
 from training.loss_flow import LossFlow, component_weight
 from training.observability import log_iteration, log_pseudo_label_evaluation
-from training.pseudo_label_eval import evaluate_pseudo_labels
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +38,7 @@ class CurriculumDomainAdaptationTrainer:
         ir_loader: Optional[DataLoader] = None,
         phase_evaluator: Any = None,
         lr_scheduler: Any = None,
+        pseudo_label_evaluator: Any = None,
     ) -> None:
         # Retain the live dependencies and effective configuration on the
         # orchestrator so execution modules receive resolved inputs per step.
@@ -66,14 +65,13 @@ class CurriculumDomainAdaptationTrainer:
         self.best_map = 0.0
         self.loss_history = defaultdict(list)
         self.ema_initialized = False
-        # Audit labels have their own reader and progress. They never enter a
-        # training loader, supervised target, evaluator history, or best score.
+        # Bootstrap supplies isolated IR validation loaders. Audit progress stays
+        # separate from student validation history and best-checkpoint selection.
         self.last_pseudo_label_eval_step = 0
-        audit_cfg = config.pseudo_label_eval
-        self.ir_annotation_reader = (
-            IRAnnotationReader(config.data.root)
-            if audit_cfg.enabled else None
-        )
+        self.last_full_pseudo_label_eval_step = 0
+        self.pseudo_label_evaluator = pseudo_label_evaluator
+        if config.pseudo_label_eval.enabled and config.workflow != "rgb_baseline" and pseudo_label_evaluator is None:
+            raise ValueError("enabled pseudo-label evaluation requires an IR validation evaluator")
 
     def _teacher_models(self):
         # References stay on the trainer so checkpoint keys and ownership are unchanged.
@@ -106,9 +104,6 @@ class CurriculumDomainAdaptationTrainer:
             ),
             teacher_alpha=(
                 alpha_map[route.teacher_saga_level] if source_domain == "rgb" else None
-            ),
-            capture_geometry=self.scheduler.should_evaluate_pseudo_labels(
-                self.global_step, step_name, last_eval_step=self.last_pseudo_label_eval_step
             ),
         )
 
@@ -163,7 +158,7 @@ class CurriculumDomainAdaptationTrainer:
             deltas=config.weight_deltas, logits=config.weight_logits,
         )
 
-    def train_one_iteration(self) -> Dict[str, float]:
+    def train_one_iteration(self) -> Dict[str, Any]:
         # Route selection: the baseline uses its fixed supervised route, while
         # curriculum training asks the scheduler for the current step's route.
         self.student.train()
@@ -223,8 +218,6 @@ class CurriculumDomainAdaptationTrainer:
 
         # Distillation contribution: use only enabled, initialized references.
         # Each teacher consumes the paired view with the student's resize.
-        audit_records = []
-        audit_annotations = None
         if (
             self.config.workflow != "rgb_baseline"
             and self.ema_initialized
@@ -240,7 +233,7 @@ class CurriculumDomainAdaptationTrainer:
                     resize_short_edge=resize_short_edge,
                 )
                 settings = self._distillation_settings(teacher_name, phase)
-                kd_result = losses.distill(
+                losses.distill(
                     self.student,
                     student_output,
                     teacher_output,
@@ -248,31 +241,6 @@ class CurriculumDomainAdaptationTrainer:
                     teacher_name=teacher_name,
                     phase_weight=distill_weight,
                 )
-                # Observe the outputs/masks from this exact KD call, before the
-                # optimizer or EMA update. Do not forward GT through a model or
-                # use it to select/weight any KD row.
-                if "diagnostic_hflip" in data:
-                    if audit_annotations is None:
-                        audit_annotations = self.ir_annotation_reader.read(
-                            sample_ids, teacher_output.context.original_image_sizes,
-                            hflipped=data["diagnostic_hflip"],
-                        )
-                    metrics = evaluate_pseudo_labels(
-                        teacher.adapter, teacher_output, kd_result.selected_masks,
-                        audit_annotations, iou_threshold=self.config.pseudo_label_eval.iou_threshold,
-                    )
-                    audit_records.append({
-                        "global_step": self.global_step + 1,
-                        "phase": phase.name, "step_type": step_name,
-                        "source_domain": "ir", "teacher": teacher_name,
-                        "sample_ids": list(sample_ids),
-                        "annotation_status": [r.status for r in audit_annotations],
-                        "hflipped": data["diagnostic_hflip"],
-                        "top_ratio": settings.top_ratio, "min_hm": settings.min_hm,
-                        "hm_alpha": settings.hm_alpha, "hm_beta": settings.hm_beta,
-                        "iou_threshold": self.config.pseudo_label_eval.iou_threshold,
-                        "metrics": metrics,
-                    })
 
         # Preserve the existing optimizer eligibility rule, including a scalar
         # fallback when this route produced no differentiable contributions.
@@ -319,14 +287,44 @@ class CurriculumDomainAdaptationTrainer:
         self.loss_history[step_name].append(logs["total_loss"])
         self.global_step += 1
         logs["global_step"] = self.global_step
-        # Audit output has an independent cadence; preserve ordinary training
-        # logs and student validation/checkpoint selection exactly as before.
-        if audit_records:
-            self.last_pseudo_label_eval_step = self.global_step
-            logs["pseudo_label_evaluations"] = audit_records
-            for record in audit_records:
-                log_pseudo_label_evaluation(record, output_dir=self.config.output_dir, logger=logger)
+        # Observe the current teachers after the iteration/EMA update using a
+        # separate fixed dataset, never the train batch or supervised targets.
+        if (
+            self.pseudo_label_evaluator is not None and self.ema_initialized
+            and self.scheduler.should_evaluate_pseudo_labels(
+                self.global_step - 1, last_eval_step=self.last_pseudo_label_eval_step
+            )
+        ):
+            logs["pseudo_label_evaluations"] = self._evaluate_pseudo_labels(phase)
         return logs
+
+    def _evaluate_pseudo_labels(self, phase, *, full_dataset=False):
+        """Resolve teacher/settings policy and delegate isolated IR evaluation."""
+        names = ("rgb", "ir") if self.config.teacher_mode == "two_teacher" else (self.config.teacher_mode,)
+        records = []
+        for name in names:
+            settings = self._distillation_settings(name, phase)
+            result = self.pseudo_label_evaluator.evaluate(
+                self._teacher_for_name(name), settings,
+                iou_threshold=self.config.pseudo_label_eval.iou_threshold,
+                resize_short_edge=self.config.model.min_sizes[-1], full_dataset=full_dataset,
+            )
+            records.append({
+                **result, "global_step": self.global_step, "phase": phase.name,
+                "source_domain": "ir", "teacher": name,
+                "trigger": "final" if full_dataset else "periodic",
+                "top_ratio": settings.top_ratio, "min_hm": settings.min_hm,
+                "hm_alpha": settings.hm_alpha, "hm_beta": settings.hm_beta,
+                "resize_short_edge": self.config.model.min_sizes[-1],
+                "iou_threshold": self.config.pseudo_label_eval.iou_threshold,
+            })
+        for record in records:
+            log_pseudo_label_evaluation(record, output_dir=self.config.output_dir, logger=logger)
+        if full_dataset:
+            self.last_full_pseudo_label_eval_step = self.global_step
+        else:
+            self.last_pseudo_label_eval_step = self.global_step
+        return records
 
     def train(self) -> None:
         logger.info(
@@ -357,6 +355,15 @@ class CurriculumDomainAdaptationTrainer:
             if self.global_step > 0 and self.global_step % 5000 == 0:
                 self.save_checkpoint(f"checkpoint_{self.global_step:06d}.pth")
 
+        # A normal completed run also measures every IR validation image once.
+        # Persisting this flag makes resuming a completed final model idempotent.
+        if (self.pseudo_label_evaluator is not None and self.ema_initialized
+                and self.global_step >= self.config.max_iter
+                and self.last_full_pseudo_label_eval_step != self.global_step):
+            self._evaluate_pseudo_labels(
+                self.config.get_phase(max(0, self.global_step - 1)), full_dataset=True,
+            )
+
     def save_checkpoint(self, filename: str) -> None:
         from models.fcos_factory import build_checkpoint_metadata
 
@@ -370,6 +377,9 @@ class CurriculumDomainAdaptationTrainer:
             "best_map": self.best_map,
             "ema_initialized": self.ema_initialized,
             "last_pseudo_label_eval_step": self.last_pseudo_label_eval_step,
+            "last_full_pseudo_label_eval_step": self.last_full_pseudo_label_eval_step,
+            "pseudo_label_evaluator": (None if self.pseudo_label_evaluator is None
+                                       else self.pseudo_label_evaluator.state_dict()),
             "student": self.student.state_dict(),
             "rgb_teacher": None if self.rgb_teacher is None else self.rgb_teacher.state_dict(),
             "ir_teacher": None if self.ir_teacher is None else self.ir_teacher.state_dict(),
@@ -439,8 +449,12 @@ class CurriculumDomainAdaptationTrainer:
         self.best_map = float(checkpoint.get("best_map", 0.0))
         self.ema_initialized = bool(checkpoint.get("ema_initialized", False))
         # Older baseline checkpoints do not carry observer progress. An audit
-        # becomes eligible at the next IR KD batch if a global tick has passed.
+        # is eligible after teacher initialization if a global tick has passed.
         self.last_pseudo_label_eval_step = int(checkpoint.get("last_pseudo_label_eval_step", 0))
+        self.last_full_pseudo_label_eval_step = int(checkpoint.get("last_full_pseudo_label_eval_step", 0))
+        audit_state = checkpoint.get("pseudo_label_evaluator")
+        if self.pseudo_label_evaluator is not None and audit_state is not None:
+            self.pseudo_label_evaluator.load_state_dict(audit_state)
         logger.info("Resumed from step %s", self.global_step)
 
     def _log(self, log: Dict[str, Any]) -> None:

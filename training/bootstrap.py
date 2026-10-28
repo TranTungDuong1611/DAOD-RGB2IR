@@ -4,13 +4,18 @@ import logging
 import os
 
 import torch
+from torch.utils.data import DataLoader, Subset
 
 from config import TrainingConfig
 from data import FLIR_CLASSES, NUM_CLASSES, build_dataloaders
+from data.datasets import FLIRIRDataset
+from data.dataloaders import ir_collate
+from data.ir_annotations import IRAnnotationReader
 from evaluator import DetectionEvaluator, PhaseEvaluator
 from models.fcos_factory import build_fcos_d3t_trio
 from optimization import build_lr_scheduler, build_optimizer
 from trainer import CurriculumDomainAdaptationTrainer
+from training.pseudo_label_eval import FixedIRPseudoLabelEvaluator, select_fixed_ir_subset
 
 
 def move_model_trio_to_device(student, rgb_teacher, ir_teacher, device):
@@ -22,6 +27,34 @@ def move_model_trio_to_device(student, rgb_teacher, ir_teacher, device):
     if ir_teacher is not None:
         ir_teacher = ir_teacher.to(device)
     return student, rgb_teacher, ir_teacher
+
+
+def build_pseudo_label_evaluator(config, *, logger):
+    """Resolve audit policy once and assemble dedicated, deterministic IR loaders."""
+    audit = config.pseudo_label_eval
+    if not audit.enabled or config.workflow == "rgb_baseline":
+        return None
+    dataset = FLIRIRDataset(config.data.root, split="validation")
+    reader = IRAnnotationReader(config.data.root)
+    indices = select_fixed_ir_subset(
+        dataset.ir_paths, reader, sample_size=audit.sample_size, seed=audit.subset_seed,
+    )
+    # Each loader owns a generator so iterator/worker seeding never consumes
+    # the global RNG used by training. Retain the final incomplete batch.
+    def loader(data):
+        return DataLoader(
+            data, batch_size=config.loader.eval.batch_size,
+            num_workers=config.loader.eval.num_workers, shuffle=False, drop_last=False,
+            pin_memory=config.device.startswith("cuda"), collate_fn=ir_collate,
+            generator=torch.Generator().manual_seed(audit.subset_seed),
+        )
+    logger.info("Pseudo-label IR validation: fixed_images=%d full_images=%d batch_size=%d seed=%d",
+                len(indices), len(dataset), config.loader.eval.batch_size, audit.subset_seed)
+    return FixedIRPseudoLabelEvaluator(
+        fixed_loader=loader(Subset(dataset, indices)), full_loader=loader(dataset),
+        reader=reader, device=torch.device(config.device),
+        fixed_sample_ids=tuple(dataset.ir_paths[i].stem for i in indices),
+    )
 
 
 def build_training(
@@ -80,6 +113,7 @@ def build_training(
         ir_loader=ir_train_loader,
         phase_evaluator=phase_evaluator,
         lr_scheduler=lr_scheduler,
+        pseudo_label_evaluator=build_pseudo_label_evaluator(config, logger=logger),
     )
 
     # Connect an evaluator improvement to saving the complete training state.

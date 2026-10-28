@@ -77,17 +77,16 @@ class CurriculumScheduler:
             return "ir"
         raise ValueError(f"Unsupported curriculum step: {step_name}")
 
-    def should_evaluate_pseudo_labels(self, global_step, step_name, *, last_eval_step):
-        """Check the completed iteration's window without consuming a route.
+    def should_evaluate_pseudo_labels(self, global_step, *, last_eval_step):
+        """Check global windows; fixed IR evaluation is independent of train routes.
 
-        An RGB batch leaves evaluation pending for the next real IR KD pass.
-        Compare global windows so a deferred audit does not shift future ticks.
+        The trainer separately requires initialized teachers. A delayed first
+        pass does not shift later iteration boundaries or consume loader routes.
         """
         cfg = self.config.pseudo_label_eval
         completed_step = global_step + 1
         return (
             cfg.enabled
-            and self.get_source_domain(step_name) == "ir"
             and completed_step // cfg.interval > last_eval_step // cfg.interval
         )
 

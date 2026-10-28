@@ -110,6 +110,8 @@ def test_fixed_and_full_passes_keep_last_batch_and_restore_model_and_rng(validat
     cpu_rng, python_rng, numpy_rng = torch.get_rng_state().clone(), random.getstate(), np.random.get_state()
     settings = DistillationSettings(.1, 0.)
     for full, images, batches in [(False, 3, 2), (True, 5, 3)]:
+        loader = evaluator.full_loader if full else evaluator.fixed_loader
+        loader_rng = loader.generator.get_state().clone()
         result = evaluator.evaluate(model, settings, iou_threshold=.5,
                                     resize_short_edge=64, full_dataset=full)
         assert result["images"] == images and result["batches"] == batches
@@ -118,6 +120,7 @@ def test_fixed_and_full_passes_keep_last_batch_and_restore_model_and_rng(validat
         assert {n: m.training for n, m in model.named_modules()} == modes
         assert torch.equal(torch.get_rng_state(), cpu_rng)
         assert random.getstate() == python_rng
+        assert torch.equal(loader.generator.get_state(), loader_rng)
         after = np.random.get_state()
         assert numpy_rng[0] == after[0] and np.array_equal(numpy_rng[1], after[1])
         assert numpy_rng[2:] == after[2:]
@@ -148,3 +151,42 @@ def test_resume_rejects_changed_fixed_subset_manifest(validation_root):
     state["fixed_sample_ids"] = ["different-image"]
     with pytest.raises(ValueError, match="subset"):
         evaluator.load_state_dict(state)
+
+
+def test_bootstrap_builds_isolated_fixed_and_full_validation_loaders(validation_root):
+    import logging
+    from config import DataConfig, PseudoLabelEvalConfig, TrainingConfig
+    from training.bootstrap import build_pseudo_label_evaluator
+
+    config = TrainingConfig(device="cpu", data=DataConfig(root=str(validation_root)),
+                            pseudo_label_eval=PseudoLabelEvalConfig(enabled=True, sample_size=3))
+    config.loader.eval.batch_size = 2
+    config.loader.eval.num_workers = 0
+    before = torch.get_rng_state().clone()
+    evaluator = build_pseudo_label_evaluator(config, logger=logging.getLogger(__name__))
+    assert torch.equal(torch.get_rng_state(), before)
+    assert len(evaluator.fixed_loader.dataset) == 3
+    assert len(evaluator.full_loader.dataset) == 5
+    assert evaluator.fixed_loader.generator is not None
+    assert evaluator.full_loader.generator is not None
+    assert not evaluator.full_loader.drop_last
+    config.pseudo_label_eval.enabled = False
+    assert build_pseudo_label_evaluator(config, logger=logging.getLogger(__name__)) is None
+
+
+def test_fixed_subset_fails_clearly_when_no_validation_labels_are_available(validation_root):
+    from training.pseudo_label_eval import select_fixed_ir_subset
+
+    for path in (validation_root / "Annotations").glob("*.xml"):
+        path.unlink()
+    dataset = FLIRIRDataset(validation_root, split="validation")
+    with pytest.raises(ValueError, match="no valid IR validation annotations"):
+        select_fixed_ir_subset(dataset.ir_paths, IRAnnotationReader(validation_root), sample_size=3, seed=0)
+
+
+def test_fixed_pass_rejects_changed_image_order(validation_root):
+    evaluator = make_evaluator(validation_root)
+    evaluator.fixed_sample_ids = tuple(reversed(evaluator.fixed_sample_ids))
+    model = D3TWrapper(build_adapter(), D3TLossCriterion())
+    with pytest.raises(ValueError, match="order"):
+        evaluator.evaluate(model, DistillationSettings(.1, 0.), iou_threshold=.5, resize_short_edge=64)

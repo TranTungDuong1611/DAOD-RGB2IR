@@ -141,12 +141,13 @@ def select_fixed_ir_subset(image_paths, reader, *, sample_size, seed):
 
 
 @contextmanager
-def _preserve_evaluation_state(model):
+def _preserve_evaluation_state(model, generator):
     """Leave training RNG and every pre-existing model mode intact, even on errors."""
     modes = [(module, module.training) for module in model.modules()]
     python_rng, numpy_rng = random.getstate(), np.random.get_state()
     cpu_rng = torch.get_rng_state()
     cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+    loader_rng = generator.get_state() if generator is not None else None
     try:
         model.eval()
         yield
@@ -158,6 +159,8 @@ def _preserve_evaluation_state(model):
         torch.set_rng_state(cpu_rng)
         if cuda_rng is not None:
             torch.cuda.set_rng_state_all(cuda_rng)
+        if loader_rng is not None:
+            generator.set_state(loader_rng)
 
 
 class FixedIRPseudoLabelEvaluator:
@@ -185,7 +188,7 @@ class FixedIRPseudoLabelEvaluator:
         batch_metrics, sample_ids = [], []
         # No student forward, target-dependent selection, backward, or EMA is
         # performed here. Teacher weights stay fixed throughout the entire pass.
-        with _preserve_evaluation_state(teacher), torch.inference_mode():
+        with _preserve_evaluation_state(teacher, loader.generator), torch.inference_mode():
             for images, ids in loader:
                 images = (images.to(self.device) if isinstance(images, torch.Tensor)
                           else tuple(image.to(self.device) for image in images))
@@ -198,6 +201,8 @@ class FixedIRPseudoLabelEvaluator:
                 sample_ids.extend(ids)
         if not batch_metrics:
             raise ValueError("pseudo-label evaluation loader is empty")
+        if not full_dataset and tuple(sample_ids) != self.fixed_sample_ids:
+            raise ValueError("fixed pseudo-label evaluation image order changed")
         return {
             "scope": "full_ir_validation" if full_dataset else "fixed_ir_validation",
             "images": len(sample_ids), "batches": len(batch_metrics),

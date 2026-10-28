@@ -50,15 +50,14 @@ def test_ir_reader_distinguishes_missing_invalid_and_annotated_empty(tmp_path):
     assert records[1].target["boxes"].shape == (0, 4)
 
 
-def test_ir_geometry_capture_never_exposes_supervised_targets():
+def test_ir_training_never_exposes_supervised_targets():
     config = TrainingConfig(device="cpu", aug=AugConfig(hflip_prob=1., blur_prob=0.,
                                                        brightness_prob=0., contrast_prob=0.))
     images = torch.arange(24.).reshape(1, 3, 2, 4)
     flow = RouteDataFlow([], [(images, ("a",))], device="cpu", augmentor=StudentAugmentor(config))
     data = flow.prepare(source_domain="ir", use_gt=True, student_alpha=None,
-                        teacher_alpha=None, capture_geometry=True)
+                        teacher_alpha=None)
     assert data["targets"] is None
-    assert data["diagnostic_hflip"] is True
     torch.testing.assert_close(data["teacher_images"], images.flip(-1))
 
 
