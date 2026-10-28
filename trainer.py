@@ -3,7 +3,6 @@
 from collections import defaultdict
 import logging
 import os
-from pathlib import Path
 import time
 from typing import Any, Dict, Optional
 
@@ -72,7 +71,7 @@ class CurriculumDomainAdaptationTrainer:
         self.last_pseudo_label_eval_step = 0
         audit_cfg = config.pseudo_label_eval
         self.ir_annotation_reader = (
-            IRAnnotationReader(audit_cfg.annotation_dir or Path(config.data.root) / "Annotations")
+            IRAnnotationReader(config.data.root)
             if audit_cfg.enabled else None
         )
 

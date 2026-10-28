@@ -17,8 +17,9 @@ class IRAnnotation:
 
 
 class IRAnnotationReader:
-    def __init__(self, annotation_dir):
-        self.annotation_dir = Path(annotation_dir)
+    def __init__(self, data_root):
+        # Share the dataset root and its existing VOC annotation layout.
+        self.root = Path(data_root)
 
     def read(self, sample_ids, image_sizes, *, hflipped: bool):
         """Read by training sample identity and apply its already sampled flip."""
@@ -32,7 +33,7 @@ class IRAnnotationReader:
         # background. Do not filter images out of the existing training loader.
         if not isinstance(stem, str) or Path(stem).name != stem or stem in {"", ".", ".."}:
             raise ValueError("IR annotation ID must be a file stem")
-        path = self.annotation_dir / f"{stem}.xml"
+        path = self.root / "Annotations" / f"{stem}.xml"
         try:
             root = ET.parse(path).getroot()
         except FileNotFoundError:

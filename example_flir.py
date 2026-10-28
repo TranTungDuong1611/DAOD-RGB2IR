@@ -181,7 +181,6 @@ def build_training_config(args) -> TrainingConfig:
             enabled=args.eval_pseudo_labels,
             interval=args.pseudo_label_eval_interval,
             iou_threshold=args.pseudo_label_iou_threshold,
-            annotation_dir=args.ir_annotation_dir,
         ),
     )
 
@@ -341,8 +340,6 @@ def parse_args():
     parser.add_argument("--pseudo-label-eval-interval", type=int, default=500,
                         help="Global iteration interval; defer to the next eligible IR batch")
     parser.add_argument("--pseudo-label-iou-threshold", type=float, default=0.5)
-    parser.add_argument("--ir-annotation-dir", default=None,
-                        help="Audit XML directory; defaults to data_root/Annotations")
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--device", default="cuda")

@@ -338,12 +338,11 @@ class DataLoaderConfig:
 
 @dataclass
 class PseudoLabelEvalConfig:
-    """Audit cadence and label location; these settings never control KD."""
+    """Audit cadence and scoring threshold; these settings never control KD."""
 
     enabled: bool = False
     interval: int = 500
     iou_threshold: float = 0.5
-    annotation_dir: Optional[str] = None
 
     def __post_init__(self):
         if isinstance(self.interval, bool) or not isinstance(self.interval, int) or self.interval <= 0:

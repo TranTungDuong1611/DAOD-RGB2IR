@@ -13,20 +13,27 @@ from example_flir import build_training_config, parse_args
 from scheduler import CurriculumScheduler
 
 
-def test_cli_keeps_audit_opt_in_and_allows_separate_interval_and_label_directory():
+def test_cli_keeps_audit_opt_in_and_allows_interval_and_iou_overrides():
     with mock.patch.object(sys, "argv", ["example_flir.py", "--data_root", "data"]):
         config = build_training_config(parse_args())
     assert not config.pseudo_label_eval.enabled
     with mock.patch.object(sys, "argv", [
         "example_flir.py", "--data_root", "data", "--eval-pseudo-labels",
         "--pseudo-label-eval-interval", "20", "--pseudo-label-iou-threshold", ".7",
-        "--ir-annotation-dir", "audit-labels",
     ]):
         config = build_training_config(parse_args())
     assert config.pseudo_label_eval.enabled
     assert config.pseudo_label_eval.interval == 20
     assert config.pseudo_label_eval.iou_threshold == .7
-    assert config.pseudo_label_eval.annotation_dir == "audit-labels"
+
+
+def test_cli_rejects_separate_ir_annotation_directory():
+    with mock.patch.object(sys, "argv", [
+        "example_flir.py", "--data_root", "data", "--ir-annotation-dir", "audit-labels",
+    ]):
+        with pytest.raises(SystemExit) as error:
+            parse_args()
+    assert error.value.code == 2
 
 
 def test_cadence_defers_to_ir_and_stays_on_global_500_iteration_boundaries():

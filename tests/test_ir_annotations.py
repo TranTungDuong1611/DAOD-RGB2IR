@@ -14,13 +14,14 @@ from training.data_flow import RouteDataFlow
 @pytest.fixture
 def tmp_path():
     with tempfile.TemporaryDirectory() as directory:
+        (Path(directory) / "Annotations").mkdir()
         yield Path(directory)
 
 
 def test_ir_reader_preserves_small_boxes_and_aligns_horizontal_flip(tmp_path):
     from data.ir_annotations import IRAnnotationReader
 
-    (tmp_path / "a.xml").write_text(
+    (tmp_path / "Annotations" / "a.xml").write_text(
         "<annotation><object><name>person</name><bndbox>"
         "<xmin>1</xmin><ymin>2</ymin><xmax>3</xmax><ymax>4</ymax>"
         "</bndbox></object></annotation>"
@@ -34,9 +35,9 @@ def test_ir_reader_preserves_small_boxes_and_aligns_horizontal_flip(tmp_path):
 def test_ir_reader_distinguishes_missing_invalid_and_annotated_empty(tmp_path):
     from data.ir_annotations import IRAnnotationReader
 
-    (tmp_path / "empty.xml").write_text("<annotation/>")
-    (tmp_path / "broken.xml").write_text("<annotation>")
-    (tmp_path / "badbox.xml").write_text(
+    (tmp_path / "Annotations" / "empty.xml").write_text("<annotation/>")
+    (tmp_path / "Annotations" / "broken.xml").write_text("<annotation>")
+    (tmp_path / "Annotations" / "badbox.xml").write_text(
         "<annotation><object><name>car</name><bndbox>"
         "<xmin>nan</xmin><ymin>0</ymin><xmax>4</xmax><ymax>5</ymax>"
         "</bndbox></object></annotation>"
@@ -64,7 +65,7 @@ def test_ir_geometry_capture_never_exposes_supervised_targets():
 def test_ir_reader_rejects_xml_dimensions_from_a_different_image(tmp_path):
     from data.ir_annotations import IRAnnotationReader
 
-    Path(tmp_path / "a.xml").write_text(
+    Path(tmp_path / "Annotations" / "a.xml").write_text(
         "<annotation><size><width>99</width><height>10</height></size></annotation>"
     )
     record, = IRAnnotationReader(tmp_path).read(("a",), ((10, 20),), hflipped=False)

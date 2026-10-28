@@ -18,8 +18,8 @@ Optional arguments:
 | `--eval-pseudo-labels` | Off | Enable observation without changing supervision |
 | `--pseudo-label-eval-interval` | `500` | Global training iteration interval |
 | `--pseudo-label-iou-threshold` | `0.5` | Minimum IoU for a valid selected row |
-| `--ir-annotation-dir` | `data_root/Annotations` | Directory of IR VOC XML files |
 
+Annotations always come from `data_root/Annotations`, sharing the dataset root.
 For each IR sample ID, the reader looks up `<sample_id>.xml`. The class mapping
 is `person=0`, `car=1`, `bicycle=2`, matching the existing FLIR loaders. Small
 boxes are retained, as in IR validation. Optional XML image dimensions must
