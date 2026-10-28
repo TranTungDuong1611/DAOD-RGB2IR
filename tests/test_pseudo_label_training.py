@@ -31,6 +31,7 @@ def make_trainer(base, directory, *, enabled, interval=2):
     config.model.min_sizes = tuple(base.adapter.detector.transform.min_size)
     config.model.max_size = base.adapter.detector.transform.max_size
     config.loader.eval.batch_size = 2
+    config.loss.p4_sup_weight = 1.0
     schedule = TeacherSchedule(phase1=(.1, 0.), phase2=(.1, 0.),
                                phase3=(.1, 0.), phase4=(.1, 0.))
     config.distill.rgb_teacher = config.distill.ir_teacher = schedule
@@ -85,7 +86,10 @@ def test_trainer_audits_fixed_ir_validation_and_resumes_without_duplicate_window
         assert all(r["sample_ids"] == records[0]["sample_ids"] for r in records)
         assert student_raw.call_count == 9
         assert rgb_raw.call_count == 13  # 5 training + 4 audits of 2 batches.
-        assert ir_raw.call_count == 13
+        assert ir_raw.call_count == 12  # Phase-4 RGB supervision has no teacher forward.
+        assert logs[7]["step_type"] == "p4_rgb_supervised"
+        assert any(k.startswith("sup_") for k in logs[7])
+        assert not any(k.startswith("loss_kd_") for k in logs[7])
         for call in student_raw.call_args_list:
             if call.kwargs["sample_ids"] == ("a",):
                 assert call.args[1] is None
@@ -204,3 +208,35 @@ def test_training_completion_evaluates_full_ir_validation_once_and_saves_progres
         restored.load_checkpoint(str(Path(directory) / "complete.pth"))
         restored.train()
         assert len(path.read_text().splitlines()) == len(records)
+
+
+def test_cli_smoke_runs_all_phases_and_persists_final_full_audit():
+    import sys
+    from example_flir import main, parse_args
+
+    base = D3TWrapper(build_adapter(), D3TLossCriterion())
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        write_annotation(root)
+        (root / "align_train.txt").write_text("a\nb\nc\nd\ne\n")
+        for stem in "abcde":
+            Image.new("RGB", (48, 32), color=(80, 60, 40)).save(root / "JPEGImages" / f"{stem}_RGB.jpg")
+        args = ["example_flir.py", "--data_root", str(root), "--output_dir", str(root / "out"),
+                "--device", "cpu", "--weights", "none", "--no-pretrained-backbone",
+                "--total_iters", "4", "--phase1-end", "1", "--phase2-end", "2", "--phase3-end", "3",
+                "--batch_size", "1", "--eval_batch_size", "2", "--workers", "0",
+                "--min-sizes", "64", "--max_size", "128", "--eval-pseudo-labels",
+                "--pseudo-label-eval-interval", "1", "--pseudo-label-eval-samples", "3"]
+        # Keep real CLI/config/data/optimizer/evaluation/checkpoint execution;
+        # replace only heavyweight model assembly with actual tiny-backbone FCOS.
+        with mock.patch.object(sys, "argv", args), \
+             mock.patch("training.bootstrap.build_fcos_d3t_trio",
+                        side_effect=lambda config: tuple(copy.deepcopy(base) for _ in range(3))), \
+             mock.patch("example_flir.configure_training_logging", return_value=root / "train.log"):
+            main(parse_args())
+        final = torch.load(root / "out" / "final_model.pth", weights_only=False)
+        assert final["global_step"] == 4
+        assert final["last_full_pseudo_label_eval_step"] == 4
+        records = [json.loads(line) for line in (root / "out" / "logs" / "pseudo_label_eval.jsonl").read_text().splitlines()]
+        assert len(records) == 8
+        assert [r["images"] for r in records if r["scope"] == "full_ir_validation"] == [5, 5]
