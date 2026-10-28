@@ -184,6 +184,8 @@ class CurriculumDomainAdaptationTrainer:
         student_raw_kwargs = {
             "sample_ids": sample_ids,
         }
+        if getattr(self.student, "supports_domain_routing", False):
+            student_raw_kwargs["domain"] = data["student_domain"]
         if resize_short_edge is not None:
             student_raw_kwargs["resize_short_edge"] = resize_short_edge
         student_output = self.student.raw(
@@ -223,6 +225,7 @@ class CurriculumDomainAdaptationTrainer:
                     data["teacher_images"],
                     sample_ids=sample_ids,
                     resize_short_edge=resize_short_edge,
+                    domain=data["teacher_domain"],
                 )
                 losses.distill(
                     self.student,

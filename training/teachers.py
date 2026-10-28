@@ -40,12 +40,14 @@ def get_teacher(teachers, name):
     return teacher
 
 
-def forward_teacher(teacher, images, *, sample_ids, resize_short_edge):
+def forward_teacher(teacher, images, *, sample_ids, resize_short_edge, domain="rgb"):
     """Reuse the student-selected geometry and keep teacher forward outside autograd."""
     # Produce KD targets from the prepared teacher view with the same sample
     # identity and resize selected for the student forward.
     with torch.no_grad():
         kwargs = {"sample_ids": sample_ids}
+        if getattr(teacher, "supports_domain_routing", False):
+            kwargs["domain"] = domain
         if resize_short_edge is not None:
             kwargs["resize_short_edge"] = resize_short_edge
         return teacher.raw(images, **kwargs)
