@@ -50,15 +50,14 @@ def test_ir_reader_distinguishes_missing_invalid_and_annotated_empty(tmp_path):
     assert records[1].target["boxes"].shape == (0, 4)
 
 
-def test_ir_geometry_capture_never_exposes_supervised_targets():
+def test_ir_training_never_exposes_supervised_targets():
     config = TrainingConfig(device="cpu", aug=AugConfig(hflip_prob=1., blur_prob=0.,
                                                        brightness_prob=0., contrast_prob=0.))
     images = torch.arange(24.).reshape(1, 3, 2, 4)
     flow = RouteDataFlow([], [(images, ("a",))], device="cpu", augmentor=StudentAugmentor(config))
     data = flow.prepare(source_domain="ir", use_gt=True, student_alpha=None,
-                        teacher_alpha=None, capture_geometry=True)
+                        teacher_alpha=None)
     assert data["targets"] is None
-    assert data["diagnostic_hflip"] is True
     torch.testing.assert_close(data["teacher_images"], images.flip(-1))
 
 
@@ -70,3 +69,22 @@ def test_ir_reader_rejects_xml_dimensions_from_a_different_image(tmp_path):
     )
     record, = IRAnnotationReader(tmp_path).read(("a",), ((10, 20),), hflipped=False)
     assert record.status == "invalid"
+
+
+@pytest.mark.parametrize("root_tag", ["annotation", "Annotation"])
+def test_ir_reader_accepts_flir_annotation_root_casing(tmp_path, root_tag):
+    from data.ir_annotations import IRAnnotationReader
+
+    # Real FLIR exports use a capitalized root with lowercase child elements.
+    # Keep image dimensions and a box from the reported failing sample.
+    stem = "FLIR_01726_PreviewData"
+    (tmp_path / "Annotations" / f"{stem}.xml").write_text(
+        f"<{root_tag}><size><width>640</width><height>512</height></size>"
+        "<object><name>car</name><bndbox>"
+        "<xmin>526</xmin><ymin>225</ymin><xmax>638</xmax><ymax>328</ymax>"
+        f"</bndbox></object></{root_tag}>"
+    )
+    record, = IRAnnotationReader(tmp_path).read((stem,), ((512, 640),), hflipped=False)
+    assert record.status == "available"
+    torch.testing.assert_close(record.target["boxes"], torch.tensor([[526., 225., 638., 328.]]))
+    assert record.target["labels"].tolist() == [1]

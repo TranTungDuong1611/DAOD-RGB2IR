@@ -182,6 +182,8 @@ def build_training_config(args) -> TrainingConfig:
             enabled=args.eval_pseudo_labels,
             interval=args.pseudo_label_eval_interval,
             iou_threshold=args.pseudo_label_iou_threshold,
+            sample_size=args.pseudo_label_eval_samples,
+            subset_seed=args.pseudo_label_eval_seed,
         ),
     )
 
@@ -343,8 +345,12 @@ def parse_args():
     parser.add_argument("--eval-pseudo-labels", action="store_true",
                         help="Compare selected KD rows with IR GT; never train on IR GT")
     parser.add_argument("--pseudo-label-eval-interval", type=int, default=500,
-                        help="Global iteration interval; defer to the next eligible IR batch")
+                        help="Global iteration interval after EMA teachers are initialized")
     parser.add_argument("--pseudo-label-iou-threshold", type=float, default=0.5)
+    parser.add_argument("--pseudo-label-eval-samples", type=int, default=256,
+                        help="Maximum labeled IR validation images in each periodic teacher audit")
+    parser.add_argument("--pseudo-label-eval-seed", type=int, default=0,
+                        help="Local seed for reproducible fixed IR validation image selection")
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--device", default="cuda")

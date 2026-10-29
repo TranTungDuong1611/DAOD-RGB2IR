@@ -42,7 +42,8 @@ class IRAnnotationReader:
             return IRAnnotation("invalid")
         height, width = image_size
         try:
-            if root.tag != "annotation":
+            # FLIR exports use both <annotation> and <Annotation> roots.
+            if root.tag.lower() != "annotation":
                 raise ValueError("expected VOC annotation")
             size = root.find("size")
             if size is not None and (

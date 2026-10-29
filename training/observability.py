@@ -83,8 +83,9 @@ def log_pseudo_label_evaluation(record: dict, *, output_dir: str, logger: loggin
     with (log_dir / "pseudo_label_eval.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(record, allow_nan=False, sort_keys=True) + "\n")
     logger.info(
-        "[pseudo-label-eval] step=%s phase=%s teacher=%s metrics=%s",
+        "[pseudo-label-eval] step=%s phase=%s teacher=%s scope=%s images=%s metrics=%s",
         record["global_step"], record["phase"], record["teacher"],
+        record.get("scope", "train_batch"), record.get("images", "N/A"),
         json.dumps(record["metrics"], allow_nan=False, sort_keys=True),
     )
 

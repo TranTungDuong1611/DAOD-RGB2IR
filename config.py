@@ -348,17 +348,23 @@ class DataLoaderConfig:
 
 @dataclass
 class PseudoLabelEvalConfig:
-    """Audit cadence and scoring threshold; these settings never control KD."""
+    """Audit cadence, fixed population, and scoring; these settings never control KD."""
 
     enabled: bool = False
     interval: int = 500
     iou_threshold: float = 0.5
+    sample_size: int = 256
+    subset_seed: int = 0
 
     def __post_init__(self):
         if isinstance(self.interval, bool) or not isinstance(self.interval, int) or self.interval <= 0:
             raise ValueError("pseudo-label evaluation interval must be a positive integer")
         if not math.isfinite(self.iou_threshold) or not 0. <= self.iou_threshold <= 1.:
             raise ValueError("pseudo-label evaluation IoU threshold must be in [0, 1]")
+        if isinstance(self.sample_size, bool) or not isinstance(self.sample_size, int) or self.sample_size <= 0:
+            raise ValueError("pseudo-label evaluation sample size must be a positive integer")
+        if isinstance(self.subset_seed, bool) or not isinstance(self.subset_seed, int) or self.subset_seed < 0:
+            raise ValueError("pseudo-label evaluation subset seed must be a non-negative integer")
 
 
 @dataclass

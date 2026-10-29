@@ -1,9 +1,9 @@
 # IR pseudo-label diagnostics
 
-This opt-in observer compares the **dense rows actually selected by KD** with
-IR ground truth from the current training batch. It evaluates the teacher
-outputs already produced for distillation, before the optimizer/EMA update.
-It does not run another forward or compute teacher detection AP.
+This opt-in observer measures **dense teacher rows selected by the same rule
+as KD** on a fixed labeled IR validation subset. Each pass uses the current
+teacher weights after the training/EMA update, without random augmentation.
+It runs additional teacher-only forwards and does not compute detection AP.
 
 ## Run
 
@@ -18,6 +18,9 @@ Optional arguments:
 | `--eval-pseudo-labels` | Off | Enable observation without changing supervision |
 | `--pseudo-label-eval-interval` | `500` | Global training iteration interval |
 | `--pseudo-label-iou-threshold` | `0.5` | Minimum IoU for a valid selected row |
+| `--pseudo-label-eval-samples` | `256` | Maximum labeled validation images in each periodic audit |
+| `--pseudo-label-eval-seed` | `0` | Local seed for repeatable subset selection |
+| `--eval_batch_size` | `4` | Fixed audit and student validation batch size |
 
 Annotations always come from `data_root/Annotations`, sharing the dataset root.
 For each IR sample ID, the reader looks up `<sample_id>.xml`. The class mapping
@@ -26,37 +29,54 @@ boxes are retained, as in IR validation. Optional XML image dimensions must
 match the original IR image; malformed known-class boxes invalidate the file.
 Missing/invalid files are reported as unavailable, not as background images.
 A valid XML file with no supported objects is an annotated empty image.
+Both `<annotation>` and the FLIR-exported `<Annotation>` roots are accepted.
 
 ## Cadence and output
 
-An audit is due at completed iterations 500, 1000, 1500, etc. If that iteration
-uses RGB, or no initialized/enabled teacher performs KD, evaluation waits for
-the next eligible real IR KD batch. RGB-backed phase-2 routes are excluded,
-including routes whose names contain `ir`. If several ticks pass before IR
-becomes eligible, one audit samples the current batch; it does not replay old
-ticks. A deferred audit does not shift subsequent global boundaries.
+An audit is due at completed iterations 500, 1000, 1500, etc., once EMA teachers
+are initialized. It is independent of the current RGB/IR training route because
+it uses separate IR validation loaders. With the default EMA start at 2000,
+the first eligible audit is normally at completed step 2001, followed by 2500,
+3000, etc. Missed warmup ticks are not replayed. Each enabled teacher gets its
+own pass (`rgb`, `ir`, or both according to `--teacher-mode`).
 
-For example, RGB at step 500 followed by IR KD at step 501 produces an audit at
-501. The next boundary remains 1000. Each teacher actually used for KD on that
-batch gets a separate record; teachers outside the selected route are not run.
+Periodic audits use the same subset of up to 256 validly annotated IR images
+from the validation split. Selection uses a local seeded shuffle and retains
+at least one image containing each supported class when the sample budget
+allows, then fills remaining slots from shuffled candidates. It does not
+guarantee exact class proportions. If fewer valid images exist, all are used.
+Assembly fails clearly if no valid validation annotations are available.
+
+Image IDs, order, and batch size stay fixed across passes. Selection reads
+image headers/XML at startup; images and predictions are not cached. After
+normal training completion, each enabled teacher also gets one full pass over
+all existing IR validation images, retaining the final incomplete batch.
+Missing/invalid labels in that full pass are reported explicitly.
 
 Records are appended to `output_dir/logs/pseudo_label_eval.jsonl`. A
 `[pseudo-label-eval]` summary also appears in the existing console/train log,
-independently of `--log_interval`. JSONL records include step, phase, route,
-teacher, sample IDs, annotation availability, flip, KD selection settings,
-IoU threshold, and metrics. Reusing an output directory appends to this file;
+independently of `--log_interval`. Records include step, phase, teacher, scope
+(`fixed_ir_validation` or `full_ir_validation`), image/batch counts, sample IDs,
+KD settings, resize, IoU threshold, and aggregate metrics. Console summaries
+include scope and image count. Reusing an output directory appends to this file;
 use a different output directory for an independent run.
 
 Observer progress is saved in training checkpoints to avoid duplicate audits
-in an already evaluated interval after resume. Older baseline checkpoints
-remain loadable; their first eligible IR batch can trigger a pending audit.
+in an already evaluated interval after resume. The fixed image manifest and
+batch size are stored too; resume rejects a changed subset or batch grouping.
+Older baseline checkpoints remain loadable without observer state. A completed
+final checkpoint skips an already recorded full pass on resume. An older
+completed checkpoint without that flag receives the full pass without any
+further optimizer steps.
 
 ## Metric definitions
 
-GT follows the batch's already sampled horizontal flip and the actual resize
-recorded by the teacher forward. The existing FCOS location, pyramid-scale,
+Evaluation uses the final configured short-edge size and no random flip. GT
+follows the actual teacher resize. The existing FCOS location, pyramid-scale,
 and center-sampling assignment determines each row's corresponding GT object.
-The criterion's batch-global top-k/HM mask is reused directly, before NMS.
+Training and evaluation share the batch-global top-k/HM selection helper,
+before NMS. GT never affects selection. Keep audit batch size fixed when
+comparing runs because batch-global selection depends on batch grouping.
 
 | Metric | Meaning |
 | --- | --- |
@@ -75,17 +95,24 @@ Undefined ratios are `null`, not zero. For example, a batch without available
 labels has no validity score; an annotated empty image with selected rows has
 validity zero. An image with GT but no selected rows has coverage zero.
 Multiple dense rows can legitimately cover one object. These values are not
-post-NMS precision/recall or mAP. Individual batches vary; compare trends with
-their sample IDs and denominators.
+post-NMS precision/recall or mAP. Ratios use pooled row/object counts; IoU and
+quality means are weighted by finite selected foreground counts. Small/empty
+batches therefore do not receive the same weight as large batches.
 
 ## Training isolation
 
-Audit targets are read through a separate side channel. IR training targets
+Audit targets are read through a separate validation path. IR training targets
 remain `None`. Audit labels/metrics never control KD masks, loss weights,
 optimizer/LR steps, EMA, student validation, or best-checkpoint selection.
 Numeric policy lives in `PseudoLabelEvalConfig`, cadence in the curriculum
 scheduler, execution in the reader/adapter/evaluator, and output in
 `training/observability.py`.
+
+Evaluation restores Python, NumPy, CPU/CUDA Torch RNG and every model module's
+previous train/eval mode in a `finally` block. Dedicated loaders own seeded
+generators whose states are restored too. Training loaders/cursors are never
+consumed. No student forward, backward, optimizer/LR step, or EMA update occurs
+inside an audit. The baseline's 20% supervised RGB phase-4 routing is retained.
 
 Tests exercise real FCOS with a small backbone, checking geometry, metrics,
 availability, scheduling, resume, forward counts, and identical losses,
