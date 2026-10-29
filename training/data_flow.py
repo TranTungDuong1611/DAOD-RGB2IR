@@ -125,6 +125,9 @@ class RouteDataFlow:
                 "teacher_images": teacher_images,
                 "targets": geometric_targets if use_gt else None,
                 "sample_ids": sample_ids,
+                # SAGA changes appearance, not the physical source domain.
+                "student_domain": "rgb",
+                "teacher_domain": "rgb",
             }
 
         if source_domain == "ir":
@@ -143,5 +146,7 @@ class RouteDataFlow:
                 "teacher_images": teacher_images,
                 "targets": None,
                 "sample_ids": sample_ids,
+                "student_domain": "ir",
+                "teacher_domain": "ir",
             }
         raise ValueError(f"Unsupported physical source domain: {source_domain}")

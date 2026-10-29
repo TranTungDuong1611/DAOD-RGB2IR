@@ -191,6 +191,7 @@ class CurriculumDomainAdaptationTrainer:
         resize_short_edge = None if select_resize is None else select_resize()
         student_raw_kwargs = {
             "sample_ids": sample_ids,
+            "domain": data["student_domain"],
         }
         if resize_short_edge is not None:
             student_raw_kwargs["resize_short_edge"] = resize_short_edge
@@ -231,6 +232,7 @@ class CurriculumDomainAdaptationTrainer:
                     data["teacher_images"],
                     sample_ids=sample_ids,
                     resize_short_edge=resize_short_edge,
+                    domain=data["teacher_domain"],
                 )
                 settings = self._distillation_settings(teacher_name, phase)
                 losses.distill(

@@ -161,7 +161,7 @@ class DistillationPair:
 
 
 class DetectorAdapter(nn.Module, ABC):
-    """Adapter seam shared by detector families."""
+    """Adapter seam shared by detector families; all forwards accept domain."""
 
     def select_training_resize_short_edge(self) -> Optional[int]:
         """Choose one shared training geometry when the detector needs it."""
@@ -200,6 +200,7 @@ class DetectorAdapter(nn.Module, ABC):
         images: Sequence[Tensor],
         targets: Optional[Targets] = None,
         sample_ids: Optional[SampleIds] = None,
+        domain: str = "rgb",
     ) -> AdapterOutput:
         raise NotImplementedError
 
