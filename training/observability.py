@@ -1,6 +1,7 @@
 """Logging setup and presentation, without changing training decisions."""
 
 from datetime import datetime
+import json
 import logging
 from pathlib import Path
 
@@ -73,4 +74,20 @@ def log_iteration(log: dict, global_step: int, *, logger: logging.Logger) -> Non
     logger.info(message)
 
 
-__all__ = ["configure_training_logging", "log_iteration"]
+def log_pseudo_label_evaluation(record: dict, *, output_dir: str, logger: logging.Logger):
+    """Persist audit records independently of regular iteration log cadence."""
+    # Append supports resumed runs. Keep sample identity and selection settings
+    # in JSONL while showing metric summaries through the existing log handlers.
+    log_dir = Path(output_dir) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    with (log_dir / "pseudo_label_eval.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, allow_nan=False, sort_keys=True) + "\n")
+    logger.info(
+        "[pseudo-label-eval] step=%s phase=%s teacher=%s scope=%s images=%s metrics=%s",
+        record["global_step"], record["phase"], record["teacher"],
+        record.get("scope", "train_batch"), record.get("images", "N/A"),
+        json.dumps(record["metrics"], allow_nan=False, sort_keys=True),
+    )
+
+
+__all__ = ["configure_training_logging", "log_iteration", "log_pseudo_label_evaluation"]

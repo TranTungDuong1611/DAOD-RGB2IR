@@ -10,6 +10,7 @@ DomainStep = Literal[
     "p2_ir_flow",           # Student(SAGA-High) + Teacher(SAGA-Mid) + GT
     "p3_rgb_flow",          # Student(SAGA-Mid) + Teacher(SAGA-Weak) + GT
     "p3_ir_flow",           # Student(IR) + Teacher(SAGA-High) [NO GT]
+    "p4_rgb_supervised",   # Student(RGB+GT), no KD or teacher update
     "p4_ir_focus"           # Student(IR) + Teacher(IR) [NO GT]
 ]
 
@@ -26,6 +27,7 @@ class CurriculumScheduler:
         self._counters = {
             Phase.PHASE2_TRANSITION: 0,
             Phase.PHASE3_ADAPTATION:  0,
+            Phase.PHASE4_IR_FOCUS:    0,
         }
 
     def get_next_step(self, global_step: int) -> DomainStep:
@@ -61,8 +63,14 @@ class CurriculumScheduler:
             )
 
         else: # PHASE4_IR_FOCUS
-            # Final focus always selects the real-IR distillation route.
-            return "p4_ir_focus"
+            # Retain source supervision within the fixed phase-4 budget.
+            # The existing alternation gives one RGB and four IR steps at 0.2.
+            return self._alternate(
+                phase=self.Phase.PHASE4_IR_FOCUS,
+                primary="p4_rgb_supervised",
+                secondary="p4_ir_focus",
+                ratio=self.config.curriculum.phase4_rgb_sampling_ratio,
+            )
 
     @staticmethod
     def get_source_domain(step_name: str) -> str:
@@ -71,11 +79,25 @@ class CurriculumScheduler:
         # teacher name or SAGA appearance level carried by the route settings.
         if step_name in {
             "p1_rgb_supervised", "p2_rgb_flow", "p2_ir_flow", "p3_rgb_flow",
+            "p4_rgb_supervised",
         }:
             return "rgb"
         if step_name in {"p3_ir_flow", "p4_ir_focus"}:
             return "ir"
         raise ValueError(f"Unsupported curriculum step: {step_name}")
+
+    def should_evaluate_pseudo_labels(self, global_step, *, last_eval_step):
+        """Check global windows; fixed IR evaluation is independent of train routes.
+
+        The trainer separately requires initialized teachers. A delayed first
+        pass does not shift later iteration boundaries or consume loader routes.
+        """
+        cfg = self.config.pseudo_label_eval
+        completed_step = global_step + 1
+        return (
+            cfg.enabled
+            and completed_step // cfg.interval > last_eval_step // cfg.interval
+        )
 
     def _alternate(self, phase, primary: DomainStep, secondary: DomainStep, ratio: float) -> DomainStep:
         """Helper to alternate between two steps based on a ratio."""
