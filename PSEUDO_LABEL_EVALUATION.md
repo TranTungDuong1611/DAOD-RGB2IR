@@ -71,6 +71,20 @@ further optimizer steps.
 
 ## Metric definitions
 
+Default selection schedules keep the top-k budgets and use stricter HM floors:
+
+| Phase | RGB top ratio / min HM | IR top ratio / min HM |
+| --- | --- | --- |
+| 1 | 1% / 0.55 | 0.2% / 0.70 |
+| 2 | 2% / 0.45 | 0.5% / 0.60 |
+| 3 | 4% / 0.40 | 1.5% / 0.50 |
+| 4 | 6% / 0.40 | 3% / 0.50 |
+
+Phase 1 does not run KD; phase 4 does not use the RGB teacher for KD. Raising
+the HM floor only removes rows whose scores fall below it; a top-k group that
+already exceeds the new floor remains unchanged. These are training-selection
+thresholds, separate from the GT IoU threshold used only for diagnostics.
+
 Evaluation uses the final configured short-edge size and no random flip. GT
 follows the actual teacher resize. The existing FCOS location, pyramid-scale,
 and center-sampling assignment determines each row's corresponding GT object.

@@ -19,7 +19,6 @@ from config import (
     Phase,
     PseudoLabelEvalConfig,
     SoftSAGAConfig,
-    TeacherSchedule,
     TrainLoaderConfig,
     TrainingConfig,
 )
@@ -102,23 +101,12 @@ def build_training_config(args) -> TrainingConfig:
             vfl_alpha=0.75,
             vfl_gamma=2.0,
         ),
-        # Teacher-specific KD selection schedules and shared distillation settings.
+        # Keep CLI runs on the same teacher schedules as TrainingConfig defaults;
+        # HM exponents and reliability weighting remain explicit CLI settings.
         distill=DistillConfig(
             hm_alpha=args.hm_alpha,
             hm_beta=args.hm_beta,
             un_regular_alpha=args.un_regular_alpha,
-            rgb_teacher=TeacherSchedule(
-                phase1=(0.010, 0.45),
-                phase2=(0.020, 0.35),
-                phase3=(0.040, 0.25),
-                phase4=(0.060, 0.20),
-            ),
-            ir_teacher=TeacherSchedule(
-                phase1=(0.002, 0.60),
-                phase2=(0.005, 0.50),
-                phase3=(0.015, 0.35),
-                phase4=(0.030, 0.25),
-            ),
         ),
         curriculum=curriculum,
         # Phase and component weights are resolved upstream of loss execution.

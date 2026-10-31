@@ -46,17 +46,18 @@ class TeacherSchedule:
     
 @dataclass
 class DistillConfig:
-    # Adaptive Threshold Schedules for RGB and IR Teachers
-    # RGB Teacher: Learns faster, more reliable early on
+    # Keep the existing top-k budgets and raise only the HM floor. Later phases
+    # retain the phase-3 floor instead of admitting progressively weaker rows.
     rgb_teacher: TeacherSchedule = field(default_factory=lambda: TeacherSchedule(
-        phase1=(0.010, 0.45), phase2=(0.020, 0.35), 
-        phase3=(0.040, 0.25), phase4=(0.060, 0.20)
+        phase1=(0.010, 0.55), phase2=(0.020, 0.45),
+        phase3=(0.040, 0.40), phase4=(0.060, 0.40)
     ))
     
-    # IR Teacher: Noisier, requires stricter filtering in early phases
+    # IR selection uses a higher floor throughout the curriculum. Phase-1
+    # values are defaults only; warmup itself does not run distillation.
     ir_teacher: TeacherSchedule = field(default_factory=lambda: TeacherSchedule(
-        phase1=(0.002, 0.60), phase2=(0.005, 0.50), 
-        phase3=(0.015, 0.35), phase4=(0.030, 0.25)
+        phase1=(0.002, 0.70), phase2=(0.005, 0.60),
+        phase3=(0.015, 0.50), phase4=(0.030, 0.50)
     ))
 
     # Harmony Measure (HM) parameters: (prob^alpha) * (iou^beta)
