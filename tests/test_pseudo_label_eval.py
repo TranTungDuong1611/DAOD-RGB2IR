@@ -12,7 +12,7 @@ from test_torchvision_fcos_adapter import build_adapter
 
 
 def fixture_output():
-    # The first two locations belong to one GT; the third is background.
+    # All boxes match one GT, even though the third location is outside it.
     prediction = Predictions(
         torch.tensor([[4., -4., -4.], [-4., 4., -4.], [4., -4., -4.]]),
         torch.tensor([[2., 2., 6., 6.]] * 3), torch.zeros(3)
@@ -27,7 +27,7 @@ def fixture_output():
     return AdapterOutput((prediction,), context=context, sample_ids=("a",))
 
 
-def test_dense_audit_uses_fcos_assignment_and_actual_resize_without_mutation():
+def test_dense_audit_matches_boxes_regardless_of_location_and_preserves_resize():
     from training.pseudo_label_eval import evaluate_pseudo_labels
 
     output = fixture_output()
@@ -38,16 +38,67 @@ def test_dense_audit_uses_fcos_assignment_and_actual_resize_without_mutation():
         (IRAnnotation("available", target),), iou_threshold=.5
     )
     assert metrics["selected_rows"] == 3
-    assert metrics["selected_foreground_rows"] == 2
-    assert metrics["valid_rows"] == 1
-    assert metrics["valid_fraction"] == pytest.approx(1 / 3)
-    assert metrics["foreground_class_accuracy"] == .5
+    assert metrics["selected_foreground_rows"] == 3
+    assert metrics["valid_rows"] == 2
+    assert metrics["valid_fraction"] == pytest.approx(2 / 3)
+    assert metrics["foreground_class_accuracy"] == pytest.approx(2 / 3)
     assert metrics["foreground_box_iou_mean"] == 1.
     assert metrics["quality_mae_foreground"] == .5
     assert metrics["gt_coverage"] == 1.
     assert metrics["covered_gt"] == 1  # Dense duplicates do not inflate coverage.
     assert output.context.transformed_targets is None
     assert target["boxes"].tolist() == [[1., 1., 3., 3.]]
+
+
+def test_same_class_match_can_be_a_different_gt_from_the_closest_box():
+    from training.pseudo_label_eval import evaluate_pseudo_labels
+
+    output = fixture_output()
+    target = {"boxes": torch.tensor([[1., 1., 3., 3.], [.75, .75, 3.25, 3.25]]),
+              "labels": torch.tensor([1, 0])}
+    metrics = evaluate_pseudo_labels(
+        build_adapter(), output, (torch.tensor([False, False, True]),),
+        (IRAnnotation("available", target),), iou_threshold=.5
+    )
+    # Row 3 predicts class 0. Its box has IoU 1 with the wrong-class GT and
+    # IoU .64 with the correct-class GT; either FCOS location rule would miss it.
+    assert metrics["valid_rows"] == 1
+    assert metrics["valid_fraction"] == 1.
+    assert metrics["covered_gt"] == 1
+    assert metrics["gt_coverage"] == .5
+
+
+def test_matching_checks_iou_boundary_and_keeps_unmatched_rows_in_denominator():
+    from training.pseudo_label_eval import evaluate_pseudo_labels
+
+    output = fixture_output()
+    prediction, = output.predictions
+    prediction.class_logits[:] = prediction.class_logits[0].clone()
+    prediction.boxes[:] = torch.tensor([[2., 2., 4., 6.], [2., 2., 3.8, 6.], [20., 20., 24., 24.]])
+    target = {"boxes": torch.tensor([[1., 1., 3., 3.]]), "labels": torch.tensor([0])}
+    metrics = evaluate_pseudo_labels(
+        build_adapter(), output, (torch.ones(3, dtype=torch.bool),),
+        (IRAnnotation("available", target),), iou_threshold=.5
+    )
+    assert metrics["selected_rows"] == 3
+    assert metrics["selected_foreground_rows"] == 1
+    assert metrics["valid_rows"] == 1
+    assert metrics["valid_fraction"] == pytest.approx(1 / 3)
+    assert metrics["foreground_box_iou_mean"] == .5
+
+
+def test_geometric_matches_do_not_hide_wrong_class_predictions():
+    from training.pseudo_label_eval import evaluate_pseudo_labels
+
+    target = {"boxes": torch.tensor([[1., 1., 3., 3.]]), "labels": torch.tensor([0])}
+    metrics = evaluate_pseudo_labels(
+        build_adapter(), fixture_output(), (torch.tensor([False, True, False]),),
+        (IRAnnotation("available", target),), iou_threshold=.5
+    )
+    assert metrics["selected_foreground_rows"] == 1
+    assert metrics["foreground_class_accuracy"] == 0.
+    assert metrics["valid_fraction"] == 0.
+    assert metrics["gt_coverage"] == 0.
 
 
 def test_missing_labels_are_excluded_but_annotated_empty_is_background():

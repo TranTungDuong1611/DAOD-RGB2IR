@@ -6,9 +6,9 @@ import random
 import numpy as np
 from PIL import Image
 import torch
+from torchvision.ops import box_iou
 
 from loss.d3t_criterion import select_distillation_masks
-from models.torchvision_fcos_adapter import _aligned_box_iou
 
 
 def _ratio(numerator, denominator):
@@ -17,10 +17,10 @@ def _ratio(numerator, denominator):
 
 @torch.no_grad()
 def evaluate_pseudo_labels(adapter, output, selected_masks, annotations, *, iou_threshold):
-    """Report FCOS-assigned row validity and unique GT coverage before NMS.
+    """Match selected decoded boxes to same-class GT by IoU, before NMS.
 
-    Multiple selected locations may correctly cover one object. These metrics
-    describe KD supervision, not detection precision/recall or teacher AP.
+    A valid row can match any same-class GT, regardless of its FCOS location,
+    level, or center region. Dense duplicates count as rows but cover a GT once.
     """
     if selected_masks is None or not (
         len(output.predictions) == len(selected_masks) == len(annotations)
@@ -28,14 +28,14 @@ def evaluate_pseudo_labels(adapter, output, selected_masks, annotations, *, iou_
         raise ValueError("diagnostic predictions, masks, and annotations must align")
     if not 0. <= iou_threshold <= 1.:
         raise ValueError("diagnostic IoU threshold must be in [0, 1]")
-    assigned = adapter.assign_diagnostic_targets(output, [r.target for r in annotations])
+    targets = adapter.prepare_diagnostic_targets(output, [r.target for r in annotations])
     counts = dict(available_images=0, missing_images=0, invalid_images=0,
                   selected_rows_all=0, selected_rows=0, selected_foreground_rows=0,
                   finite_foreground_rows=0, nonfinite_selected_rows=0,
                   valid_rows=0, correct_class_rows=0, gt_count=0, covered_gt=0)
     iou_sum = quality_error_sum = 0.
     for prediction, selected, record, target in zip(
-        output.predictions, selected_masks, annotations, assigned
+        output.predictions, selected_masks, annotations, targets
     ):
         if selected.dtype != torch.bool or selected.shape != prediction.quality_logits.shape:
             raise ValueError("diagnostic mask must align with prediction rows")
@@ -47,34 +47,42 @@ def evaluate_pseudo_labels(adapter, output, selected_masks, annotations, *, iou_
             continue
         counts["selected_rows"] += int(selected.sum().item())
         counts["gt_count"] += len(target["boxes"])
-        matched = target["matched_idxs"]
-        foreground = selected & (matched >= 0)
-        counts["selected_foreground_rows"] += int(foreground.sum().item())
         finite = (torch.isfinite(prediction.boxes).all(dim=1)
                   & torch.isfinite(prediction.class_logits).all(dim=1)
                   & torch.isfinite(prediction.quality_logits))
         counts["nonfinite_selected_rows"] += int((selected & ~finite).sum().item())
-        foreground &= finite
+        usable = selected & finite
+        if not usable.any() or not len(target["boxes"]):
+            continue
+
+        # Geometry alone defines the foreground denominator; do not filter by
+        # class first, which would make foreground class accuracy always 100%.
+        ious = box_iou(prediction.boxes[usable], target["boxes"])
+        best_iou = ious.max(dim=1).values
+        foreground = best_iou >= iou_threshold
         count = int(foreground.sum().item())
+        counts["selected_foreground_rows"] += count
         counts["finite_foreground_rows"] += count
         if not count:
             continue
 
-        # Quality is trained only on foreground and predicts box IoU. Compare
-        # it with the same assigned GT definition, without background zeroes.
-        gt_indices = matched[foreground]
-        iou = _aligned_box_iou(prediction.boxes[foreground], target["boxes"][gt_indices])
-        correct_class = (prediction.class_logits[foreground].argmax(dim=1)
-                         == target["labels"][gt_indices])
-        valid = correct_class & (iou >= iou_threshold)
-        counts["correct_class_rows"] += int(correct_class.sum().item())
+        # Search same-class GT separately: a nearer wrong-class object must not
+        # hide another GT that satisfies both the class and IoU requirements.
+        labels = prediction.class_logits[usable].argmax(dim=1)
+        same_class = labels[:, None] == target["labels"][None, :]
+        class_iou, gt_indices = ious.masked_fill(~same_class, -1.).max(dim=1)
+        valid = class_iou >= iou_threshold
+        counts["correct_class_rows"] += int(valid.sum().item())
         counts["valid_rows"] += int(valid.sum().item())
         counts["covered_gt"] += int(gt_indices[valid].unique().numel())
-        iou_sum += float(iou.sum().item())
-        quality_error_sum += float((prediction.quality_logits[foreground].sigmoid() - iou).abs().sum().item())
+        # IoU/quality describe geometrically matched rows, including wrong-class
+        # predictions. All selected rows still remain in the validity denominator.
+        iou_sum += float(best_iou[foreground].sum().item())
+        quality_error_sum += float((prediction.quality_logits[usable][foreground].sigmoid()
+                                    - best_iou[foreground]).abs().sum().item())
 
     # Undefined denominators stay null in JSON/logs rather than suggesting a
-    # perfect or zero score for an unlabeled batch or an empty foreground set.
+    # perfect or zero score for an unlabeled batch or an empty matched set.
     foreground_count = counts["finite_foreground_rows"]
     return {
         **counts,
@@ -96,7 +104,7 @@ def aggregate_pseudo_label_metrics(batches):
     )
     counts = {name: sum(batch.get(name, 0) for batch in batches) for name in count_names}
     foreground = counts["finite_foreground_rows"]
-    # The per-batch means already exclude non-finite/unassigned rows. Recover
+    # The per-batch means already exclude non-finite/unmatched rows. Recover
     # their sums using that exact denominator, not the number of images/batches.
     means = {}
     for name in ("foreground_box_iou_mean", "quality_mae_foreground"):
@@ -204,6 +212,7 @@ class FixedIRPseudoLabelEvaluator:
         if not full_dataset and tuple(sample_ids) != self.fixed_sample_ids:
             raise ValueError("fixed pseudo-label evaluation image order changed")
         return {
+            "matching": "same_class_box_iou",
             "scope": "full_ir_validation" if full_dataset else "fixed_ir_validation",
             "images": len(sample_ids), "batches": len(batch_metrics),
             "batch_size": loader.batch_size, "sample_ids": sample_ids,

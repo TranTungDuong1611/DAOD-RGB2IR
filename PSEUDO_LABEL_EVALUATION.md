@@ -86,8 +86,12 @@ already exceeds the new floor remains unchanged. These are training-selection
 thresholds, separate from the GT IoU threshold used only for diagnostics.
 
 Evaluation uses the final configured short-edge size and no random flip. GT
-follows the actual teacher resize. The existing FCOS location, pyramid-scale,
-and center-sampling assignment determines each row's corresponding GT object.
+follows the actual teacher resize. Each selected decoded box is compared with
+all same-class GT boxes in its image and matched to the highest-IoU one. A row
+is valid when that IoU meets the configured threshold (default 0.5). FCOS
+location, pyramid-scale, and center-sampling rules are not used by diagnostics;
+supervised training keeps its existing assignment unchanged.
+
 Training and evaluation share the batch-global top-k/HM selection helper,
 before NMS. GT never affects selection. Keep audit batch size fixed when
 comparing runs because batch-global selection depends on batch grouping.
@@ -97,21 +101,27 @@ comparing runs because batch-global selection depends on batch grouping.
 | `available_images`, `missing_images`, `invalid_images` | Label availability in the observed batch |
 | `selected_rows_all` | Selected KD rows across all images, including unavailable labels |
 | `selected_rows` | Selected KD rows in images with available labels; denominator for validity |
-| `selected_foreground_rows` | Selected rows assigned to a GT object by FCOS |
-| `valid_rows`, `valid_fraction` | Selected rows with foreground assignment, correct class, and sufficient box IoU; fraction over `selected_rows` |
-| `foreground_class_accuracy` | Correct-class fraction among finite selected foreground rows |
-| `foreground_box_iou_mean` | Mean IoU with assigned GT among finite selected foreground rows |
-| `quality_mae_foreground` | Mean absolute error between sigmoid quality and assigned-GT box IoU, on finite selected foreground rows |
+| `selected_foreground_rows`, `finite_foreground_rows` | Finite selected rows with IoU at or above the threshold to any GT, ignoring class |
+| `valid_rows`, `valid_fraction` | Rows matching any same-class GT at the IoU threshold; fraction over all `selected_rows` |
+| `foreground_class_accuracy` | Fraction of geometrically matched rows also matching a same-class GT at the threshold |
+| `foreground_box_iou_mean` | Mean best IoU to any GT among geometrically matched rows, including wrong-class predictions |
+| `quality_mae_foreground` | Mean absolute error between sigmoid quality and best geometric GT IoU, on geometrically matched rows |
 | `gt_count`, `covered_gt`, `gt_coverage` | GT objects covered by at least one valid selected row, counted once per image/object |
-| `nonfinite_selected_rows`, `finite_foreground_rows` | Invalid prediction count and foreground denominator for class/IoU/quality metrics |
+| `nonfinite_selected_rows` | Selected predictions with non-finite box, class, or quality values; they remain in the validity denominator |
 
 Undefined ratios are `null`, not zero. For example, a batch without available
 labels has no validity score; an annotated empty image with selected rows has
 validity zero. An image with GT but no selected rows has coverage zero.
 Multiple dense rows can legitimately cover one object. These values are not
-post-NMS precision/recall or mAP. Ratios use pooled row/object counts; IoU and
+post-NMS precision/recall or mAP. Coverage counts each row's best same-class GT
+once per image/object. Foreground class accuracy is not tautologically 100%:
+its denominator includes high-IoU wrong-class predictions. Ratios use pooled row/object counts; IoU and
 quality means are weighted by finite selected foreground counts. Small/empty
 batches therefore do not receive the same weight as large batches.
+
+Records identify this definition with `matching="same_class_box_iou"`. Do not
+compare these validity/foreground values directly with older FCOS-assignment
+audits, even if some metric field names are unchanged.
 
 ## Training isolation
 
