@@ -11,7 +11,7 @@ from unittest import mock
 import torch
 from PIL import Image
 
-from config import CurriculumConfig, EMAConfig, PseudoLabelEvalConfig, TeacherSchedule
+from config import CurriculumConfig, EMAConfig, Phase, PseudoLabelEvalConfig, TeacherSchedule
 from loss.d3t_criterion import D3TLossCriterion
 from models.d3t_wrapper import D3TWrapper
 from trainer import CurriculumDomainAdaptationTrainer
@@ -58,11 +58,33 @@ def write_annotation(directory, label="person"):
     (Path(directory) / "align_validation.txt").write_text("a\nb\nc\nd\ne\n")
     for stem in "abcde":
         Image.new("L", (48, 32), color=80).save(image_dir / f"{stem}.jpeg")
+        Image.new("RGB", (48, 32), color=(200, 80, 20)).save(image_dir / f"{stem}_RGB.jpg")
         (annotations / f"{stem}.xml").write_text(
             f"<annotation><object><name>{label}</name><bndbox>"
             "<xmin>4</xmin><ymin>3</ymin><xmax>14</xmax><ymax>15</ymax>"
             "</bndbox></object></annotation>"
         )
+
+
+def test_each_teacher_audits_its_own_image_domain_without_saga():
+    base = D3TWrapper(build_adapter(), D3TLossCriterion())
+    with tempfile.TemporaryDirectory() as directory:
+        write_annotation(directory)
+        trainer = make_trainer(base, directory, enabled=True)
+        with mock.patch.object(trainer.rgb_teacher, "raw", wraps=trainer.rgb_teacher.raw) as rgb_raw, \
+             mock.patch.object(trainer.ir_teacher, "raw", wraps=trainer.ir_teacher.raw) as ir_raw:
+            records = trainer._evaluate_pseudo_labels(Phase.PHASE2_TRANSITION)
+        assert [(r["teacher"], r["source_domain"], r["scope"]) for r in records] == [
+            ("rgb", "rgb", "fixed_rgb_validation"), ("ir", "ir", "fixed_ir_validation"),
+        ]
+        rgb_images = rgb_raw.call_args_list[0].args[0]
+        ir_images = ir_raw.call_args_list[0].args[0]
+        # The RGB audit keeps the original color channels; the IR loader makes
+        # three identical grayscale channels. Phase-2 SAGA is not applied here.
+        assert (rgb_images[:, 0] - rgb_images[:, 1]).mean() > .4
+        assert (rgb_images[:, 1] - rgb_images[:, 2]).mean() > .2
+        torch.testing.assert_close(ir_images[:, 0], ir_images[:, 1])
+        torch.testing.assert_close(ir_images[:, 1], ir_images[:, 2])
 
 
 def test_trainer_audits_fixed_ir_validation_and_resumes_without_duplicate_window():
@@ -82,8 +104,10 @@ def test_trainer_audits_fixed_ir_validation_and_resumes_without_duplicate_window
             (6, "rgb"), (6, "ir"), (8, "rgb"), (8, "ir"),
         ]
         assert all(r["metrics"]["available_images"] == 3 for r in records)
-        assert all(r["scope"] == "fixed_ir_validation" for r in records)
-        assert all(r["sample_ids"] == records[0]["sample_ids"] for r in records)
+        assert all(r["scope"] == f"fixed_{r['teacher']}_validation" for r in records)
+        for teacher in ("rgb", "ir"):
+            ids = [r["sample_ids"] for r in records if r["teacher"] == teacher]
+            assert all(sample_ids == ids[0] for sample_ids in ids)
         assert student_raw.call_count == 9
         assert rgb_raw.call_count == 13  # 5 training + 4 audits of 2 batches.
         assert ir_raw.call_count == 12  # Phase-4 RGB supervision has no teacher forward.
@@ -199,10 +223,11 @@ def test_training_completion_evaluates_full_ir_validation_once_and_saves_progres
         trainer.train()
         path = Path(directory) / "logs" / "pseudo_label_eval.jsonl"
         records = [json.loads(line) for line in path.read_text().splitlines()]
-        final = [r for r in records if r["scope"] == "full_ir_validation"]
+        final = [r for r in records if r["trigger"] == "final"]
         assert [(r["global_step"], r["teacher"], r["images"]) for r in final] == [
             (9, "rgb", 5), (9, "ir", 5)
         ]
+        assert [r["scope"] for r in final] == ["full_rgb_validation", "full_ir_validation"]
         trainer.save_checkpoint("complete.pth")
         restored = make_trainer(base, directory, enabled=True)
         restored.load_checkpoint(str(Path(directory) / "complete.pth"))
@@ -239,4 +264,30 @@ def test_cli_smoke_runs_all_phases_and_persists_final_full_audit():
         assert final["last_full_pseudo_label_eval_step"] == 4
         records = [json.loads(line) for line in (root / "out" / "logs" / "pseudo_label_eval.jsonl").read_text().splitlines()]
         assert len(records) == 8
-        assert [r["images"] for r in records if r["scope"] == "full_ir_validation"] == [5, 5]
+        assert [r["images"] for r in records if r["trigger"] == "final"] == [5, 5]
+
+
+def test_completed_legacy_ir_only_audit_gets_new_domain_passes_without_training():
+    base = D3TWrapper(build_adapter(), D3TLossCriterion())
+    with tempfile.TemporaryDirectory() as directory:
+        write_annotation(directory)
+        trainer = make_trainer(base, directory, enabled=True)
+        trainer.train()
+        trainer.save_checkpoint("legacy_audit.pth")
+        checkpoint_path = Path(directory) / "legacy_audit.pth"
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        # Older checkpoints stored only IR audit grouping, even for RGB teachers.
+        checkpoint["pseudo_label_evaluator"] = checkpoint["pseudo_label_evaluator"]["ir"]
+        torch.save(checkpoint, checkpoint_path)
+        restored = make_trainer(base, directory, enabled=True)
+        restored.load_checkpoint(str(checkpoint_path))
+        assert restored.last_full_pseudo_label_eval_step == 0
+        log_path = Path(directory) / "logs" / "pseudo_label_eval.jsonl"
+        old_count = len(log_path.read_text().splitlines())
+        weights = copy.deepcopy(restored.student.state_dict())
+        restored.train()
+        new_records = [json.loads(line) for line in log_path.read_text().splitlines()[old_count:]]
+        assert [(r["trigger"], r["source_domain"]) for r in new_records] == [("final", "rgb"), ("final", "ir")]
+        assert restored.global_step == 9
+        for name, value in restored.student.state_dict().items():
+            torch.testing.assert_close(value, weights[name], rtol=0, atol=0)

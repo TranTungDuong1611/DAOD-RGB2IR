@@ -1,14 +1,47 @@
-"""Evaluate dense teacher supervision on fixed and full IR validation sets."""
+"""Evaluate dense teacher supervision on fixed and full RGB/IR validation sets."""
 
 from contextlib import contextmanager
+from pathlib import Path
 import random
 
 import numpy as np
 from PIL import Image
 import torch
+from torch.utils.data import Dataset
 from torchvision.ops import box_iou
 
+from data.augmentations import default_ir_transform, default_rgb_transform
+from data.datasets import _resolve_split_file
 from loss.d3t_criterion import select_distillation_masks
+from utils.helper import ir_stem_to_rgb_filename, read_split_file
+
+
+class ValidationImages(Dataset):
+    """Load unaugmented audit images while retaining the shared XML sample ID."""
+
+    def __init__(self, root, domain):
+        root = Path(root)
+        self.domain = domain
+        self.transform = default_rgb_transform() if domain == "rgb" else default_ir_transform()
+        self.samples = []
+        # RGB filenames differ from annotation stems. Keep the original split
+        # identity so both domains read the same aligned XML without renaming it.
+        for stem in read_split_file(_resolve_split_file(root, "validation")):
+            filename = ir_stem_to_rgb_filename(stem) if domain == "rgb" else f"{stem}.jpeg"
+            path = root / "JPEGImages" / filename
+            if path.is_file():
+                self.samples.append((path, stem))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        path, stem = self.samples[index]
+        # Labels are read only by the observer, so a missing/corrupt XML remains
+        # an availability result rather than interrupting the full image pass.
+        with Image.open(path) as image:
+            tensor = self.transform(image.convert("RGB") if self.domain == "rgb" else image)
+        return tensor, stem
 
 
 def _ratio(numerator, denominator):
@@ -118,21 +151,21 @@ def aggregate_pseudo_label_metrics(batches):
     }
 
 
-def select_fixed_ir_subset(image_paths, reader, *, sample_size, seed):
+def select_fixed_subset(samples, reader, *, sample_size, seed):
     """Choose reproducible labeled images, retaining class coverage when possible."""
     if sample_size <= 0:
-        raise ValueError("fixed IR sample size must be positive")
+        raise ValueError("fixed sample size must be positive")
     labels_by_index = {}
     # Read headers/annotations only during assembly. Never iterate a training
     # loader or consume its augmentation/sampling RNG to choose audit images.
-    for index, path in enumerate(image_paths):
+    for index, (path, stem) in enumerate(samples):
         with Image.open(path) as image:
             width, height = image.size
-        record, = reader.read((path.stem,), ((height, width),), hflipped=False)
+        record, = reader.read((stem,), ((height, width),), hflipped=False)
         if record.status == "available":
             labels_by_index[index] = set(record.target["labels"].tolist())
     if not labels_by_index:
-        raise ValueError("no valid IR validation annotations for pseudo-label evaluation")
+        raise ValueError("no valid validation annotations for pseudo-label evaluation")
     candidates = list(labels_by_index)
     random.Random(seed).shuffle(candidates)
     limit = min(sample_size, len(candidates))
@@ -171,28 +204,36 @@ def _preserve_evaluation_state(model, generator):
             generator.set_state(loader_rng)
 
 
-class FixedIRPseudoLabelEvaluator:
+class FixedPseudoLabelEvaluator:
     """Run isolated teacher-only passes using caller-supplied loaders and settings."""
 
-    def __init__(self, *, fixed_loader, full_loader, reader, device, fixed_sample_ids):
-        self.fixed_loader = fixed_loader
-        self.full_loader = full_loader
+    def __init__(self, *, fixed_loaders, full_loaders, reader, device, fixed_sample_ids):
+        self.fixed_loaders = fixed_loaders
+        self.full_loaders = full_loaders
         self.reader = reader
         self.device = device
-        self.fixed_sample_ids = tuple(fixed_sample_ids)
+        self.fixed_sample_ids = {domain: tuple(ids) for domain, ids in fixed_sample_ids.items()}
 
     def state_dict(self):
-        return {"fixed_sample_ids": list(self.fixed_sample_ids),
-                "batch_size": self.fixed_loader.batch_size}
+        return {domain: {"fixed_sample_ids": list(ids),
+                         "batch_size": self.fixed_loaders[domain].batch_size}
+                for domain, ids in self.fixed_sample_ids.items()}
 
     def load_state_dict(self, state):
         # Comparing the manifest makes resumed metrics refer to the same images
         # and batch-global top-k groups; a changed dataset is not silently mixed.
-        if state != self.state_dict():
+        # Older observers used one IR manifest for both teachers. Retain its IR
+        # grouping, while RGB starts with its newly assembled validation subset.
+        if "fixed_sample_ids" in state:
+            state = {"ir": state} if "ir" in self.fixed_loaders else {}
+        current = self.state_dict()
+        if any(current.get(domain) != saved for domain, saved in state.items()):
             raise ValueError("pseudo-label evaluation subset or batch size changed on resume")
 
-    def evaluate(self, teacher, settings, *, iou_threshold, resize_short_edge, full_dataset=False):
-        loader = self.full_loader if full_dataset else self.fixed_loader
+    def evaluate(self, teacher, settings, *, source_domain, iou_threshold, resize_short_edge, full_dataset=False):
+        # The trainer resolves teacher -> domain policy; this executor only
+        # selects the supplied loader and performs an isolated evaluation pass.
+        loader = (self.full_loaders if full_dataset else self.fixed_loaders)[source_domain]
         batch_metrics, sample_ids = [], []
         # No student forward, target-dependent selection, backward, or EMA is
         # performed here. Teacher weights stay fixed throughout the entire pass.
@@ -209,11 +250,12 @@ class FixedIRPseudoLabelEvaluator:
                 sample_ids.extend(ids)
         if not batch_metrics:
             raise ValueError("pseudo-label evaluation loader is empty")
-        if not full_dataset and tuple(sample_ids) != self.fixed_sample_ids:
+        if not full_dataset and tuple(sample_ids) != self.fixed_sample_ids[source_domain]:
             raise ValueError("fixed pseudo-label evaluation image order changed")
         return {
             "matching": "same_class_box_iou",
-            "scope": "full_ir_validation" if full_dataset else "fixed_ir_validation",
+            "source_domain": source_domain,
+            "scope": f"{'full' if full_dataset else 'fixed'}_{source_domain}_validation",
             "images": len(sample_ids), "batches": len(batch_metrics),
             "batch_size": loader.batch_size, "sample_ids": sample_ids,
             "metrics": aggregate_pseudo_label_metrics(batch_metrics),

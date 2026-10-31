@@ -1,7 +1,9 @@
-# IR pseudo-label diagnostics
+# Teacher pseudo-label diagnostics
 
 This opt-in observer measures **dense teacher rows selected by the same rule
-as KD** on a fixed labeled IR validation subset. Each pass uses the current
+as KD** on fixed labeled validation subsets: the RGB teacher receives RGB
+images and the IR teacher receives IR images. Neither audit applies SAGA.
+Each pass uses the current
 teacher weights after the training/EMA update, without random augmentation.
 It runs additional teacher-only forwards and does not compute detection AP.
 
@@ -23,10 +25,13 @@ Optional arguments:
 | `--eval_batch_size` | `4` | Fixed audit and student validation batch size |
 
 Annotations always come from `data_root/Annotations`, sharing the dataset root.
-For each IR sample ID, the reader looks up `<sample_id>.xml`. The class mapping
+RGB uses `JPEGImages/<base>_RGB.jpg`; IR uses
+`JPEGImages/<sample_id>.jpeg`. Both retain the original split ID, such as
+`FLIR_00001_PreviewData`, to read the same aligned `<sample_id>.xml`.
+The class mapping
 is `person=0`, `car=1`, `bicycle=2`, matching the existing FLIR loaders. Small
 boxes are retained, as in IR validation. Optional XML image dimensions must
-match the original IR image; malformed known-class boxes invalidate the file.
+match the original evaluated image; malformed known-class boxes invalidate the file.
 Missing/invalid files are reported as unavailable, not as background images.
 A valid XML file with no supported objects is an annotated empty image.
 Both `<annotation>` and the FLIR-exported `<Annotation>` roots are accepted.
@@ -35,13 +40,15 @@ Both `<annotation>` and the FLIR-exported `<Annotation>` roots are accepted.
 
 An audit is due at completed iterations 500, 1000, 1500, etc., once EMA teachers
 are initialized. It is independent of the current RGB/IR training route because
-it uses separate IR validation loaders. With the default EMA start at 2000,
+it uses separate RGB/IR validation loaders. With the default EMA start at 2000,
 the first eligible audit is normally at completed step 2001, followed by 2500,
 3000, etc. Missed warmup ticks are not replayed. Each enabled teacher gets its
-own pass (`rgb`, `ir`, or both according to `--teacher-mode`).
+own pass (`rgb`, `ir`, or both according to `--teacher-mode`). Disabled teacher
+domains create no audit loaders. The RGB teacher is still measured in phase 4
+as a frozen reference, even though it no longer supplies KD in that phase.
 
-Periodic audits use the same subset of up to 256 validly annotated IR images
-from the validation split. Selection uses a local seeded shuffle and retains
+Periodic audits use a fixed subset of up to 256 validly annotated images per
+enabled domain from the validation split. Selection uses a local seeded shuffle and retains
 at least one image containing each supported class when the sample budget
 allows, then fills remaining slots from shuffled candidates. It does not
 guarantee exact class proportions. If fewer valid images exist, all are used.
@@ -50,24 +57,27 @@ Assembly fails clearly if no valid validation annotations are available.
 Image IDs, order, and batch size stay fixed across passes. Selection reads
 image headers/XML at startup; images and predictions are not cached. After
 normal training completion, each enabled teacher also gets one full pass over
-all existing IR validation images, retaining the final incomplete batch.
+all existing validation images in its own domain, retaining the final incomplete batch.
 Missing/invalid labels in that full pass are reported explicitly.
 
 Records are appended to `output_dir/logs/pseudo_label_eval.jsonl`. A
 `[pseudo-label-eval]` summary also appears in the existing console/train log,
 independently of `--log_interval`. Records include step, phase, teacher, scope
-(`fixed_ir_validation` or `full_ir_validation`), image/batch counts, sample IDs,
+(`fixed_rgb_validation`, `fixed_ir_validation`, `full_rgb_validation`, or
+`full_ir_validation`), `source_domain`, image/batch counts, sample IDs,
 KD settings, resize, IoU threshold, and aggregate metrics. Console summaries
 include scope and image count. Reusing an output directory appends to this file;
 use a different output directory for an independent run.
 
 Observer progress is saved in training checkpoints to avoid duplicate audits
 in an already evaluated interval after resume. The fixed image manifest and
-batch size are stored too; resume rejects a changed subset or batch grouping.
+batch size are stored per domain; resume rejects a changed subset or batch grouping.
 Older baseline checkpoints remain loadable without observer state. A completed
 final checkpoint skips an already recorded full pass on resume. An older
 completed checkpoint without that flag receives the full pass without any
-further optimizer steps.
+further optimizer steps. Legacy IR-only observer manifests remain loadable;
+their completion flags are reset so previous RGB-on-IR measurements cannot
+suppress an evaluation on the new RGB domain.
 
 ## Metric definitions
 

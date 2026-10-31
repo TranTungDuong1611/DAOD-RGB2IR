@@ -8,14 +8,13 @@ from torch.utils.data import DataLoader, Subset
 
 from config import TrainingConfig
 from data import FLIR_CLASSES, NUM_CLASSES, build_dataloaders
-from data.datasets import FLIRIRDataset
 from data.dataloaders import ir_collate
 from data.ir_annotations import IRAnnotationReader
 from evaluator import DetectionEvaluator, PhaseEvaluator
 from models.fcos_factory import build_fcos_d3t_trio
 from optimization import build_lr_scheduler, build_optimizer
 from trainer import CurriculumDomainAdaptationTrainer
-from training.pseudo_label_eval import FixedIRPseudoLabelEvaluator, select_fixed_ir_subset
+from training.pseudo_label_eval import FixedPseudoLabelEvaluator, ValidationImages, select_fixed_subset
 
 
 def move_model_trio_to_device(student, rgb_teacher, ir_teacher, device):
@@ -30,15 +29,11 @@ def move_model_trio_to_device(student, rgb_teacher, ir_teacher, device):
 
 
 def build_pseudo_label_evaluator(config, *, logger):
-    """Resolve audit policy once and assemble dedicated, deterministic IR loaders."""
+    """Assemble isolated validation loaders for each enabled teacher's domain."""
     audit = config.pseudo_label_eval
     if not audit.enabled or config.workflow == "rgb_baseline":
         return None
-    dataset = FLIRIRDataset(config.data.root, split="validation")
     reader = IRAnnotationReader(config.data.root)
-    indices = select_fixed_ir_subset(
-        dataset.ir_paths, reader, sample_size=audit.sample_size, seed=audit.subset_seed,
-    )
     # Each loader owns a generator so iterator/worker seeding never consumes
     # the global RNG used by training. Retain the final incomplete batch.
     def loader(data):
@@ -48,12 +43,24 @@ def build_pseudo_label_evaluator(config, *, logger):
             pin_memory=config.device.startswith("cuda"), collate_fn=ir_collate,
             generator=torch.Generator().manual_seed(audit.subset_seed),
         )
-    logger.info("Pseudo-label IR validation: fixed_images=%d full_images=%d batch_size=%d seed=%d",
-                len(indices), len(dataset), config.loader.eval.batch_size, audit.subset_seed)
-    return FixedIRPseudoLabelEvaluator(
-        fixed_loader=loader(Subset(dataset, indices)), full_loader=loader(dataset),
+    # Domain choice stays in assembly/trainer policy. No SAGA is applied to
+    # audits, and disabled teacher domains do not create extra datasets/loaders.
+    domains = ("rgb", "ir") if config.teacher_mode == "two_teacher" else (config.teacher_mode,)
+    fixed_loaders, full_loaders, fixed_ids = {}, {}, {}
+    for domain in domains:
+        dataset = ValidationImages(config.data.root, domain)
+        indices = select_fixed_subset(
+            dataset.samples, reader, sample_size=audit.sample_size, seed=audit.subset_seed,
+        )
+        fixed_loaders[domain] = loader(Subset(dataset, indices))
+        full_loaders[domain] = loader(dataset)
+        fixed_ids[domain] = tuple(dataset.samples[i][1] for i in indices)
+        logger.info("Pseudo-label %s validation: fixed_images=%d full_images=%d batch_size=%d seed=%d",
+                    domain.upper(), len(indices), len(dataset), config.loader.eval.batch_size, audit.subset_seed)
+    return FixedPseudoLabelEvaluator(
+        fixed_loaders=fixed_loaders, full_loaders=full_loaders,
         reader=reader, device=torch.device(config.device),
-        fixed_sample_ids=tuple(dataset.ir_paths[i].stem for i in indices),
+        fixed_sample_ids=fixed_ids,
     )
 
 

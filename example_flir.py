@@ -331,14 +331,14 @@ def parse_args():
     parser.add_argument("--eval_every", type=int, default=500)
     # Audit labels are independent of supervised targets and student validation.
     parser.add_argument("--eval-pseudo-labels", action="store_true",
-                        help="Compare selected KD rows with IR GT; never train on IR GT")
+                        help="Audit RGB/IR teachers on their own validation domains; never train on audit GT")
     parser.add_argument("--pseudo-label-eval-interval", type=int, default=500,
                         help="Global iteration interval after EMA teachers are initialized")
     parser.add_argument("--pseudo-label-iou-threshold", type=float, default=0.5)
     parser.add_argument("--pseudo-label-eval-samples", type=int, default=256,
-                        help="Maximum labeled IR validation images in each periodic teacher audit")
+                        help="Maximum labeled validation images per teacher domain in each periodic audit")
     parser.add_argument("--pseudo-label-eval-seed", type=int, default=0,
-                        help="Local seed for reproducible fixed IR validation image selection")
+                        help="Local seed for reproducible fixed RGB/IR validation image selection")
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--device", default="cuda")

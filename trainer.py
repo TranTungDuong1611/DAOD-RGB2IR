@@ -65,13 +65,13 @@ class CurriculumDomainAdaptationTrainer:
         self.best_map = 0.0
         self.loss_history = defaultdict(list)
         self.ema_initialized = False
-        # Bootstrap supplies isolated IR validation loaders. Audit progress stays
+        # Bootstrap supplies isolated RGB/IR validation loaders. Audit progress stays
         # separate from student validation history and best-checkpoint selection.
         self.last_pseudo_label_eval_step = 0
         self.last_full_pseudo_label_eval_step = 0
         self.pseudo_label_evaluator = pseudo_label_evaluator
         if config.pseudo_label_eval.enabled and config.workflow != "rgb_baseline" and pseudo_label_evaluator is None:
-            raise ValueError("enabled pseudo-label evaluation requires an IR validation evaluator")
+            raise ValueError("enabled pseudo-label evaluation requires a validation evaluator")
 
     def _teacher_models(self):
         # References stay on the trainer so checkpoint keys and ownership are unchanged.
@@ -305,13 +305,13 @@ class CurriculumDomainAdaptationTrainer:
         for name in names:
             settings = self._distillation_settings(name, phase)
             result = self.pseudo_label_evaluator.evaluate(
-                self._teacher_for_name(name), settings,
+                self._teacher_for_name(name), settings, source_domain=name,
                 iou_threshold=self.config.pseudo_label_eval.iou_threshold,
                 resize_short_edge=self.config.model.min_sizes[-1], full_dataset=full_dataset,
             )
             records.append({
                 **result, "global_step": self.global_step, "phase": phase.name,
-                "source_domain": "ir", "teacher": name,
+                "teacher": name,
                 "trigger": "final" if full_dataset else "periodic",
                 "top_ratio": settings.top_ratio, "min_hm": settings.min_hm,
                 "hm_alpha": settings.hm_alpha, "hm_beta": settings.hm_beta,
@@ -355,7 +355,7 @@ class CurriculumDomainAdaptationTrainer:
             if self.global_step > 0 and self.global_step % 5000 == 0:
                 self.save_checkpoint(f"checkpoint_{self.global_step:06d}.pth")
 
-        # A normal completed run also measures every IR validation image once.
+        # A completed run measures each teacher's entire validation domain once.
         # Persisting this flag makes resuming a completed final model idempotent.
         if (self.pseudo_label_evaluator is not None and self.ema_initialized
                 and self.global_step >= self.config.max_iter
@@ -455,6 +455,11 @@ class CurriculumDomainAdaptationTrainer:
         audit_state = checkpoint.get("pseudo_label_evaluator")
         if self.pseudo_label_evaluator is not None and audit_state is not None:
             self.pseudo_label_evaluator.load_state_dict(audit_state)
+            # Old checkpoints measured RGB teachers on IR images. Their audit
+            # completion flags must not suppress a new pass on RGB validation.
+            if "fixed_sample_ids" in audit_state:
+                self.last_pseudo_label_eval_step = 0
+                self.last_full_pseudo_label_eval_step = 0
         logger.info("Resumed from step %s", self.global_step)
 
     def _log(self, log: Dict[str, Any]) -> None:

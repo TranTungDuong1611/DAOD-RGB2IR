@@ -1,4 +1,4 @@
-"""Read audit-only IR labels without changing training datasets or sampling."""
+"""Read aligned VOC audit labels shared by RGB/IR without changing training."""
 
 from dataclasses import dataclass
 import math
@@ -18,7 +18,7 @@ class IRAnnotation:
 
 class IRAnnotationReader:
     def __init__(self, data_root):
-        # Share the dataset root and its existing VOC annotation layout.
+        # Both aligned domains share this root and the original IR sample IDs.
         self.root = Path(data_root)
 
     def read(self, sample_ids, image_sizes, *, hflipped: bool):
