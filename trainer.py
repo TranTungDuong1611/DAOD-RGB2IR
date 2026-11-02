@@ -65,6 +65,7 @@ class CurriculumDomainAdaptationTrainer:
         self.best_map = 0.0
         self.loss_history = defaultdict(list)
         self.ema_initialized = False
+        self.ir_neck_initialized = False
         # Bootstrap supplies isolated IR validation loaders. Audit progress stays
         # separate from student validation history and best-checkpoint selection.
         self.last_pseudo_label_eval_step = 0
@@ -107,7 +108,27 @@ class CurriculumDomainAdaptationTrainer:
             ),
         )
 
+    def _ensure_ir_neck_initialized(self) -> None:
+        """Warm-start IR once at the first iteration after RGB warmup."""
+        if (
+            self.ir_neck_initialized
+            or not self.config.model.domain_neck_enabled
+            or self.config.workflow != "curriculum"
+            or self.global_step < self.config.curriculum.phase1_end
+        ):
+            return
+        neck = self.student.adapter.domain_neck
+        neck.initialize_ir_from_rgb()
+        for teacher in self._teacher_models().values():
+            if teacher is not None:
+                teacher.adapter.domain_neck.initialize_ir_from_rgb(neck)
+        self.ir_neck_initialized = True
+        logger.info("RGB -> IR neck warmstart at step %s (student and teachers)", self.global_step)
+
     def _ensure_ema_initialized(self) -> None:
+        # This transfer is due even if EMA started early, or starts later than
+        # phase two. Run it before teacher initialization and any KD forward.
+        self._ensure_ir_neck_initialized()
         # Decide whether initialization is due from persisted state and config.
         # A resumed, initialized run must continue without another hard copy.
         if self.ema_initialized:
@@ -378,6 +399,7 @@ class CurriculumDomainAdaptationTrainer:
             "global_step": self.global_step,
             "best_map": self.best_map,
             "ema_initialized": self.ema_initialized,
+            "ir_neck_initialized": self.ir_neck_initialized,
             "last_pseudo_label_eval_step": self.last_pseudo_label_eval_step,
             "last_full_pseudo_label_eval_step": self.last_full_pseudo_label_eval_step,
             "pseudo_label_evaluator": (None if self.pseudo_label_evaluator is None
@@ -410,6 +432,20 @@ class CurriculumDomainAdaptationTrainer:
         if metadata is None:
             raise ValueError("Checkpoint has no D3T metadata; legacy checkpoints are unsupported")
         validate_checkpoint_metadata(metadata, self.config)
+        checkpoint_step = int(checkpoint.get("global_step", 0))
+        ir_neck_initialized = checkpoint.get("ir_neck_initialized", False)
+        if not isinstance(ir_neck_initialized, bool):
+            raise ValueError("Checkpoint IR neck warmstart state must be a boolean")
+        if (
+            self.config.model.domain_neck_enabled
+            and self.config.workflow == "curriculum"
+            and checkpoint_step > self.config.curriculum.phase1_end
+            and not ir_neck_initialized
+        ):
+            raise ValueError(
+                "Checkpoint is past phase-one warmup without IR neck warmstart state; "
+                "resume a phase-one checkpoint or start a new run"
+            )
         configured_teachers = {
             "rgb_teacher": self.rgb_teacher,
             "ir_teacher": self.ir_teacher,
@@ -447,9 +483,10 @@ class CurriculumDomainAdaptationTrainer:
             and hasattr(self.phase_evaluator, "load_state_dict")
         ):
             self.phase_evaluator.load_state_dict(evaluator_state)
-        self.global_step = int(checkpoint.get("global_step", 0))
+        self.global_step = checkpoint_step
         self.best_map = float(checkpoint.get("best_map", 0.0))
         self.ema_initialized = bool(checkpoint.get("ema_initialized", False))
+        self.ir_neck_initialized = ir_neck_initialized
         # Older baseline checkpoints do not carry observer progress. An audit
         # is eligible after teacher initialization if a global tick has passed.
         self.last_pseudo_label_eval_step = int(checkpoint.get("last_pseudo_label_eval_step", 0))

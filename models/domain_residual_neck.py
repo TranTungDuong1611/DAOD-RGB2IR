@@ -90,6 +90,17 @@ class DomainResidualNeck(nn.Module):
             for _ in range(num_levels)
         )
 
+    def initialize_ir_from_rgb(self, source=None) -> None:
+        """Copy learned RGB branches, preserving IR Parameters and shared weights.
+
+        A teacher can use the student's RGB branches as its source without
+        resetting its own RGB branches or EMA-trained shared convolutions.
+        """
+        source = self if source is None else source
+        for target_block, source_block in zip(self.blocks, source.blocks, strict=True):
+            target_block.ir_adapter.load_state_dict(source_block.rgb_adapter.state_dict())
+            target_block.ir_se.load_state_dict(source_block.rgb_se.state_dict())
+
     def forward(
         self, features: Mapping[str, Tensor], *, domain: str,
     ) -> Mapping[str, Tensor]:

@@ -96,7 +96,8 @@ def test_rgb_supervision_updates_only_rgb_attention_and_shared_convolutions():
 @pytest.mark.parametrize("phase", [3, 4])
 def test_real_ir_kd_updates_only_ir_branch_and_ema_includes_attention(phase):
     curriculum = CurriculumConfig(phase1_end=0, phase2_end=0,
-        phase3_end=4 if phase == 3 else 0, phase3_rgb_sampling_ratio=0.0)
+        phase3_end=4 if phase == 3 else 0, phase3_rgb_sampling_ratio=0.0,
+        phase4_rgb_sampling_ratio=0.0)
     trainer = make_trainer(curriculum)
     trainer._ensure_ema_initialized()
     with torch.no_grad():
