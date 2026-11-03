@@ -7,7 +7,7 @@ from torch import Tensor, nn
 
 
 def normalize_domain(domain: str) -> str:
-    """Use physical input domains; SAGA views remain RGB, thermal aliases IR."""
+    """Validate the selected RGB/IR branch; thermal aliases IR."""
     if not isinstance(domain, str):
         raise TypeError("domain must be a string")
     normalized = domain.strip().lower()

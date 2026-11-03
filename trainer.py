@@ -97,7 +97,7 @@ class CurriculumDomainAdaptationTrainer:
         """Resolve configured values before delegating data execution."""
         source_domain = self.scheduler.get_source_domain(step_name)
         alpha_map = self._alpha_map()
-        return self.data_flow.prepare(
+        data = self.data_flow.prepare(
             source_domain=source_domain,
             use_gt=route.use_gt,
             student_alpha=(
@@ -107,6 +107,15 @@ class CurriculumDomainAdaptationTrainer:
                 alpha_map[route.teacher_saga_level] if source_domain == "rgb" else None
             ),
         )
+        # Keep the labeled RGB source and its high/mid SAGA views. Only the
+        # neck branch changes so IR adapters receive GT supervision in phase two.
+        if (
+            self.config.workflow == "curriculum"
+            and self.config.model.domain_neck_enabled
+            and step_name == "p2_ir_flow"
+        ):
+            data["student_domain"] = data["teacher_domain"] = "ir"
+        return data
 
     def _ensure_ir_neck_initialized(self) -> None:
         """Warm-start IR once at the first iteration after RGB warmup."""

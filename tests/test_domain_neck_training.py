@@ -114,14 +114,66 @@ def test_real_ir_kd_updates_only_ir_branch_and_ema_includes_attention(phase):
         torch.testing.assert_close(parameter, dict(trainer.student.named_parameters())[name])
 
 
-def test_saga_high_uses_rgb_attention_even_with_ir_named_teacher():
+@pytest.mark.parametrize("distill_weight, ema_start", [(0.0, 0), (1.0, 0), (1.0, 5)])
+def test_saga_high_supervision_updates_ir_branch_with_optional_kd(distill_weight, ema_start):
     trainer = make_trainer(CurriculumConfig(phase1_end=0, phase2_end=3,
         phase3_end=4, phase2_rgb_sampling_ratio=0.0))
+    trainer.config.loss.p2_distill_weight = distill_weight
+    trainer.config.ema.start_steps = ema_start
+    data = trainer._prepare_data_by_route("p2_ir_flow", trainer.config.mid_routing.p2_ir_flow)
+    assert data["student_domain"] == data["teacher_domain"] == "ir"
+    assert data["sample_ids"] == ("rgb-0",)
+    torch.testing.assert_close(data["targets"][0]["boxes"], torch.tensor([[2., 2., 8., 8.]]))
+    assert data["targets"][0]["labels"].tolist() == [0]
+    trainer._ensure_ema_initialized()
+    with torch.no_grad():
+        trainer.ir_teacher.adapter.domain_neck.blocks[0].ir_se.se[3].bias.add_(1.0)
+    before = {name: p.detach().clone() for name, p in trainer.student.adapter.domain_neck.named_parameters()}
+
+    logs = trainer.train_one_iteration()
+
+    assert trainer.student.adapter.domains == ["ir"]
+    assert logs["step_type"] == "p2_ir_flow"
+    assert logs["sup_loss_cls"] > 0
+    assert_branch_updated(trainer, before, "ir", "rgb")
+    if distill_weight > 0 and trainer.ema_initialized:
+        assert trainer.ir_teacher.adapter.domains == ["ir"]
+        assert logs["loss_kd_quality_ir"] > 0
+    else:
+        assert trainer.ir_teacher.adapter.domains == []
+        assert not any(name.startswith("loss_kd_") for name in logs)
+    assert all(p.grad is None for teacher in (trainer.rgb_teacher, trainer.ir_teacher)
+               for p in teacher.parameters())
+
+
+@pytest.mark.parametrize("step_name, expected", [
+    ("p1_rgb_supervised", "rgb"),
+    ("p2_rgb_flow", "rgb"),
+    ("p2_ir_flow", "ir"),
+    ("p3_rgb_flow", "rgb"),
+    ("p3_ir_flow", "ir"),
+    ("p4_rgb_supervised", "rgb"),
+    ("p4_ir_focus", "ir"),
+])
+def test_route_selects_attention_without_changing_source_or_gt(step_name, expected):
+    trainer = make_trainer(CurriculumConfig(phase1_end=0, phase2_end=3, phase3_end=4))
+    route = trainer.config.mid_routing.get_routing(step_name)
+    data = trainer._prepare_data_by_route(step_name, route)
+    assert data["student_domain"] == data["teacher_domain"] == expected
+    real_ir = step_name in {"p3_ir_flow", "p4_ir_focus"}
+    assert data["sample_ids"] == (("ir-0",) if real_ir else ("rgb-0",))
+    assert (data["targets"] is not None) == (not real_ir)
+
+
+@pytest.mark.parametrize("mode", ["neck_disabled", "rgb_baseline"])
+def test_saga_high_keeps_rgb_routing_outside_enabled_neck_curriculum(mode):
+    trainer = make_trainer(CurriculumConfig(phase1_end=0, phase2_end=3, phase3_end=4))
+    if mode == "neck_disabled":
+        trainer.config.model.domain_neck_enabled = False
+    else:
+        trainer.config.workflow = "rgb_baseline"
     data = trainer._prepare_data_by_route("p2_ir_flow", trainer.config.mid_routing.p2_ir_flow)
     assert data["student_domain"] == data["teacher_domain"] == "rgb"
-    trainer.train_one_iteration()
-    assert trainer.student.adapter.domains[-1] == "rgb"
-    assert trainer.ir_teacher.adapter.domains[-1] == "rgb"
 
 
 @pytest.fixture

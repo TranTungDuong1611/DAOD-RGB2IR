@@ -22,10 +22,13 @@ Theo lựa chọn của người dùng, đường skip là convolution học đ�
 
 | Input thực tế | Nhánh được chọn | Loss theo workflow hiện có |
 |---|---|---|
-| RGB, gồm cả SAGA weak/mid/high | `rgb_adapter`, `rgb_se` | GT và/hoặc KD theo route |
+| RGB/SAGA ở các route RGB, gồm `p2_rgb_flow` và `p3_rgb_flow` | `rgb_adapter`, `rgb_se` | GT và/hoặc KD theo route |
+| `p2_ir_flow`: RGB qua SAGA-high (student), SAGA-mid (teacher) | `ir_adapter`, `ir_se` cho cả hai | GT RGB + KD theo cấu hình |
 | IR thật | `ir_adapter`, `ir_se` | KD, không dùng GT IR train |
 
-Tên teacher không chọn nhánh. Ví dụ route `p2_ir_flow` dùng IR teacher nhưng input là RGB qua SAGA nên cả hai forward chọn RGB. `thermal` là alias cho `ir` khi gọi module/model trực tiếp. Domain keyword mặc định là `rgb`; inference IR phải truyền `domain="ir"`.
+Tên teacher không tự chọn nhánh. Khi bật neck trong curriculum, trainer chọn nhánh IR cho `p2_ir_flow` để adapter/SE IR nhận supervised loss từ GT RGB ngay trong phase 2. Nguồn ảnh vẫn là RGB loader; student giữ SAGA-high và teacher giữ SAGA-mid. Các route khác giữ lựa chọn nhánh theo nguồn ảnh. `thermal` là alias cho `ir` khi gọi module/model trực tiếp. Domain keyword mặc định là `rgb`; inference IR phải truyền `domain="ir"`.
+
+Ở iteration đầu sau phase 1, student copy adapter và SE RGB đã học sang IR một lần trên P3–P7, đồng thời đồng bộ nhánh IR teacher trước forward. Sau đó hai nhánh tiếp tục học độc lập. Supervised loss vẫn được tính khi KD tắt hoặc teacher chưa đến thời điểm khởi tạo; không thêm loss mới. Khi neck tắt, `p2_ir_flow` giữ lựa chọn nhánh RGB như baseline.
 
 Interface thống nhất: mọi detector adapter nhận `domain` trong `forward`; wrapper, trainer, teacher và evaluator truyền trực tiếp tham số này. Adapter/model tùy biến cũng cần nhận `domain`, không có cờ kiểm tra khả năng hỗ trợ hoặc fallback bỏ qua domain.
 

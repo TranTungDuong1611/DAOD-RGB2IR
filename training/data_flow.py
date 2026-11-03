@@ -125,7 +125,8 @@ class RouteDataFlow:
                 "teacher_images": teacher_images,
                 "targets": geometric_targets if use_gt else None,
                 "sample_ids": sample_ids,
-                # SAGA changes appearance, not the physical source domain.
+                # Default to the source domain; the trainer may select another
+                # neck branch for supervised SAGA-high training in phase two.
                 "student_domain": "rgb",
                 "teacher_domain": "rgb",
             }
