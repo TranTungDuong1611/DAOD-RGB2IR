@@ -102,6 +102,9 @@ def build_training_config(args) -> TrainingConfig:
             domain_neck_enabled=args.domain_neck,
             domain_neck_bottleneck_channels=args.domain_neck_bottleneck_channels,
             domain_neck_se_reduction=args.domain_neck_se_reduction,
+            out_ref_enabled=args.out_ref,
+            out_ref_channels=args.out_ref_channels,
+            out_ref_batch_norm=args.out_ref_batch_norm,
             vfl_alpha=0.75,
             vfl_gamma=2.0,
         ),
@@ -138,6 +141,8 @@ def build_training_config(args) -> TrainingConfig:
             weight_deltas=1.0,
             weight_quality=1.0,
             weight_uhl=1.0,
+            weight_out_ref=args.out_ref_loss_weight,
+            out_ref_teacher_score_thresh=args.out_ref_teacher_score_thresh,
         ),
         # Keep update schedules and view-generation parameters in configuration;
         # executors receive the values selected by the trainer for each step.
@@ -205,7 +210,7 @@ def main(args) -> None:
     logger.info("Training log -> %s", log_path)
     device = torch.device(config.device)
     logger.info(
-        "FLIR D3T: workflow=%s teacher_mode=%s mode=%s weights=%s device=%s total_iters=%d domain_neck=%s",
+        "FLIR D3T: workflow=%s teacher_mode=%s mode=%s weights=%s device=%s total_iters=%d domain_neck=%s out_ref=%s out_ref_weight=%g",
         config.workflow,
         config.teacher_mode,
         config.model.classification_init_mode.value,
@@ -213,6 +218,8 @@ def main(args) -> None:
         device,
         config.total_iters,
         config.model.domain_neck_enabled,
+        config.model.out_ref_enabled,
+        config.loss.weight_out_ref,
     )
 
     # Bootstrap wires dependencies; this entrypoint retains the sequence of
@@ -296,6 +303,16 @@ def parse_args():
     parser.set_defaults(domain_neck=False)
     parser.add_argument("--domain-neck-bottleneck-channels", type=int, default=64)
     parser.add_argument("--domain-neck-se-reduction", type=int, default=16)
+    parser.add_argument("--out-ref", action="store_true",
+                        help="Enable BiRefNet-style outward reference on neck P3/P4 (requires --domain-neck)")
+    parser.add_argument("--out-ref-channels", type=int, default=16)
+    parser.add_argument("--no-out-ref-batch-norm", dest="out_ref_batch_norm", action="store_false",
+                        help="Disable BatchNorm in the OutRef feature branch for ablation")
+    parser.set_defaults(out_ref_batch_norm=True)
+    parser.add_argument("--out-ref-loss-weight", type=float, default=0.1,
+                        help="Auxiliary gradient-loss weight; 0 keeps attention but disables edge supervision")
+    parser.add_argument("--out-ref-teacher-score-thresh", type=float, default=0.7,
+                        help="Minimum post-NMS teacher detection score for unlabeled IR gradient ROIs")
     parser.add_argument(
         "--weights",
         choices=("DEFAULT", "none"),

@@ -2,6 +2,8 @@
 
 Module mới nằm ngay sau FPN và trước FCOS detection head. Mặc định tắt để giữ baseline cũ; bật bằng `--domain-neck`.
 
+Nhánh này có tùy chọn OutRef tại P3/P4 bằng `--out-ref`; xem [OUTWARD_REFERENCE.md](OUTWARD_REFERENCE.md) để đối chiếu BiRefNet, công thức loss và lệnh train. Mô tả SE-only bên dưới áp dụng khi OutRef tắt.
+
 ## Kiến trúc đã triển khai
 
 Mỗi level P3–P7 có một `DomainBottleneck` riêng, mặc định `256 → 64 → 256`. Trong một block, hai domain dùng chung `conv1`, `conv2`, `conv3` và `skip`; adapter 1×1 và SE có bộ tham số riêng cho RGB/IR.
