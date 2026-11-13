@@ -19,6 +19,7 @@ from data.augmentations import StudentAugmentor
 from training import teachers
 from training.data_flow import RouteDataFlow
 from training.loss_flow import LossFlow, component_weight
+from loss.outward_reference import outward_reference_loss
 from training.observability import log_iteration, log_pseudo_label_evaluation
 
 logger = logging.getLogger(__name__)
@@ -249,6 +250,8 @@ class CurriculumDomainAdaptationTrainer:
 
         # Distillation contribution: use only enabled, initialized references.
         # Each teacher consumes the paired view with the student's resize.
+        use_out_ref_loss = self.config.model.out_ref_enabled and self.config.loss.weight_out_ref > 0
+        teacher_detections = []
         if (
             self.config.workflow != "rgb_baseline"
             and self.ema_initialized
@@ -273,6 +276,16 @@ class CurriculumDomainAdaptationTrainer:
                     teacher_name=teacher_name,
                     phase_weight=distill_weight,
                 )
+                if use_out_ref_loss and targets is None:
+                    # Decode this same teacher output; never forward again for ROI selection.
+                    with torch.no_grad():
+                        teacher_detections.append(teacher.adapter.postprocess(teacher_output))
+
+        if use_out_ref_loss:
+            losses.auxiliary("loss_out_ref", outward_reference_loss(
+                student_output.context, teacher_detections,
+                score_threshold=self.config.loss.out_ref_teacher_score_thresh,
+            ), weight=self.config.loss.weight_out_ref)
 
         # Preserve the existing optimizer eligibility rule, including a scalar
         # fallback when this route produced no differentiable contributions.

@@ -267,6 +267,8 @@ class LossConfig:
     weight_deltas: float = 1.0
     weight_quality: float = 1.0
     weight_uhl: float = 1.0
+    weight_out_ref: float = 0.1
+    out_ref_teacher_score_thresh: float = 0.7
 
     # Phase 1: Pure Supervised Warmup (RGB + GT)
     p1_sup_weight: float = 1.0
@@ -283,6 +285,12 @@ class LossConfig:
     # Phase 4: GT applies only to RGB steps; unlabeled IR still uses KD only.
     p4_sup_weight: float = 1.0
     p4_distill_weight: float = 1.0
+
+    def __post_init__(self):
+        if not math.isfinite(self.weight_out_ref) or self.weight_out_ref < 0:
+            raise ValueError("weight_out_ref must be finite and non-negative")
+        if not math.isfinite(self.out_ref_teacher_score_thresh) or not 0 <= self.out_ref_teacher_score_thresh <= 1:
+            raise ValueError("out_ref_teacher_score_thresh must be in [0, 1]")
 
     def get_phase_weights(self, phase: Phase) -> Tuple[float, float]:
         """Helper to retrieve (supervised_weight, distillation_weight) for a given phase."""

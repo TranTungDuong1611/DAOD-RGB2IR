@@ -212,6 +212,8 @@ class FCOSAdapterContext:
     class_names: Tuple[str, ...] = ("person", "car", "bicycle")
     domain: str = "rgb"
     out_ref_logits: Tuple[Tensor, ...] = ()
+    image_mean: Tuple[float, ...] = (0.485, 0.456, 0.406)
+    image_std: Tuple[float, ...] = (0.229, 0.224, 0.225)
 
     @property
     def transformed_image_sizes(self) -> Tuple[Tuple[int, int], ...]:
@@ -415,6 +417,8 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
             class_names=self.class_names,
             domain=resolved_domain,
             out_ref_logits=out_ref_logits,
+            image_mean=tuple(self.detector.transform.image_mean),
+            image_std=tuple(self.detector.transform.image_std),
         )
         return AdapterOutput(
             tuple(predictions), context=context, sample_ids=resolved_ids
