@@ -90,6 +90,9 @@ class FCOSModelConfig:
     domain_neck_enabled: bool = False
     domain_neck_bottleneck_channels: int = 64
     domain_neck_se_reduction: int = 16
+    out_ref_enabled: bool = False
+    out_ref_channels: int = 16
+    out_ref_batch_norm: bool = True
     
     # HM-Focal Loss (VFL) Hyperparameters
     vfl_alpha: float = 0.75
@@ -120,9 +123,12 @@ class FCOSModelConfig:
             raise ValueError("score_thresh and nms_thresh must be in [0, 1]")
         if self.topk_candidates <= 0 or self.detections_per_img <= 0:
             raise ValueError("detection top-k values must be positive")
-        if not isinstance(self.domain_neck_enabled, bool):
-            raise TypeError("domain_neck_enabled must be boolean")
-        for name in ("domain_neck_bottleneck_channels", "domain_neck_se_reduction"):
+        for name in ("domain_neck_enabled", "out_ref_enabled", "out_ref_batch_norm"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be boolean")
+        if self.out_ref_enabled and not self.domain_neck_enabled:
+            raise ValueError("OutRef requires domain neck")
+        for name in ("domain_neck_bottleneck_channels", "domain_neck_se_reduction", "out_ref_channels"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")

@@ -5,6 +5,8 @@ from collections.abc import Mapping
 
 from torch import Tensor, nn
 
+from .outward_reference import OutwardReference
+
 
 def normalize_domain(domain: str) -> str:
     """Validate the selected RGB/IR branch; thermal aliases IR."""
@@ -49,6 +51,8 @@ class DomainBottleneck(nn.Module):
     def __init__(
         self, in_channels: int = 256, mid_channels: int = 64,
         out_channels: int = 256, reduction: int = 16,
+        *, out_ref_enabled: bool = False, out_ref_channels: int = 16,
+        out_ref_batch_norm: bool = True,
     ):
         super().__init__()
         if min(in_channels, mid_channels, out_channels, reduction) <= 0:
@@ -62,8 +66,15 @@ class DomainBottleneck(nn.Module):
         self.ir_se = SEBlock(out_channels, reduction)
         self.skip = nn.Conv2d(in_channels, out_channels, 1)
         self.relu = nn.ReLU()
+        self.out_ref = (
+            OutwardReference(out_channels, out_ref_channels, out_ref_batch_norm)
+            if out_ref_enabled else None
+        )
 
     def forward(self, x: Tensor, domain: str) -> Tensor:
+        return self.forward_with_aux(x, domain)[0]
+
+    def forward_with_aux(self, x: Tensor, domain: str):
         domain = normalize_domain(domain)
         identity = self.skip(x)
         h = self.relu(self.conv1(x))
@@ -71,7 +82,12 @@ class DomainBottleneck(nn.Module):
         h = self.relu(self.conv2(h) + adapter(h))
         h = self.conv3(h)
         attention = self.rgb_se if domain == "rgb" else self.ir_se
-        return self.relu(attention(h) + identity)
+        channel_feature = attention(h)
+        edge_logits = None
+        if self.out_ref is not None:
+            spatial_attention, edge_logits = self.out_ref(h)
+            channel_feature = channel_feature * spatial_attention
+        return self.relu(channel_feature + identity), edge_logits
 
 
 class DomainResidualNeck(nn.Module):
@@ -80,14 +96,20 @@ class DomainResidualNeck(nn.Module):
     def __init__(
         self, channels: int = 256, bottleneck_channels: int = 64,
         num_levels: int = 5, se_reduction: int = 16,
+        *, out_ref_enabled: bool = False, out_ref_channels: int = 16,
+        out_ref_batch_norm: bool = True,
     ):
         super().__init__()
         if min(channels, bottleneck_channels, num_levels, se_reduction) <= 0:
             raise ValueError("dimensions, num_levels and se_reduction must be positive")
         self.num_levels = num_levels
         self.blocks = nn.ModuleList(
-            DomainBottleneck(channels, bottleneck_channels, channels, se_reduction)
-            for _ in range(num_levels)
+            DomainBottleneck(
+                channels, bottleneck_channels, channels, se_reduction,
+                out_ref_enabled=out_ref_enabled and level < 2,
+                out_ref_channels=out_ref_channels, out_ref_batch_norm=out_ref_batch_norm,
+            )
+            for level in range(num_levels)
         )
 
     def initialize_ir_from_rgb(self, source=None) -> None:
@@ -104,10 +126,15 @@ class DomainResidualNeck(nn.Module):
     def forward(
         self, features: Mapping[str, Tensor], *, domain: str,
     ) -> Mapping[str, Tensor]:
+        return self.forward_with_aux(features, domain=domain)[0]
+
+    def forward_with_aux(self, features: Mapping[str, Tensor], *, domain: str):
         domain = normalize_domain(domain)
         if len(features) != self.num_levels:
             raise ValueError(f"expected {self.num_levels} FPN levels, got {len(features)}")
-        return OrderedDict(
-            (name, block(feature, domain))
-            for (name, feature), block in zip(features.items(), self.blocks)
-        )
+        output, logits = OrderedDict(), []
+        for (name, feature), block in zip(features.items(), self.blocks):
+            output[name], edge = block.forward_with_aux(feature, domain)
+            if edge is not None:
+                logits.append(edge)
+        return output, tuple(logits)

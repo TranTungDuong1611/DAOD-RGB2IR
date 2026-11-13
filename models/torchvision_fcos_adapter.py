@@ -211,6 +211,7 @@ class FCOSAdapterContext:
     sample_ids: Optional[Tuple[str, ...]] = None
     class_names: Tuple[str, ...] = ("person", "car", "bicycle")
     domain: str = "rgb"
+    out_ref_logits: Tuple[Tensor, ...] = ()
 
     @property
     def transformed_image_sizes(self) -> Tuple[Tuple[int, int], ...]:
@@ -341,8 +342,9 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
         features = self.detector.backbone(transformed_images.tensors)
         if isinstance(features, Tensor):
             features = OrderedDict([("0", features)])
+        out_ref_logits = ()
         if self.domain_neck is not None:
-            features = self.domain_neck(features, domain=resolved_domain)
+            features, out_ref_logits = self.domain_neck.forward_with_aux(features, domain=resolved_domain)
         feature_list = tuple(features.values())
         head_outputs = self.detector.head(feature_list)
         expected_keys = {"cls_logits", "bbox_regression", "quality_logits"}
@@ -412,6 +414,7 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
             sample_ids=resolved_ids,
             class_names=self.class_names,
             domain=resolved_domain,
+            out_ref_logits=out_ref_logits,
         )
         return AdapterOutput(
             tuple(predictions), context=context, sample_ids=resolved_ids

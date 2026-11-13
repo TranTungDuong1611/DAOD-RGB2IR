@@ -61,11 +61,19 @@ def serialize_effective_config(config: TrainingConfig) -> dict[str, Any]:
 
 
 def _domain_neck_settings(config: TrainingConfig) -> dict[str, Any]:
-    return {
+    settings = {
         "enabled": config.model.domain_neck_enabled,
         "bottleneck_channels": config.model.domain_neck_bottleneck_channels,
         "se_reduction": config.model.domain_neck_se_reduction,
     }
+    # Keep disabled-OutRef metadata compatible with existing neck checkpoints.
+    if config.model.out_ref_enabled:
+        settings["out_ref"] = {
+            "channels": config.model.out_ref_channels,
+            "batch_norm": config.model.out_ref_batch_norm,
+            "levels": ["P3", "P4"], "attention_gain": 2,
+        }
+    return settings
 
 
 def build_checkpoint_metadata(config: TrainingConfig) -> dict[str, Any]:
@@ -178,6 +186,9 @@ def build_fcos_d3t_model(
             channels=base_detector.backbone.out_channels,
             bottleneck_channels=config.model.domain_neck_bottleneck_channels,
             se_reduction=config.model.domain_neck_se_reduction,
+            out_ref_enabled=config.model.out_ref_enabled,
+            out_ref_channels=config.model.out_ref_channels,
+            out_ref_batch_norm=config.model.out_ref_batch_norm,
         )
     adapter = TorchvisionFCOSAdapter(
         base_detector,
