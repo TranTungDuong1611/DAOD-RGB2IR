@@ -264,7 +264,7 @@ def evaluate(args) -> dict[str, float]:
     return metrics
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Evaluate a D3T FCOS checkpoint with official COCO bbox metrics"
     )
@@ -281,7 +281,7 @@ def parse_args():
         help="Low threshold preserves candidates needed by COCO AP ranking",
     )
     parser.add_argument("--output", default=None, help="Optional metrics JSON path")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":

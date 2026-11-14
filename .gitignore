@@ -208,3 +208,6 @@ marimo/_lsp/
 __marimo__/
 
 D3T/
+
+# Local implementation ledger, test wheels and smoke outputs
+.superpowers/
