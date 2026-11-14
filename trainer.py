@@ -245,14 +245,15 @@ class CurriculumDomainAdaptationTrainer:
                     phase_weight=distill_weight,
                 )
 
-        # Compare each SAGA student object with the RGB EMA reference from the
-        # same labeled source image. The RGB teacher view is always the shared
-        # geometric RGB image; reuse the route forward only when it used that
-        # exact reference appearance.
+        # Compare SAGA student objects with the RGB EMA reference only on the
+        # labeled RGB-backed SAGA routes in phases 2 and 3. Phase 4's supervised
+        # RGB route is pure RGB, so it must not activate color consistency.
         color_weight = self.config.loss.color_consistency_weight
         if (
             color_weight > 0
             and self.config.workflow != "rgb_baseline"
+            and phase in (Phase.PHASE2_TRANSITION, Phase.PHASE3_ADAPTATION)
+            and route.student_saga_level != "rgb"
             and self.ema_initialized
             and route.use_gt
             and targets is not None
