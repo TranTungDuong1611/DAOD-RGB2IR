@@ -135,6 +135,7 @@ def build_training_config(args) -> TrainingConfig:
             weight_deltas=1.0,
             weight_quality=1.0,
             weight_uhl=1.0,
+            color_consistency_weight=getattr(args, "color_consistency_weight", 0.1),
         ),
         # Keep update schedules and view-generation parameters in configuration;
         # executors receive the values selected by the trainer for each step.
@@ -330,6 +331,12 @@ def parse_args():
     parser.add_argument("--hm-beta", type=float, default=0.5)
     parser.add_argument("--un-regular-alpha", type=float, default=1.0)
     parser.add_argument("--ema-alpha", type=float, default=0.9996)
+    parser.add_argument(
+        "--color-consistency-weight",
+        type=float,
+        default=0.1,
+        help="Weight for normalized object-level SAGA-to-RGB P3 feature L1 (0 disables)",
+    )
     parser.add_argument(
         "--ema-start",
         type=int,

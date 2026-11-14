@@ -123,6 +123,9 @@ class RouteDataFlow:
             return {
                 "student_images": student_images,
                 "teacher_images": teacher_images,
+                # Preserve the pure RGB reference from the same geometrically
+                # transformed source sample for object-level feature matching.
+                "rgb_reference_images": geometric_images.clone(),
                 "targets": geometric_targets if use_gt else None,
                 "sample_ids": sample_ids,
             }

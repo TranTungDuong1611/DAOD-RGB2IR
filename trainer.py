@@ -218,6 +218,8 @@ class CurriculumDomainAdaptationTrainer:
 
         # Distillation contribution: use only enabled, initialized references.
         # Each teacher consumes the paired view with the student's resize.
+        teacher_outputs = {}
+        teacher_output = None
         if (
             self.config.workflow != "rgb_baseline"
             and self.ema_initialized
@@ -232,6 +234,7 @@ class CurriculumDomainAdaptationTrainer:
                     sample_ids=sample_ids,
                     resize_short_edge=resize_short_edge,
                 )
+                teacher_outputs[teacher_name] = teacher_output
                 settings = self._distillation_settings(teacher_name, phase)
                 losses.distill(
                     self.student,
@@ -241,6 +244,44 @@ class CurriculumDomainAdaptationTrainer:
                     teacher_name=teacher_name,
                     phase_weight=distill_weight,
                 )
+
+        # Compare each SAGA student object with the RGB EMA reference from the
+        # same labeled source image. The RGB teacher view is always the shared
+        # geometric RGB image; reuse the route forward only when it used that
+        # exact reference appearance.
+        color_weight = self.config.loss.color_consistency_weight
+        if (
+            color_weight > 0
+            and self.config.workflow != "rgb_baseline"
+            and self.ema_initialized
+            and route.use_gt
+            and targets is not None
+            and data.get("rgb_reference_images") is not None
+            and self.rgb_teacher is not None
+            and callable(
+                getattr(self.student.adapter, "object_color_consistency_inputs", None)
+            )
+        ):
+            rgb_teacher_output = None
+            if route.teacher_saga_level == "rgb":
+                rgb_teacher_output = teacher_outputs.get("rgb")
+            if rgb_teacher_output is None:
+                rgb_teacher_output = teachers.forward_teacher(
+                    self._teacher_for_name("rgb"),
+                    data["rgb_reference_images"],
+                    sample_ids=sample_ids,
+                    resize_short_edge=resize_short_edge,
+                )
+            color_loss = self.student.object_color_consistency_from_outputs(
+                student_output, rgb_teacher_output
+            )
+            if color_loss is not None:
+                losses.auxiliary(
+                    "color_consistency", color_loss, weight=color_weight
+                )
+            rgb_teacher_output = None
+        teacher_outputs.clear()
+        teacher_output = None
 
         # Preserve the existing optimizer eligibility rule, including a scalar
         # fallback when this route produced no differentiable contributions.

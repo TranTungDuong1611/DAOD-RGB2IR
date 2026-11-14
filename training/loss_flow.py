@@ -42,6 +42,10 @@ class LossFlow:
         for name, value in student.supervised_from_output(student_output, targets).items():
             self._add(name, value, phase_weight, f"sup_{name}")
 
+    def auxiliary(self, name, value, *, weight: float):
+        """Add an independently weighted auxiliary loss to this iteration."""
+        self._add(name, value, weight, name)
+
     def distill(
         self, student, student_output, teacher_output, settings,
         *, teacher_name: str, phase_weight: float,

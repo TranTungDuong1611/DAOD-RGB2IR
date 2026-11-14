@@ -252,6 +252,7 @@ class LossConfig:
     weight_deltas: float = 1.0
     weight_quality: float = 1.0
     weight_uhl: float = 1.0
+    color_consistency_weight: float = 0.1
 
     # Phase 1: Pure Supervised Warmup (RGB + GT)
     p1_sup_weight: float = 1.0
@@ -268,6 +269,10 @@ class LossConfig:
     # Phase 4: GT applies only to RGB steps; unlabeled IR still uses KD only.
     p4_sup_weight: float = 1.0
     p4_distill_weight: float = 1.0
+
+    def __post_init__(self):
+        if not math.isfinite(self.color_consistency_weight) or self.color_consistency_weight < 0:
+            raise ValueError("color_consistency_weight must be finite and non-negative")
 
     def get_phase_weights(self, phase: Phase) -> Tuple[float, float]:
         """Helper to retrieve (supervised_weight, distillation_weight) for a given phase."""

@@ -407,6 +407,30 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
             tuple(predictions), context=context, sample_ids=resolved_ids
         )
 
+    def object_color_consistency_inputs(self, student_output, teacher_output):
+        """Resolve aligned P3 features and transformed GT for object pooling."""
+        student_context = student_output.context
+        teacher_context = teacher_output.context
+        if not isinstance(student_context, FCOSAdapterContext) or not isinstance(
+            teacher_context, FCOSAdapterContext
+        ):
+            raise ValueError("object color consistency requires FCOS adapter contexts")
+        if student_output.sample_ids is None or teacher_output.sample_ids is None:
+            raise ValueError("object color consistency requires stable sample IDs")
+        if tuple(student_output.sample_ids) != tuple(teacher_output.sample_ids):
+            raise ValueError("student and RGB teacher samples do not correspond")
+        if student_context.transformed_image_sizes != teacher_context.transformed_image_sizes:
+            raise ValueError("student and RGB teacher transformed image sizes differ")
+        if student_context.transformed_targets is None:
+            return None
+        if not student_context.features or not teacher_context.features:
+            raise ValueError("FCOS adapter outputs are missing FPN feature maps")
+        return (
+            student_context.features[0],
+            teacher_context.features[0],
+            student_context.transformed_targets,
+        )
+
     def _match_anchors_to_targets(
         self,
         anchors: Tensor,

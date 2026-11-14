@@ -6,6 +6,8 @@ from typing import Optional, Sequence, Tuple
 import torch
 from torch import Tensor, nn
 
+from loss.object_color_consistency import object_color_consistency_loss
+
 from .d3t_adapter import (
     AdapterOutput,
     CriterionResult,
@@ -141,6 +143,21 @@ class D3TWrapper(nn.Module):
             )
         )
         return result
+
+    def object_color_consistency_from_outputs(
+        self, student_output: AdapterOutput, teacher_output: AdapterOutput
+    ) -> Optional[Tensor]:
+        """Match GT object features using adapter-aligned P3 maps and boxes."""
+        prepare_inputs = getattr(self.adapter, "object_color_consistency_inputs", None)
+        if not callable(prepare_inputs):
+            return None
+        inputs = prepare_inputs(student_output, teacher_output)
+        if inputs is None:
+            return None
+        student_p3, teacher_p3, transformed_targets = inputs
+        return object_color_consistency_loss(
+            student_p3, teacher_p3, transformed_targets
+        )
 
     def forward(
         self,
