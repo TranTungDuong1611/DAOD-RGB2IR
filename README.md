@@ -40,7 +40,12 @@ batch_size = 4
 workers = 0
 ```
 
-All required project source is embedded as module cells. No repository clone,
+All required project source is included as visible Python module cells. Each
+source cell begins with `%%flir_module <module_name>`, followed directly by its
+imports, classes and functions. Keep this first line when editing; after a code
+change, Run All again so the loader imports the edited modules. The setup cell
+registers this Jupyter cell magic automatically. Source code is not wrapped in
+quoted strings. No repository clone,
 project `.py` files, or shell training command is needed. The notebook calls the
 same `example_flir.main(args)` entrypoint as the CLI. It checks the dataset,
 CUDA/NMS, real BTF, COCO dependency and pretrained weights before training, and
@@ -83,6 +88,6 @@ python tools/build_kaggle_notebook.py
 python -m pytest tests/test_kaggle_notebook.py -q
 ```
 
-The tests check embedded source hashes, deterministic generation and imports
-without a project checkout. Local validation uses CPU and synthetic VOC data;
+The tests check source hashes, visible class/function definitions, deterministic
+generation, and real IPython execution/editing without a project checkout. Local validation uses CPU and synthetic VOC data;
 the actual 10k Kaggle run and FLIR AP must be measured on the attached dataset.

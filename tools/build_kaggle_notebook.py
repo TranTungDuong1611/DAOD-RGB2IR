@@ -121,6 +121,9 @@ def install_embedded_project(sources):
     sys.meta_path.insert(0, finder)
     return finder
 
+missing_modules = sorted(set(EXPECTED_SOURCE_MANIFEST) - set(EMBEDDED_SOURCES))
+if missing_modules:
+    raise RuntimeError("Run all module cells before this loader cell. Missing: " + ", ".join(missing_modules))
 install_embedded_project(EMBEDDED_SOURCES)
 SOURCE_MANIFEST = {name: {key: value for key, value in item.items() if key != "source"}
                    for name, item in EMBEDDED_SOURCES.items()}
@@ -193,12 +196,33 @@ def _cell(source, role, *, name="", markdown=False):
     return cell
 
 
-def _literal(source):
-    # Readable source blocks; fall back only for the rare quote-delimiter case.
-    for delimiter in ("'''", '"""'):
-        if delimiter not in source and not source.endswith("\\"):
-            return "r" + delimiter + source + delimiter
-    return repr(source)
+MODULE_SETUP_SOURCE = r'''
+# Register one notebook cell as one importable Python module.
+# Module bodies stay visible/editable Python; no quoted source dictionaries.
+import hashlib
+from IPython.core.magic import register_cell_magic
+
+EMBEDDED_SOURCES = {
+    name: dict(item, source="") for name, item in EXPECTED_SOURCE_MANIFEST.items()
+    if item["path"] is None
+}
+
+@register_cell_magic
+def flir_module(line, cell):
+    name = line.strip()
+    if name not in EXPECTED_SOURCE_MANIFEST:
+        raise ValueError(f"Unknown FLIR module: {name}")
+    item = EXPECTED_SOURCE_MANIFEST[name]
+    # Preserve a canonical missing final newline when possible. IPython also
+    # normalizes blank-line whitespace; record the source actually received.
+    if cell.endswith("\n") and hashlib.sha256(cell[:-1].encode()).hexdigest() == item["sha256"]:
+        cell = cell[:-1]
+    filename = "/__flir_embedded__/" + (item["path"] or name.replace(".", "/") + "/__init__.py")
+    compile(cell, filename, "exec")
+    EMBEDDED_SOURCES[name] = dict(item, source=cell, sha256=hashlib.sha256(cell.encode()).hexdigest())
+
+print("Module cells are ready. Run every %%flir_module cell, then the loader cell.")
+'''
 
 
 def build_notebook(project_root, output_path=None):
@@ -225,19 +249,25 @@ def build_notebook(project_root, output_path=None):
         _cell(DEPENDENCY_SOURCE, "dependencies"),
         _cell('''
         ## Embedded canonical source
-        These cells contain the same source as the CLI project, one module per
-        cell. They register source text; the loader executes normal Python imports
-        afterwards. No generated project .py files or git clone are used.
+        Each `%%flir_module <name>` code cell below contains visible Python:
+        imports, classes and functions from the matching CLI module. You can edit
+        this code directly. The first line preserves its module namespace and
+        imports. Run every module cell and the loader before training. After a
+        code edit, run the edited module cell, then the loader and subsequent
+        cells, or use Run All.
+        No project .py files or git clone are needed.
         ''', "source_intro", markdown=True),
     ]
-    for index, (name, item) in enumerate(sources.items()):
-        source = ("EMBEDDED_SOURCES = {}\n" if index == 0 else "")
-        source += f"# {item['path'] or name + ' (namespace package)'}\n"
-        source += f"EMBEDDED_SOURCES[{name!r}] = {{\n"
-        for key, value in item.items():
-            source += f"    {key!r}: {_literal(value) if key == 'source' else repr(value)},\n"
-        source += "}\n"
-        cells.append(_cell(source, "source", name=name))
+    cells.append(_cell(
+        "EXPECTED_SOURCE_MANIFEST = " + pprint.pformat(manifest, sort_dicts=False, width=100)
+        + "\n\n" + textwrap.dedent(MODULE_SETUP_SOURCE).lstrip("\n"), "module_setup"
+    ))
+    for name, item in sources.items():
+        if item["path"] is None:
+            continue  # Empty namespace packages are registered in setup.
+        cell = _cell(f"%%flir_module {name}\n" + item["source"], "source", name=name)
+        cell["metadata"]["flir_module"] = name
+        cells.append(cell)
     cells.extend([
         _cell(LOADER_SOURCE, "loader"),
         _cell('''

@@ -1,5 +1,6 @@
-import copy
+import ast
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -30,26 +31,36 @@ class KaggleNotebookTests(unittest.TestCase):
         for cell in self.notebook["cells"]:
             ids.append(cell["id"])
             if cell["cell_type"] == "code":
-                compile(cell_source(cell), cell["id"], "exec")
+                source = cell_source(cell)
+                if cell["metadata"].get("flir_role") == "source":
+                    header, source = source.split("\n", 1)
+                    self.assertEqual(header, "%%flir_module " + cell["metadata"]["flir_module"])
+                compile(source, cell["id"], "exec")
                 self.assertEqual(cell["outputs"], [])
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_source_cells_match_canonical_files_and_cover_all_runtime_modules(self):
         manifests = self.notebook["metadata"]["flir_source_manifest"]
-        self.assertIn("example_flir", manifests)
-        self.assertIn("evaluate_coco", manifests)
-        self.assertIn("intermediate_domain", manifests)
-        for item in manifests.values():
-            if item["path"] is not None:
-                data = (ROOT / item["path"]).read_text(encoding="utf-8")
-                self.assertEqual(hashlib.sha256(data.encode()).hexdigest(), item["sha256"])
-        ns = {}
-        for cell in self.notebook["cells"]:
-            if cell["metadata"].get("flir_role") == "source":
-                exec(cell_source(cell), ns)
-        self.assertEqual(set(ns["EMBEDDED_SOURCES"]), set(manifests))
-        for name, item in ns["EMBEDDED_SOURCES"].items():
-            self.assertEqual(hashlib.sha256(item["source"].encode()).hexdigest(), manifests[name]["sha256"])
+        for name in ("example_flir", "evaluate_coco", "intermediate_domain"):
+            self.assertIn(name, manifests)
+        cells = {c["metadata"]["flir_module"]: c for c in self.notebook["cells"]
+                 if c["metadata"].get("flir_role") == "source"}
+        self.assertEqual(set(cells), {name for name, item in manifests.items() if item["path"] is not None})
+        for name, item in manifests.items():
+            if item["path"] is None:
+                continue
+            canonical = (ROOT / item["path"]).read_text(encoding="utf-8")
+            body = cell_source(cells[name]).split("\n", 1)[1]
+            self.assertEqual(body, canonical, name)
+            self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), item["sha256"])
+
+    def test_module_code_is_visible_python_not_a_quoted_source_value(self):
+        cell = next(c for c in self.notebook["cells"] if c["metadata"].get("flir_module") == "config")
+        header, body = cell_source(cell).split("\n", 1)
+        self.assertEqual(header, "%%flir_module config")
+        self.assertNotIn("EMBEDDED_SOURCES[", body)
+        self.assertTrue(any(isinstance(node, ast.ClassDef) and node.name == "TrainingConfig"
+                            for node in ast.parse(body).body))
 
     def test_kaggle_defaults_and_final_cell(self):
         settings_cell = next(c for c in self.notebook["cells"] if c["metadata"].get("flir_role") == "settings")
@@ -69,19 +80,59 @@ class KaggleNotebookTests(unittest.TestCase):
         self.assertIn("example_flir.main", cell_source(training))
         self.assertNotIn("subprocess", cell_source(training))
 
-    def test_embedded_modules_import_without_checkout_and_reload(self):
-        code = "\n".join(cell_source(c) for c in self.notebook["cells"] if c["metadata"].get("flir_role") in {"source", "loader"})
-        code += "\nimport example_flir, evaluate_coco, notebook_support, config, sys\n"
-        code += "assert sys.modules['config'].__embedded_flir__\n"
-        code += "a=example_flir.parse_args(['--data_root','unused','--weights','none'])\n"
-        code += "assert example_flir.build_training_config(a).intermediate_domain.mode=='randommono_btf'\n"
-        code += "assert evaluate_coco.parse_args(['--checkpoint','x','--data-root','unused']).domain=='ir'\n"
-        code += "old=config; install_embedded_project(EMBEDDED_SOURCES); import config; assert config is not old\n"
+    @unittest.skipUnless(importlib.util.find_spec("IPython"), "requires IPython, as provided by Kaggle/Jupyter")
+    def test_visible_module_cells_run_in_ipython_without_checkout_and_accept_edits(self):
+        cells = [(c["metadata"].get("flir_role"), cell_source(c)) for c in self.notebook["cells"]
+                 if c["metadata"].get("flir_role") in {"module_setup", "source", "loader"}]
+        code = "CELLS = " + repr(cells) + "\n" + r'''
+import hashlib
+from IPython.core.interactiveshell import InteractiveShell
+shell = InteractiveShell.instance()
+for role, source in CELLS:
+    result = shell.run_cell(source, silent=True)
+    if result.error_before_exec or result.error_in_exec:
+        raise result.error_before_exec or result.error_in_exec
+ns = shell.user_ns
+exec("import example_flir, evaluate_coco, config; assert config.__embedded_flir__", ns)
+exec("a=example_flir.parse_args(['--data_root','unused','--weights','none']); assert example_flir.build_training_config(a).intermediate_domain.mode=='randommono_btf'", ns)
+exec("assert evaluate_coco.parse_args(['--checkpoint','x','--data-root','unused']).domain=='ir'", ns)
+for name, expected in ns['EXPECTED_SOURCE_MANIFEST'].items():
+    actual = ns['EMBEDDED_SOURCES'][name]
+    assert actual['sha256'] == hashlib.sha256(actual['source'].encode()).hexdigest(), name
+    canonical = next((source.split('\n', 1)[1] for role, source in CELLS
+                      if role == 'source' and source.startswith('%%flir_module ' + name + '\n')), '')
+    # IPython normalizes whitespace-only lines, as it does for normal code cells.
+    assert [line for line in actual['source'].splitlines() if line.strip()] == [line for line in canonical.splitlines() if line.strip()], name
+old_config = ns['config']
+source = ns['EMBEDDED_SOURCES']['config']['source']
+edited = source.replace('texture_strength: float = 0.25', 'texture_strength: float = 0.4')
+assert edited != source
+shell.run_cell_magic('flir_module', 'config', edited)
+exec(next(source for role, source in CELLS if role == 'loader'), ns)
+exec('import config; assert config.IntermediateDomainConfig().texture_strength==0.4', ns)
+assert ns['config'] is not old_config
+assert ns['SOURCE_MANIFEST']['config']['sha256'] == hashlib.sha256(edited.encode()).hexdigest()
+try:
+    shell.run_cell_magic('flir_module', 'unknown', 'x = 1')
+except ValueError:
+    pass
+else:
+    raise AssertionError('unknown module accepted')
+registered = ns['EMBEDDED_SOURCES']['config']['source']
+try:
+    shell.run_cell_magic('flir_module', 'config', 'def invalid(')
+except SyntaxError:
+    pass
+else:
+    raise AssertionError('invalid Python accepted')
+assert ns['EMBEDDED_SOURCES']['config']['source'] == registered
+'''
         with tempfile.TemporaryDirectory() as tmp:
             env = os.environ.copy()
-            # Retain isolated third-party test deps, but never the project checkout.
-            env["PYTHONPATH"] = os.pathsep.join(x for x in env.get("PYTHONPATH", "").split(os.pathsep) if x and Path(x).resolve() != ROOT)
-            run = subprocess.run([sys.executable, "-X", "utf8", "-B", "-"], input=code, cwd=tmp, env=env, capture_output=True, text=True, encoding="utf-8", timeout=90)
+            env["PYTHONPATH"] = os.pathsep.join(x for x in env.get("PYTHONPATH", "").split(os.pathsep)
+                                               if x and Path(x).resolve() != ROOT)
+            run = subprocess.run([sys.executable, "-X", "utf8", "-B", "-"], input=code,
+                                 cwd=tmp, env=env, capture_output=True, text=True, encoding="utf-8", timeout=90)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
     def test_checked_in_notebook_is_current(self):
