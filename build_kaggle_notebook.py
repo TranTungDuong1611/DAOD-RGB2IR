@@ -94,7 +94,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from pathlib import Path
 
 from config import Phase
-from example_flir import build_training_config, parse_args
+from example_flir import build_training_config, logger, parse_args
 from training.bootstrap import build_training
 from training.observability import configure_training_logging
 
@@ -116,7 +116,7 @@ sys.argv = [
 args = parse_args()
 config = build_training_config(args)
 configure_training_logging(str(OUTPUT_DIR))
-trainer = build_training(config)
+trainer = build_training(config, logger=logger)
 
 print(f"Training iterations: {config.total_iters}")
 print(f"Color consistency weight: {config.loss.color_consistency_weight}")
