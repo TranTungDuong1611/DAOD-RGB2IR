@@ -18,6 +18,7 @@ from scheduler import CurriculumScheduler, DomainStep
 from data.augmentations import StudentAugmentor
 from training import teachers
 from training.data_flow import RouteDataFlow
+from intermediate_domain import IntermediateDomainAugmentation
 from training.loss_flow import LossFlow, component_weight
 from training.observability import log_iteration, log_pseudo_label_evaluation
 
@@ -56,7 +57,8 @@ class CurriculumDomainAdaptationTrainer:
         # creation order is kept stable to preserve the existing RNG behavior.
         self._setup_models()
         self.data_flow = RouteDataFlow(
-            rgb_loader, ir_loader, device=self.device, augmentor=self.augmentor
+            rgb_loader, ir_loader, device=self.device, augmentor=self.augmentor,
+            bridge=IntermediateDomainAugmentation(config.intermediate_domain)
         )
         # Own the progress and lifecycle state that must survive checkpoint
         # save/resume; execution modules do not maintain competing copies.

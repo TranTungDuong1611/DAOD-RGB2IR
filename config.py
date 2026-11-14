@@ -142,6 +142,26 @@ class SoftSAGAConfig:
 
 
 @dataclass
+class IntermediateDomainConfig:
+    """Source appearance bridge; independent color alpha and texture strength."""
+
+    mode: str = "randommono_btf"
+    texture_strength: float = 0.25
+    btf_radius: int = 2
+    btf_iterations: int = 1
+
+    def __post_init__(self):
+        if self.mode not in {"randommono_btf", "saga"}:
+            raise ValueError("intermediate domain must be randommono_btf or saga")
+        if not math.isfinite(self.texture_strength) or not 0 <= self.texture_strength <= 1:
+            raise ValueError("texture_strength must be finite and in [0, 1]")
+        for name in ("btf_radius", "btf_iterations"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+
+
+@dataclass
 class StepRouting:
     """
     Defines the behavior for a specific training step.
@@ -375,6 +395,7 @@ class TrainingConfig:
 
     ema: EMAConfig = field(default_factory=EMAConfig)
     soft_saga: SoftSAGAConfig = field(default_factory=SoftSAGAConfig)
+    intermediate_domain: IntermediateDomainConfig = field(default_factory=IntermediateDomainConfig)
     mid_routing: MidRoutingConfig = field(default_factory=MidRoutingConfig)
     aug: AugConfig = field(default_factory=AugConfig)
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)

@@ -15,6 +15,7 @@ from config import (
     EvalLoaderConfig,
     FCOSModelConfig,
     LossConfig,
+    IntermediateDomainConfig,
     OptimizerConfig,
     Phase,
     PseudoLabelEvalConfig,
@@ -146,6 +147,12 @@ def build_training_config(args) -> TrainingConfig:
             gamma=args.lr_gamma,
         ),
         ema=EMAConfig(alpha=args.ema_alpha, start_steps=args.ema_start),
+        intermediate_domain=IntermediateDomainConfig(
+            mode=args.intermediate_domain,
+            texture_strength=args.texture_strength,
+            btf_radius=args.btf_radius,
+            btf_iterations=args.btf_iterations,
+        ),
         soft_saga=SoftSAGAConfig(
             alpha_near_rgb=0.75,
             alpha_intermediate=0.5,
@@ -211,6 +218,11 @@ def main(args) -> None:
         config.total_iters,
     )
 
+    logger.info("Intermediate domain: %s", config.intermediate_domain)
+    if config.workflow == "curriculum" and config.intermediate_domain.mode == "randommono_btf" and config.intermediate_domain.texture_strength:
+        from intermediate_domain import require_btf
+        require_btf()
+
     # Bootstrap wires dependencies; this entrypoint retains the sequence of
     # resume/initial evaluation, training, interruption handling, and final save.
     trainer = build_training(config, logger=logger)
@@ -241,13 +253,17 @@ def main(args) -> None:
         phase_evaluator.print_history()
 
 
-def parse_args():
+def parse_args(argv=None):
     # Declare launch options here; build_training_config translates them into
     # one effective configuration before any training dependency is assembled.
     parser = argparse.ArgumentParser(
         description="Curriculum D3T training for aligned FLIR RGB/IR data"
     )
     parser.add_argument("--data_root", required=True)
+    parser.add_argument("--intermediate-domain", choices=("randommono_btf", "saga"), default="randommono_btf")
+    parser.add_argument("--texture-strength", type=float, default=0.25)
+    parser.add_argument("--btf-radius", type=int, default=2)
+    parser.add_argument("--btf-iterations", type=int, default=1)
     parser.add_argument("--output_dir", default="./output_flir")
     parser.add_argument("--total_iters", type=int, default=10000)
     parser.add_argument(
@@ -354,7 +370,7 @@ def parse_args():
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--device", default="cuda")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":

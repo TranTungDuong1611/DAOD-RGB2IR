@@ -8,11 +8,15 @@ import torch
 class RouteDataFlow:
     """Own loader cursors and view preparation, without reading training config."""
 
-    def __init__(self, rgb_loader, ir_loader, *, device, augmentor):
+    def __init__(self, rgb_loader, ir_loader, *, device, augmentor, bridge=None):
         # Keep execution dependencies here; the trainer supplies the source,
         # supervision flag, and appearance settings separately for each step.
         self.device = device
         self.augmentor = augmentor
+        if bridge is None:
+            from intermediate_domain import IntermediateDomainAugmentation
+            bridge = IntermediateDomainAugmentation()
+        self.bridge = bridge
         # Construct lazy cursors in the same order as the original trainer.
         self._rgb_iter = iter(self._infinite(rgb_loader))
         self._ir_iter = None if ir_loader is None else iter(self._infinite(ir_loader))
@@ -80,15 +84,6 @@ class RouteDataFlow:
             raise ValueError("IR sample_ids must contain one non-empty ID per image")
         return images, ids
 
-    def _get_saga_images(self, images, targets, alpha: float):
-        # Apply the caller's appearance setting to annotated object regions.
-        # Geometry and sample correspondence remain shared between both views.
-        if targets is None:
-            return images.clone()
-        from saga import SoftSAGA
-        boxes_list = [target["boxes"] for target in targets]
-        return SoftSAGA().apply_to_batch(images, boxes_list, alpha)
-
     def prepare(
         self,
         *,
@@ -107,15 +102,9 @@ class RouteDataFlow:
             )
             # Build different appearance views from that same geometric batch;
             # the stronger photometric augmentation belongs to the student only.
-            student_images = self._get_saga_images(
-                geometric_images,
-                geometric_targets,
-                student_alpha,
-            )
-            teacher_images = self._get_saga_images(
-                geometric_images,
-                geometric_targets,
-                teacher_alpha,
+            student_images, teacher_images = self.bridge.make_views(
+                geometric_images, (student_alpha, teacher_alpha),
+                boxes=[target["boxes"] for target in geometric_targets],
             )
             student_images = self.augmentor.apply_photometric_aug(student_images)
             # Publish one prepared batch for forward/loss execution. The caller's
