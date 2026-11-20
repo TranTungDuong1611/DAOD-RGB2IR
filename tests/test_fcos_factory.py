@@ -8,11 +8,8 @@ from config import FCOSModelConfig, TrainingConfig
 from loss.d3t_criterion import D3TLossCriterion
 from models.d3t_wrapper import D3TWrapper
 from models.fcos_factory import (
-    CHECKPOINT_SCHEMA_VERSION,
-    build_checkpoint_metadata,
     build_fcos_d3t_model,
     build_fcos_d3t_trio,
-    validate_checkpoint_metadata,
 )
 from models.torchvision_fcos_adapter import ClassificationInitMode
 from torchvision.models.detection import fcos_resnet50_fpn
@@ -134,17 +131,6 @@ class FactoryTests(unittest.TestCase):
         self.assertIsNotNone(rgb_teacher)
         self.assertIsNone(ir_teacher)
         self.assertFalse(rgb_teacher.training)
-
-    def test_checkpoint_metadata_rejects_incompatible_classification_mode(self):
-        config = build_config()
-        metadata = build_checkpoint_metadata(config)
-        self.assertEqual(metadata['schema_version'], CHECKPOINT_SCHEMA_VERSION)
-        validate_checkpoint_metadata(metadata, config)
-        bad = dict(metadata)
-        bad['classification_init_mode'] = ClassificationInitMode.RANDOM_HEAD.value
-        with self.assertRaisesRegex(ValueError, 'classification'):
-            validate_checkpoint_metadata(bad, config)
-
 
 if __name__ == '__main__':
     unittest.main()

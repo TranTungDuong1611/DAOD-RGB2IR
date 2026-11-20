@@ -1,9 +1,7 @@
 """Factories for the Torchvision FCOS D3T student/teacher models."""
 
-from dataclasses import fields, is_dataclass
-from enum import Enum
 import copy
-from typing import Any, Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from torch import nn
 from torchvision.models import ResNet50_Weights
@@ -22,9 +20,6 @@ from .torchvision_fcos_adapter import (
 )
 
 
-CHECKPOINT_SCHEMA_VERSION = 1
-
-
 def _resolve_fcos_weights(value):
     if value is None:
         return None
@@ -39,55 +34,6 @@ def _resolve_fcos_weights(value):
     raise ValueError(
         "weights must be None, 'DEFAULT', or a supported FCOS weight identifier"
     )
-
-
-def _serialize(value):
-    if isinstance(value, Enum):
-        return value.value
-    if is_dataclass(value):
-        return {field.name: _serialize(getattr(value, field.name)) for field in fields(value)}
-    if isinstance(value, tuple):
-        return [_serialize(item) for item in value]
-    if isinstance(value, list):
-        return [_serialize(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _serialize(item) for key, item in value.items()}
-    return value
-
-
-def serialize_effective_config(config: TrainingConfig) -> dict[str, Any]:
-    return _serialize(config)
-
-
-def build_checkpoint_metadata(config: TrainingConfig) -> dict[str, Any]:
-    return {
-        "schema_version": CHECKPOINT_SCHEMA_VERSION,
-        "num_classes": config.model.num_classes,
-        "class_names": list(config.model.class_names),
-        "classification_init_mode": config.model.classification_init_mode.value,
-        "teacher_mode": config.teacher_mode,
-        "config": serialize_effective_config(config),
-    }
-
-
-def validate_checkpoint_metadata(
-    metadata: dict[str, Any], config: TrainingConfig
-) -> None:
-    if metadata.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
-        raise ValueError(
-            "Unsupported checkpoint schema; expected "
-            f"{CHECKPOINT_SCHEMA_VERSION}, got {metadata.get('schema_version')}"
-        )
-    if metadata.get("num_classes") != config.model.num_classes:
-        raise ValueError("Checkpoint class count does not match the effective config")
-    if tuple(metadata.get("class_names", ())) != tuple(config.model.class_names):
-        raise ValueError("Checkpoint class order does not match the effective config")
-    if metadata.get("classification_init_mode") != config.model.classification_init_mode.value:
-        raise ValueError(
-            "Checkpoint classification initialization mode does not match the effective config"
-        )
-    if metadata.get("teacher_mode") != config.teacher_mode:
-        raise ValueError("Checkpoint teacher mode does not match the effective config")
 
 
 def _make_base_detector(
@@ -204,11 +150,7 @@ def build_fcos_d3t_trio(
 
 
 __all__ = [
-    "CHECKPOINT_SCHEMA_VERSION",
     "ClassificationInitMode",
-    "build_checkpoint_metadata",
     "build_fcos_d3t_model",
     "build_fcos_d3t_trio",
-    "serialize_effective_config",
-    "validate_checkpoint_metadata",
 ]

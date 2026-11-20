@@ -310,7 +310,7 @@ class CurriculumDomainAdaptationTrainer:
                 self.save_checkpoint(f"checkpoint_{self.global_step:06d}.pth")
 
     def save_checkpoint(self, filename: str) -> None:
-        from models.fcos_factory import build_checkpoint_metadata
+        from training.checkpointing import build_checkpoint_metadata
 
         # Snapshot model, optimization, routing, and evaluation progress together
         # using the existing payload keys consumed by resume and evaluation.
@@ -340,7 +340,7 @@ class CurriculumDomainAdaptationTrainer:
         logger.info("Checkpoint saved -> %s", path)
 
     def load_checkpoint(self, path: str) -> None:
-        from models.fcos_factory import validate_checkpoint_metadata
+        from training.checkpointing import validate_checkpoint_metadata
 
         # Validate experiment compatibility and required teacher states before
         # restoring model tensors, keeping the current rejection behavior.
