@@ -68,6 +68,15 @@ def log_iteration(log: dict, global_step: int, *, logger: logging.Logger) -> Non
     )
     if isinstance(log.get("iter_time"), (int, float)):
         message += f" | Time: {log['iter_time']:.3f}s"
+    if "bridge_stage" in log:
+        ratio = ":".join(f"{value:g}" for value in log["domain_ratio"])
+        message += (
+            f" | Stage: {log['bridge_stage']}/5 | Domain: {log['domain']}"
+            f" | Source: {log['source_domain']} | Ratio: {ratio}"
+            f" | Teachers: {log['teacher_names']} | EMA: {log['ema_target']}"
+        )
+        if "saga_student_alpha" in log:
+            message += f" | SAGA alpha(student/teacher): {log['saga_student_alpha']:g}/{log['saga_teacher_alpha']:g}"
     if components:
         message += " | " + " | ".join(components)
     logger.info(message)

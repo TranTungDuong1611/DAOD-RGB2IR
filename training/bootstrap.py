@@ -11,6 +11,7 @@ from evaluator import DetectionEvaluator, PhaseEvaluator
 from models.fcos_factory import build_fcos_d3t_trio
 from optimization import build_lr_scheduler, build_optimizer
 from trainer import CurriculumDomainAdaptationTrainer
+from training.gan_bridge import load_gan_translator
 
 
 def move_model_trio_to_device(student, rgb_teacher, ir_teacher, device):
@@ -31,6 +32,14 @@ def build_training(
     # Data assembly: create all source/target training and validation loaders
     # from the effective config, then expose their sizes in the existing log.
     device = torch.device(config.device)
+    gan_translator = None
+    if config.workflow == "gan_bridge":
+        gan_translator = load_gan_translator(config.gan_bridge.checkpoint, device)
+        logger.info(
+            "GAN bridge: domains=rgb:saga:ir_gan:ir_real ratios=%s fractions=%s generator=%s",
+            config.bridge_schedule.phase_ratios, config.bridge_schedule.phase_fractions,
+            gan_translator.identity,
+        )
     loaders = build_dataloaders(config)
     rgb_train_loader = loaders["rgb_train"]
     ir_train_loader = loaders["ir_train"]
@@ -80,6 +89,7 @@ def build_training(
         ir_loader=ir_train_loader,
         phase_evaluator=phase_evaluator,
         lr_scheduler=lr_scheduler,
+        gan_translator=gan_translator,
     )
 
     # Connect an evaluator improvement to saving the complete training state.
