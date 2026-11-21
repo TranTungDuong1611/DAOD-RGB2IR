@@ -45,6 +45,14 @@ the bridge warmup end; an explicit `--ema-start` must equal that boundary.
 always uses per-iteration interleaving. `--workflow curriculum` and
 `--workflow rgb_baseline` still work without GAN weights.
 
+The original curriculum's `--phase4-rgb-ratio` controls its final-stage RGB
+supervision. GAN bridge uses its own four-domain ratios instead, including in
+the final stage. Its source GT weight remains `--bridge-source-sup-weight`.
+
+Optional fixed-subset and final full IR teacher audits are available with
+`--eval-pseudo-labels`; see [pseudo-label evaluation](PSEUDO_LABEL_EVALUATION.md).
+Their cadence is independent of the domain chosen for a training iteration.
+
 ## Required GAN artifact
 
 Supply a pretrained **RGB -> IR** generator with 3 input channels, 1 output

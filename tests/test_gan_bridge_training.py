@@ -31,7 +31,7 @@ def bridge_config(output_dir="outputs", **kwargs):
     )
 
 
-def make_trainer(config, translator=None):
+def make_trainer(config, translator=None, *, pseudo_label_evaluator=None):
     from training.gan_bridge import FrozenGANTranslator
     from test_gan_bridge import FirstChannelGenerator
 
@@ -44,10 +44,68 @@ def make_trainer(config, translator=None):
         DataLoader(RGBDataset(), batch_size=1, collate_fn=collate_rgb),
         DataLoader(IRDataset(), batch_size=1, collate_fn=collate_ir),
         gan_translator=translator,
+        pseudo_label_evaluator=pseudo_label_evaluator,
     )
 
 
 class BridgeTrainingTests(unittest.TestCase):
+    def test_bridge_audits_keep_global_cadence_and_resume_progress(self):
+        import json
+
+        def evaluator():
+            result = mock.Mock()
+            result.evaluate.return_value = {
+                "scope": "fixed_ir_validation", "images": 1, "metrics": {},
+            }
+            result.state_dict.return_value = {"fixed_sample_ids": ["fixture"]}
+            return result
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = bridge_config(directory, pseudo_label_eval=configs.PseudoLabelEvalConfig(
+                enabled=True, interval=10,
+            ))
+            audit = evaluator()
+            trainer = make_trainer(config, pseudo_label_evaluator=audit)
+            for _ in range(25):
+                trainer.train_one_iteration()
+            self.assertEqual(trainer.last_pseudo_label_eval_step, 21)
+            self.assertEqual(audit.evaluate.call_count, 2)
+            trainer.save_checkpoint("audited.pth")
+
+            resumed_audit = evaluator()
+            resumed = make_trainer(config, pseudo_label_evaluator=resumed_audit)
+            resumed.load_checkpoint(str(Path(directory) / "audited.pth"))
+            self.assertEqual(resumed.last_pseudo_label_eval_step, 21)
+            resumed_audit.load_state_dict.assert_called_once_with(audit.state_dict())
+            for _ in range(5):
+                resumed.train_one_iteration()
+            self.assertEqual(resumed.last_pseudo_label_eval_step, 30)
+            self.assertEqual(resumed_audit.evaluate.call_count, 2)
+            records = [json.loads(line) for line in (
+                Path(directory) / "logs" / "pseudo_label_eval.jsonl"
+            ).read_text().splitlines()]
+            self.assertEqual([record["global_step"] for record in records], [21, 21, 30, 30])
+
+    def test_failed_bridge_audit_keeps_completed_iteration_resumable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = bridge_config(directory, pseudo_label_eval=configs.PseudoLabelEvalConfig(
+                enabled=True, interval=10,
+            ))
+            audit = mock.Mock()
+            audit.evaluate.side_effect = RuntimeError("audit failed")
+            audit.state_dict.return_value = {"fixed_sample_ids": ["fixture"]}
+            trainer = make_trainer(config, pseudo_label_evaluator=audit)
+            for _ in range(20):
+                trainer.train_one_iteration()
+            with self.assertRaisesRegex(RuntimeError, "audit failed"):
+                trainer.train_one_iteration()
+            self.assertEqual(trainer.global_step, 21)
+            self.assertEqual(trainer.scheduler.state_dict()["next_step"], 21)
+            trainer.save_checkpoint("audit-failed.pth")
+            resumed = make_trainer(config, pseudo_label_evaluator=mock.Mock())
+            resumed.load_checkpoint(str(Path(directory) / "audit-failed.pth"))
+            self.assertEqual(resumed.global_step, 21)
+
     def test_real_fcos_dense_distillation_runs_on_each_domain_with_shared_resize(self):
         from loss.d3t_criterion import D3TLossCriterion
         from test_torchvision_fcos_adapter import build_adapter
@@ -258,6 +316,30 @@ class BridgeTrainingTests(unittest.TestCase):
         self.assertEqual(config.ema.start_steps, 10)
         self.assertEqual(config.gan_bridge.saga_student_alphas, (1, 0.8, 0.6, 0.4, 0.2))
         self.assertEqual(config.gan_bridge.source_sup_weight, 0.75)
+
+    def test_cli_bridge_resumes_checkpoint_from_before_phase4_curriculum_merge(self):
+        from example_flir import parse_args, build_training_config
+
+        with tempfile.TemporaryDirectory() as directory:
+            argv = ["example_flir.py", "--data_root", "synthetic",
+                    "--workflow", "gan_bridge", "--gan-weights", "fixture.pth",
+                    "--total_iters", "100", "--device", "cpu",
+                    "--weights", "none", "--output_dir", directory]
+            with mock.patch.object(sys, "argv", argv):
+                config = build_training_config(parse_args())
+            previous_config = copy.deepcopy(config)
+            # GAN bridge has always overridden source GT weight in its final
+            # stage; preserve its original serialized loss setting on resume.
+            previous_config.loss.p4_sup_weight = 0.0
+            original = make_trainer(previous_config)
+            for _ in range(23):
+                original.train_one_iteration()
+            original.save_checkpoint("pre-merge.pth")
+            resumed = make_trainer(config)
+            resumed.load_checkpoint(str(Path(directory) / "pre-merge.pth"))
+            self.assertEqual(resumed.global_step, 23)
+            self.assertEqual(resumed.train_one_iteration()["domain"],
+                             original.train_one_iteration()["domain"])
 
     def test_invalid_bridge_settings_fail_early(self):
         for kwargs in ({"source_sup_weight": 0}, {"saga_student_alphas": (1, 0.5)},

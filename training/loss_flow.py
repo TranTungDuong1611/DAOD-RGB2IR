@@ -63,3 +63,6 @@ class LossFlow:
         for name, value in result.metrics.items():
             if isinstance(value, torch.Tensor) and value.numel() == 1:
                 self.logs[f"{name}_{teacher_name}"] = float(value.detach().item())
+        # The observer may inspect selection metadata from this same KD call.
+        # Only the loss/metric fields above enter the existing training path.
+        return result

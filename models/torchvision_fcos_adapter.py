@@ -17,6 +17,7 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 
 from torchvision.models.detection.fcos import FCOSClassificationHead, FCOSHead
+from torchvision.models.detection.transform import resize_boxes
 
 from .d3t_adapter import (
     AdapterOutput,
@@ -467,6 +468,37 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
         max_values, matched = scores.max(dim=1)
         matched[max_values < 1e-5] = -1
         return matched.to(torch.int64)
+
+    @torch.no_grad()
+    def assign_diagnostic_targets(self, output: AdapterOutput, targets):
+        """Align audit-only GT to existing FCOS geometry without another forward."""
+        context = output.context
+        if not isinstance(context, FCOSAdapterContext):
+            raise ValueError("FCOS diagnostics require FCOS context")
+        if len(targets) != len(output.predictions):
+            raise ValueError("diagnostic targets must align with output images")
+        assigned = []
+        # Use sizes from this teacher forward, not a new transform that could
+        # choose a different resize. Never modify its context or training GT.
+        for target, prediction, anchors, original_size, resized_size in zip(
+            targets, output.predictions, context.anchors_per_image,
+            context.original_image_sizes, context.transformed_image_sizes,
+        ):
+            if target is None:
+                assigned.append(None)
+                continue
+            boxes = resize_boxes(target["boxes"].to(prediction.boxes), original_size, resized_size)
+            labels = target["labels"].to(device=boxes.device, dtype=torch.long)
+            if labels.shape != (len(boxes),) or bool(((labels < 0) | (labels >= self.num_classes)).any()):
+                raise ValueError("diagnostic labels must match FCOS classes and boxes")
+            aligned = {"boxes": boxes, "labels": labels}
+            # Share the detector's existing location/scale/center assignment.
+            # Matching GT for observation never changes the criterion's KD mask.
+            aligned["matched_idxs"] = self._match_anchors_to_targets(
+                anchors, aligned, context.num_anchors_per_level
+            )
+            assigned.append(aligned)
+        return tuple(assigned)
 
     def prepare_supervised(
         self, output: AdapterOutput, targets: Targets

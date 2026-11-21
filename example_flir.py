@@ -19,6 +19,7 @@ from config import (
     LossConfig,
     OptimizerConfig,
     Phase,
+    PseudoLabelEvalConfig,
     SoftSAGAConfig,
     TeacherSchedule,
     TrainLoaderConfig,
@@ -84,6 +85,7 @@ def build_training_config(args) -> TrainingConfig:
         phase2_rgb_sampling_ratio=args.phase2_rgb_ratio,
         phase3_rgb_sampling_ratio=args.phase3_rgb_ratio,
         sampling_mode=args.domain_sampling,
+        phase4_rgb_sampling_ratio=args.phase4_rgb_ratio,
     )
 
     return TrainingConfig(
@@ -144,7 +146,9 @@ def build_training_config(args) -> TrainingConfig:
             p2_distill_weight=0.7,
             p3_sup_weight=0.5,
             p3_distill_weight=1.0,
-            p4_sup_weight=0.0,
+            # GAN source GT uses gan_bridge.source_sup_weight in its final
+            # stage. Keep its pre-merge metadata compatible with saved runs.
+            p4_sup_weight=0.0 if args.workflow == "gan_bridge" else 1.0,
             p4_distill_weight=1.0,
             weight_logits=4.0,
             weight_deltas=1.0,
@@ -193,6 +197,13 @@ def build_training_config(args) -> TrainingConfig:
         teacher_mode=args.teacher_mode,
         log_interval=args.log_interval,
         eval_period=args.eval_every,
+        pseudo_label_eval=PseudoLabelEvalConfig(
+            enabled=args.eval_pseudo_labels,
+            interval=args.pseudo_label_eval_interval,
+            iou_threshold=args.pseudo_label_iou_threshold,
+            sample_size=args.pseudo_label_eval_samples,
+            subset_seed=args.pseudo_label_eval_seed,
+        ),
     )
 
 
@@ -351,6 +362,10 @@ def parse_args():
     parser.add_argument("--bridge-saga-teacher-alphas", type=float, nargs=5, default=(1, 0.75, 0.5, 0.5, 0.25))
     parser.add_argument("--bridge-saga-teachers", choices=("none", "rgb", "ir"), nargs=5,
                         default=("none", "rgb", "ir", "ir", "ir"))
+    parser.add_argument(
+        "--phase4-rgb-ratio", type=float, default=0.2,
+        help="Fraction of phase-4 steps using supervised RGB; use 0 for IR-only",
+    )
     parser.add_argument("--hm-alpha", type=float, default=0.5)
     parser.add_argument("--hm-beta", type=float, default=0.5)
     parser.add_argument("--un-regular-alpha", type=float, default=1.0)
@@ -366,6 +381,16 @@ def parse_args():
     parser.add_argument("--brightness-prob", type=float, default=0.3)
     parser.add_argument("--contrast-prob", type=float, default=0.3)
     parser.add_argument("--eval_every", type=int, default=500)
+    # Audit labels are independent of supervised targets and student validation.
+    parser.add_argument("--eval-pseudo-labels", action="store_true",
+                        help="Compare selected KD rows with IR GT; never train on IR GT")
+    parser.add_argument("--pseudo-label-eval-interval", type=int, default=500,
+                        help="Global iteration interval after EMA teachers are initialized")
+    parser.add_argument("--pseudo-label-iou-threshold", type=float, default=0.5)
+    parser.add_argument("--pseudo-label-eval-samples", type=int, default=256,
+                        help="Maximum labeled IR validation images in each periodic teacher audit")
+    parser.add_argument("--pseudo-label-eval-seed", type=int, default=0,
+                        help="Local seed for reproducible fixed IR validation image selection")
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--device", default="cuda")

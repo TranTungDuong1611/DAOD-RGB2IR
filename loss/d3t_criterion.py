@@ -1,12 +1,11 @@
 """Detector-neutral supervised and distillation losses for D3T."""
 
 import math
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence
 
 import torch
 from torch import Tensor
 import torch.nn.functional as F
-from torch import nn
 
 from models.d3t_adapter import (
     CriterionResult,
@@ -128,6 +127,31 @@ def _cat_or_none(tensors: Sequence[Tensor]) -> Optional[Tensor]:
     if not tensors:
         return None
     return torch.cat(tuple(tensors), dim=0)
+
+
+@torch.no_grad()
+def _select_distillation_rows(teacher_prob, teacher_quality_prob, settings):
+    """Share the exact batch-global HM/top-k rule between KD and evaluation."""
+    hm = teacher_prob.max(dim=1).values.pow(settings.hm_alpha)
+    hm = hm * teacher_quality_prob.pow(settings.hm_beta)
+    total_rows = teacher_prob.shape[0]
+    count = min(total_rows, max(1, int(math.ceil(total_rows * settings.top_ratio))))
+    top_indices = hm.topk(count, dim=0).indices
+    top_mask = torch.zeros(total_rows, dtype=torch.bool, device=teacher_prob.device)
+    top_mask[top_indices] = True
+    return top_mask & (hm >= settings.min_hm), hm
+
+
+@torch.no_grad()
+def select_distillation_masks(predictions, settings):
+    """Select teacher rows without student forward or computation of KD losses."""
+    if not predictions:
+        return ()
+    selected, _ = _select_distillation_rows(
+        torch.cat([p.class_logits for p in predictions]).sigmoid(),
+        torch.cat([p.quality_logits for p in predictions]).sigmoid(), settings,
+    )
+    return tuple(selected.split([len(p.boxes) for p in predictions]))
 
 
 class D3TLossCriterion(D3TCriterion):
@@ -318,6 +342,7 @@ class D3TLossCriterion(D3TCriterion):
                     "loss_kd_uhl": zero,
                 },
                 metrics=metrics,
+                selected_masks=(),
             )
 
         total_rows = student_cls.shape[0]
@@ -327,16 +352,7 @@ class D3TLossCriterion(D3TCriterion):
         with torch.no_grad():
             teacher_prob = teacher_cls.detach().sigmoid()
             teacher_quality_prob = teacher_quality.detach().sigmoid()
-            hm = teacher_prob.max(dim=1).values.pow(settings.hm_alpha)
-            hm = hm * teacher_quality_prob.pow(settings.hm_beta)
-            count = min(
-                total_rows,
-                max(1, int(math.ceil(total_rows * settings.top_ratio))),
-            )
-            top_indices = hm.topk(count, dim=0).indices
-            top_mask = torch.zeros(total_rows, dtype=torch.bool, device=device)
-            top_mask[top_indices] = True
-            selected = top_mask & (hm >= settings.min_hm)
+            selected, hm = _select_distillation_rows(teacher_prob, teacher_quality_prob, settings)
             selected_hm = hm[selected]
             hm_sum = float(selected_hm.sum().item())
             denominator = selected_hm.sum().clamp_min(1.0)
@@ -387,11 +403,17 @@ class D3TLossCriterion(D3TCriterion):
                 "loss_kd_uhl": loss_kd_uhl,
             },
             metrics=self._metrics(device, int(selected.sum().item()), total_rows, hm_sum),
+            # Reuse the mask above rather than recomputing top-k for diagnostics.
+            # Splitting preserves batch-global selection and per-image identity.
+            selected_masks=tuple(selected.detach().split(
+                [p.class_logits.shape[0] for p in pair.teacher]
+            )),
         )
 
 
 __all__ = [
     "D3TLossCriterion",
+    "select_distillation_masks",
     "_hm_focal_elementwise",
     "_iou_loss_xyxy",
     "_zero_with_grad",

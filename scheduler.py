@@ -6,6 +6,15 @@ from typing import Literal
 from config import BridgeScheduleConfig, Phase
 
 
+def should_evaluate_pseudo_labels(config, global_step, *, last_eval_step):
+    """Keep fixed IR audits on global windows independently of domain routing."""
+    completed_step = global_step + 1
+    return (
+        config.enabled
+        and completed_step // config.interval > last_eval_step // config.interval
+    )
+
+
 class DomainRatioSampler:
     """Spread weighted domains deterministically, with insertion order breaking ties."""
 
@@ -129,6 +138,7 @@ DomainStep = Literal[
     "p2_ir_flow",           # Student(SAGA-High) + Teacher(SAGA-Mid) + GT
     "p3_rgb_flow",          # Student(SAGA-Mid) + Teacher(SAGA-Weak) + GT
     "p3_ir_flow",           # Student(IR) + Teacher(SAGA-High) [NO GT]
+    "p4_rgb_supervised",   # Student(RGB+GT), no KD or teacher update
     "p4_ir_focus"           # Student(IR) + Teacher(IR) [NO GT]
 ]
 
@@ -145,6 +155,7 @@ class CurriculumScheduler:
         self._counters = {
             Phase.PHASE2_TRANSITION: 0,
             Phase.PHASE3_ADAPTATION:  0,
+            Phase.PHASE4_IR_FOCUS:    0,
         }
         self._samplers = self._new_interleaved_samplers()
 
@@ -154,6 +165,7 @@ class CurriculumScheduler:
             for phase, ratio in (
                 (Phase.PHASE2_TRANSITION, self.config.curriculum.phase2_rgb_sampling_ratio),
                 (Phase.PHASE3_ADAPTATION, self.config.curriculum.phase3_rgb_sampling_ratio),
+                (Phase.PHASE4_IR_FOCUS, self.config.curriculum.phase4_rgb_sampling_ratio),
             )
         }
 
@@ -190,8 +202,14 @@ class CurriculumScheduler:
             )
 
         else: # PHASE4_IR_FOCUS
-            # Final focus always selects the real-IR distillation route.
-            return "p4_ir_focus"
+            # Retain source supervision within the fixed phase-4 budget.
+            # The existing alternation gives one RGB and four IR steps at 0.2.
+            return self._alternate(
+                phase=self.Phase.PHASE4_IR_FOCUS,
+                primary="p4_rgb_supervised",
+                secondary="p4_ir_focus",
+                ratio=self.config.curriculum.phase4_rgb_sampling_ratio,
+            )
 
     @staticmethod
     def get_source_domain(step_name: str) -> str:
@@ -200,11 +218,22 @@ class CurriculumScheduler:
         # teacher name or SAGA appearance level carried by the route settings.
         if step_name in {
             "p1_rgb_supervised", "p2_rgb_flow", "p2_ir_flow", "p3_rgb_flow",
+            "p4_rgb_supervised",
         }:
             return "rgb"
         if step_name in {"p3_ir_flow", "p4_ir_focus"}:
             return "ir"
         raise ValueError(f"Unsupported curriculum step: {step_name}")
+
+    def should_evaluate_pseudo_labels(self, global_step, *, last_eval_step):
+        """Check global windows; fixed IR evaluation is independent of train routes.
+
+        The trainer separately requires initialized teachers. A delayed first
+        pass does not shift later iteration boundaries or consume loader routes.
+        """
+        return should_evaluate_pseudo_labels(
+            self.config.pseudo_label_eval, global_step, last_eval_step=last_eval_step,
+        )
 
     def _alternate(self, phase, primary: DomainStep, secondary: DomainStep, ratio: float) -> DomainStep:
         """Helper to alternate between two steps based on a ratio."""
@@ -245,11 +274,16 @@ class CurriculumScheduler:
             if state.get("mode") != "interleaved":
                 raise ValueError("cannot restore grouped scheduler state into interleaved mode")
             saved = state.get("samplers")
-            if not isinstance(saved, dict) or set(saved) != {phase.name for phase in self._samplers}:
+            expected = {phase.name for phase in self._samplers}
+            legacy = expected - {Phase.PHASE4_IR_FOCUS.name}
+            if not isinstance(saved, dict) or set(saved) not in (expected, legacy):
                 raise ValueError("invalid saved interleaved scheduler state")
             samplers = self._new_interleaved_samplers()
             for phase, sampler in samplers.items():
-                sampler.load_state_dict(saved[phase.name])
+                # Pre-merge checkpoints tracked only phases 2/3; initialize
+                # their new phase-4 allocation just like legacy grouped state.
+                if phase.name in saved:
+                    sampler.load_state_dict(saved[phase.name])
             self._samplers = samplers
             return
         if state.get("mode") == "interleaved":
