@@ -6,7 +6,6 @@ boxes plus foreground/quality logits.
 """
 
 from dataclasses import dataclass
-from enum import Enum
 import copy
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -19,6 +18,8 @@ import torch.nn.functional as F
 from torchvision.models.detection.fcos import FCOSClassificationHead, FCOSHead
 from torchvision.models.detection.transform import resize_boxes
 
+from configs.types import ClassificationInitMode
+
 from .d3t_adapter import (
     AdapterOutput,
     DetectorAdapter,
@@ -27,13 +28,6 @@ from .d3t_adapter import (
     SupervisedBatch,
     Targets,
 )
-
-
-class ClassificationInitMode(str, Enum):
-    """Which classification tower is retained from the COCO FCOS model."""
-
-    COCO_TOWER = "coco_tower"
-    RANDOM_HEAD = "random_head"
 
 
 class _RegressionHeadWithoutCenterness(nn.Module):
