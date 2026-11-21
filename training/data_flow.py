@@ -8,11 +8,12 @@ import torch
 class RouteDataFlow:
     """Own loader cursors and view preparation, without reading training config."""
 
-    def __init__(self, rgb_loader, ir_loader, *, device, augmentor):
+    def __init__(self, rgb_loader, ir_loader, *, device, augmentor, gan_translator=None):
         # Keep execution dependencies here; the trainer supplies the source,
         # supervision flag, and appearance settings separately for each step.
         self.device = device
         self.augmentor = augmentor
+        self.gan_translator = gan_translator
         # Construct lazy cursors in the same order as the original trainer.
         self._rgb_iter = iter(self._infinite(rgb_loader))
         self._ir_iter = None if ir_loader is None else iter(self._infinite(ir_loader))
@@ -96,8 +97,19 @@ class RouteDataFlow:
         use_gt: bool,
         student_alpha: float | None,
         teacher_alpha: float | None,
+        appearance_domain: str | None = None,
     ):
         """Execute the supplied source/augmentation settings on one batch."""
+        if appearance_domain is not None:
+            expected_source = {"rgb": "rgb", "saga": "rgb", "ir_gan": "rgb", "ir_real": "ir"}
+            if appearance_domain not in expected_source or expected_source[appearance_domain] != source_domain:
+                raise ValueError("bridge appearance does not match its physical source")
+            if appearance_domain == "ir_real" and use_gt:
+                raise ValueError("real IR cannot use supervised targets")
+            if appearance_domain == "saga" and (student_alpha is None or teacher_alpha is None):
+                raise ValueError("SAGA route requires student and teacher alpha")
+            if appearance_domain == "ir_gan" and self.gan_translator is None:
+                raise ValueError("GAN-IR route requires a frozen GAN translator")
         if source_domain == "rgb":
             # Labeled-source path, including RGB-backed routes named "IR flow":
             # fetch one batch and establish shared geometry for both views and GT.
@@ -107,16 +119,19 @@ class RouteDataFlow:
             )
             # Build different appearance views from that same geometric batch;
             # the stronger photometric augmentation belongs to the student only.
-            student_images = self._get_saga_images(
-                geometric_images,
-                geometric_targets,
-                student_alpha,
-            )
-            teacher_images = self._get_saga_images(
-                geometric_images,
-                geometric_targets,
-                teacher_alpha,
-            )
+            if appearance_domain == "ir_gan":
+                teacher_images = self.gan_translator(geometric_images)
+                student_images = teacher_images.clone()
+            elif appearance_domain == "rgb":
+                teacher_images = geometric_images.clone()
+                student_images = geometric_images.clone()
+            else:
+                student_images = self._get_saga_images(
+                    geometric_images, geometric_targets, student_alpha,
+                )
+                teacher_images = self._get_saga_images(
+                    geometric_images, geometric_targets, teacher_alpha,
+                )
             student_images = self.augmentor.apply_photometric_aug(student_images)
             # Publish one prepared batch for forward/loss execution. The caller's
             # supervision flag controls whether its transformed GT is exposed.

@@ -14,12 +14,13 @@ from torch.utils.data import DataLoader
 from config import Phase, StepRouting, TrainingConfig
 from models.d3t_adapter import DistillationSettings
 from models.d3t_wrapper import D3TWrapper as D3TWrapper
-from scheduler import CurriculumScheduler, DomainStep
+from scheduler import BridgeDomainScheduler, CurriculumScheduler, should_evaluate_pseudo_labels
 from data.augmentations import StudentAugmentor
 from training import teachers
 from training.data_flow import RouteDataFlow
 from training.loss_flow import LossFlow, component_weight
 from training.observability import log_iteration, log_pseudo_label_evaluation
+from training.gan_bridge import bridge_route
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ class CurriculumDomainAdaptationTrainer:
         ir_loader: Optional[DataLoader] = None,
         phase_evaluator: Any = None,
         lr_scheduler: Any = None,
+        gan_translator: Optional[nn.Module] = None,
         pseudo_label_evaluator: Any = None,
     ) -> None:
         # Retain the live dependencies and effective configuration on the
@@ -51,16 +53,24 @@ class CurriculumDomainAdaptationTrainer:
         self.phase_evaluator = phase_evaluator
         self.lr_scheduler = lr_scheduler
         self.augmentor = StudentAugmentor(config)
+        self.gan_translator = gan_translator
+        if config.workflow == "gan_bridge":
+            if gan_translator is None or not getattr(gan_translator, "identity", None):
+                raise ValueError("gan_bridge requires a frozen GAN translator with checkpoint identity")
+            if rgb_teacher is None or ir_teacher is None:
+                raise ValueError("gan_bridge requires both RGB and IR teachers")
+            self.gan_translator.to(self.device).eval().requires_grad_(False)
 
         # Prepare model state before constructing lazy data cursors. Their
         # creation order is kept stable to preserve the existing RNG behavior.
         self._setup_models()
         self.data_flow = RouteDataFlow(
-            rgb_loader, ir_loader, device=self.device, augmentor=self.augmentor
+            rgb_loader, ir_loader, device=self.device, augmentor=self.augmentor,
+            gan_translator=gan_translator,
         )
         # Own the progress and lifecycle state that must survive checkpoint
         # save/resume; execution modules do not maintain competing copies.
-        self.scheduler = CurriculumScheduler(config)
+        self.scheduler = self._new_scheduler()
         self.global_step = 0
         self.best_map = 0.0
         self.loss_history = defaultdict(list)
@@ -72,6 +82,11 @@ class CurriculumDomainAdaptationTrainer:
         self.pseudo_label_evaluator = pseudo_label_evaluator
         if config.pseudo_label_eval.enabled and config.workflow != "rgb_baseline" and pseudo_label_evaluator is None:
             raise ValueError("enabled pseudo-label evaluation requires an IR validation evaluator")
+
+    def _new_scheduler(self):
+        if self.config.workflow == "gan_bridge":
+            return BridgeDomainScheduler(self.config.bridge_schedule, self.config.max_iter)
+        return CurriculumScheduler(self.config)
 
     def _teacher_models(self):
         # References stay on the trainer so checkpoint keys and ownership are unchanged.
@@ -94,6 +109,15 @@ class CurriculumDomainAdaptationTrainer:
 
     def _prepare_data_by_route(self, step_name: str, route: StepRouting):
         """Resolve configured values before delegating data execution."""
+        if self.config.workflow == "gan_bridge":
+            domain = step_name.removeprefix("bridge_")
+            stage = self.config.bridge_schedule.stage_for_step(self.global_step, self.config.max_iter)
+            return self.data_flow.prepare(
+                source_domain="ir" if domain == "ir_real" else "rgb",
+                appearance_domain=domain, use_gt=route.use_gt,
+                student_alpha=self.config.gan_bridge.saga_student_alphas[stage] if domain == "saga" else None,
+                teacher_alpha=self.config.gan_bridge.saga_teacher_alphas[stage] if domain == "saga" else None,
+            )
         source_domain = self.scheduler.get_source_domain(step_name)
         alpha_map = self._alpha_map()
         return self.data_flow.prepare(
@@ -159,17 +183,35 @@ class CurriculumDomainAdaptationTrainer:
         )
 
     def train_one_iteration(self) -> Dict[str, Any]:
+        if self.config.workflow != "gan_bridge":
+            return self._train_one_iteration()
+        schedule_state = self.scheduler.state_dict()
+        starting_step = self.global_step
+        try:
+            return self._train_one_iteration()
+        except BaseException:
+            # Roll back routing only when the iteration did not complete.
+            # A later audit failure must retain the already committed update.
+            if self.global_step == starting_step:
+                self.scheduler.load_state_dict(schedule_state)
+            raise
+
+    def _train_one_iteration(self) -> Dict[str, Any]:
         # Route selection: the baseline uses its fixed supervised route, while
         # curriculum training asks the scheduler for the current step's route.
         self.student.train()
-        if self.config.workflow == "rgb_baseline":
-            step_name: DomainStep = "p1_rgb_supervised"
+        if self.config.workflow == "gan_bridge":
+            domain = self.scheduler.get_next_domain(self.global_step)
+            stage = self.config.bridge_schedule.stage_for_step(self.global_step, self.config.max_iter)
+            step_name = f"bridge_{domain}"
+            route = bridge_route(self.config, stage, domain)
+        elif self.config.workflow == "rgb_baseline":
+            step_name = "p1_rgb_supervised"
+            route = self.config.mid_routing.p1_rgb_supervised
         else:
             step_name = self.scheduler.get_next_step(self.global_step)
+            route = self.config.mid_routing.get_routing(step_name)
         phase = self.config.get_phase(self.global_step)
-        route = self.config.mid_routing.get_routing(step_name)
-        if self.config.workflow == "rgb_baseline":
-            route = self.config.mid_routing.p1_rgb_supervised
 
         # Data preparation: obtain one source batch with aligned student/teacher
         # views, optional GT, and explicit sample identity.
@@ -208,6 +250,8 @@ class CurriculumDomainAdaptationTrainer:
         sup_weight, distill_weight = self.config.loss.get_phase_weights(phase)
         if self.config.workflow == "rgb_baseline":
             sup_weight, distill_weight = 1.0, 0.0
+        elif self.config.workflow == "gan_bridge" and stage == 4 and route.use_gt:
+            sup_weight = self.config.gan_bridge.source_sup_weight
 
         # Supervised contribution: use transformed GT only when this route and
         # the effective phase weight request it.
@@ -284,6 +328,17 @@ class CurriculumDomainAdaptationTrainer:
         logs["phase"] = phase.name
         logs["ema_initialized"] = float(self.ema_initialized)
         logs["lr"] = iteration_lr
+        if self.config.workflow == "gan_bridge":
+            logs.update(
+                domain=domain, source_domain="ir" if domain == "ir_real" else "rgb",
+                bridge_stage=stage + 1, domain_ratio=self.config.bridge_schedule.phase_ratios[stage],
+                teacher_names=",".join(self._enabled_teacher_names(route)) if self.ema_initialized else "none",
+                ema_target=route.ema_target if did_step and self.ema_initialized else "none",
+                supervised_weight=sup_weight if route.use_gt else 0.0, distill_weight=distill_weight,
+            )
+            if domain == "saga":
+                logs["saga_student_alpha"] = self.config.gan_bridge.saga_student_alphas[stage]
+                logs["saga_teacher_alpha"] = self.config.gan_bridge.saga_teacher_alphas[stage]
         self.loss_history[step_name].append(logs["total_loss"])
         self.global_step += 1
         logs["global_step"] = self.global_step
@@ -291,8 +346,9 @@ class CurriculumDomainAdaptationTrainer:
         # separate fixed dataset, never the train batch or supervised targets.
         if (
             self.pseudo_label_evaluator is not None and self.ema_initialized
-            and self.scheduler.should_evaluate_pseudo_labels(
-                self.global_step - 1, last_eval_step=self.last_pseudo_label_eval_step
+            and should_evaluate_pseudo_labels(
+                self.config.pseudo_label_eval, self.global_step - 1,
+                last_eval_step=self.last_pseudo_label_eval_step,
             )
         ):
             logs["pseudo_label_evaluations"] = self._evaluate_pseudo_labels(phase)
@@ -365,14 +421,17 @@ class CurriculumDomainAdaptationTrainer:
             )
 
     def save_checkpoint(self, filename: str) -> None:
-        from models.fcos_factory import build_checkpoint_metadata
+        from training.checkpointing import build_checkpoint_metadata
 
         # Snapshot model, optimization, routing, and evaluation progress together
         # using the existing payload keys consumed by resume and evaluation.
         os.makedirs(self.config.output_dir, exist_ok=True)
         path = os.path.join(self.config.output_dir, filename)
         payload = {
-            "metadata": build_checkpoint_metadata(self.config),
+            "metadata": build_checkpoint_metadata(
+                self.config,
+                generator_identity=self.gan_translator.identity if self.config.workflow == "gan_bridge" else None,
+            ),
             "global_step": self.global_step,
             "best_map": self.best_map,
             "ema_initialized": self.ema_initialized,
@@ -399,7 +458,7 @@ class CurriculumDomainAdaptationTrainer:
         logger.info("Checkpoint saved -> %s", path)
 
     def load_checkpoint(self, path: str) -> None:
-        from models.fcos_factory import validate_checkpoint_metadata
+        from training.checkpointing import validate_checkpoint_metadata
 
         # Validate experiment compatibility and required teacher states before
         # restoring model tensors, keeping the current rejection behavior.
@@ -407,7 +466,10 @@ class CurriculumDomainAdaptationTrainer:
         metadata = checkpoint.get("metadata")
         if metadata is None:
             raise ValueError("Checkpoint has no D3T metadata; legacy checkpoints are unsupported")
-        validate_checkpoint_metadata(metadata, self.config)
+        validate_checkpoint_metadata(
+            metadata, self.config,
+            generator_identity=self.gan_translator.identity if self.config.workflow == "gan_bridge" else None,
+        )
         configured_teachers = {
             "rgb_teacher": self.rgb_teacher,
             "ir_teacher": self.ir_teacher,
@@ -422,6 +484,23 @@ class CurriculumDomainAdaptationTrainer:
             raise ValueError(
                 f"Checkpoint is missing state for configured teacher(s): {missing}"
             )
+        # Validate routing progress before loading any model or optimizer tensors.
+        restored_scheduler = self._new_scheduler()
+        if "scheduler" in checkpoint:
+            restored_scheduler.load_state_dict(checkpoint["scheduler"])
+        if self.config.workflow == "gan_bridge":
+            step = checkpoint.get("global_step")
+            initialized = checkpoint.get("ema_initialized")
+            if ("scheduler" not in checkpoint or type(step) is not int
+                    or not 0 <= step <= self.config.max_iter
+                    or restored_scheduler.state_dict()["next_step"] != step):
+                raise ValueError("Checkpoint bridge scheduler progress does not match global_step")
+            if (type(initialized) is not bool
+                    or (step > self.config.ema.start_steps and not initialized)
+                    or (step < self.config.ema.start_steps and initialized)):
+                raise ValueError("Checkpoint bridge teacher initialization state is inconsistent")
+        if self.lr_scheduler is not None and checkpoint.get("lr_scheduler") is None:
+            raise ValueError("Checkpoint is missing LR scheduler state")
         # Restore learned state first, followed by optimization and routing
         # state, so the next iteration continues with the saved update schedule.
         self.student.load_state_dict(checkpoint["student"])
@@ -429,8 +508,7 @@ class CurriculumDomainAdaptationTrainer:
             if teacher is not None:
                 teacher.load_state_dict(checkpoint[name])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
-        if "scheduler" in checkpoint:
-            self.scheduler.load_state_dict(checkpoint["scheduler"])
+        self.scheduler = restored_scheduler
         if self.lr_scheduler is not None:
             lr_scheduler_state = checkpoint.get("lr_scheduler")
             if lr_scheduler_state is None:

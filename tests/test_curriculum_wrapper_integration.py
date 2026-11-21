@@ -226,6 +226,34 @@ def build_trainer(config):
 
 
 class CurriculumIntegrationTests(unittest.TestCase):
+    def test_interleaved_routes_train_and_resume_through_the_existing_trainer(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            config = build_config(
+                output_dir=output_dir, total_iters=10,
+                ema=EMAConfig(alpha=0.0, start_steps=0),
+                curriculum=CurriculumConfig(
+                    phase1_end=0, phase2_end=10, phase3_end=10,
+                    phase2_rgb_sampling_ratio=0.7, sampling_mode="interleaved",
+                ),
+            )
+            trainer, student, rgb_teacher, ir_teacher = build_trainer(config)
+            initial_weight = student.adapter.weight.detach().clone()
+            logs = [trainer.train_one_iteration() for _ in range(4)]
+            self.assertEqual(
+                [log["step_type"] for log in logs],
+                ["p2_rgb_flow", "p2_ir_flow", "p2_rgb_flow", "p2_rgb_flow"],
+            )
+            self.assertFalse(torch.equal(student.adapter.weight, initial_weight))
+            self.assertEqual(rgb_teacher.adapter.forward_calls, 3)
+            self.assertEqual(ir_teacher.adapter.forward_calls, 1)
+            trainer.save_checkpoint("interleaved.pth")
+            resumed, _, _, _ = build_trainer(config)
+            resumed.load_checkpoint(f"{output_dir}/interleaved.pth")
+            self.assertEqual(
+                [resumed.train_one_iteration()["step_type"] for _ in range(6)],
+                ["p2_rgb_flow", "p2_ir_flow", "p2_rgb_flow", "p2_rgb_flow", "p2_ir_flow", "p2_rgb_flow"],
+            )
+
     def _phase4_config(self, *, ratio=0.2, output_dir="outputs"):
         config = build_config(
             curriculum=CurriculumConfig(

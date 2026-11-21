@@ -7,6 +7,7 @@ import torch
 
 from config import (
     AugConfig,
+    BridgeScheduleConfig,
     CurriculumConfig,
     DataConfig,
     DataLoaderConfig,
@@ -14,6 +15,7 @@ from config import (
     EMAConfig,
     EvalLoaderConfig,
     FCOSModelConfig,
+    GANBridgeConfig,
     LossConfig,
     OptimizerConfig,
     Phase,
@@ -51,6 +53,10 @@ def build_training_config(args) -> TrainingConfig:
     # Resolve iteration boundaries and weight identifiers before building the
     # effective configuration consumed by bootstrap and checkpoint metadata.
     total_iters = int(args.total_iters)
+    if args.workflow == "gan_bridge" and any(
+        value is not None for value in (args.phase1_end, args.phase2_end, args.phase3_end)
+    ):
+        raise ValueError("gan_bridge uses --bridge-phase-fractions, not legacy --phaseN-end flags")
     default_boundaries = _phase_boundaries(total_iters)
     phase1_end = (
         default_boundaries[0] if args.phase1_end is None else args.phase1_end
@@ -78,6 +84,7 @@ def build_training_config(args) -> TrainingConfig:
         phase3_end=phase3_end,
         phase2_rgb_sampling_ratio=args.phase2_rgb_ratio,
         phase3_rgb_sampling_ratio=args.phase3_rgb_ratio,
+        sampling_mode=args.domain_sampling,
         phase4_rgb_sampling_ratio=args.phase4_rgb_ratio,
     )
 
@@ -121,6 +128,16 @@ def build_training_config(args) -> TrainingConfig:
             ),
         ),
         curriculum=curriculum,
+        bridge_schedule=BridgeScheduleConfig(
+            phase_ratios=args.bridge_ratios,
+            phase_fractions=tuple(args.bridge_phase_fractions),
+        ),
+        gan_bridge=GANBridgeConfig(
+            checkpoint=args.gan_weights, source_sup_weight=args.bridge_source_sup_weight,
+            saga_student_alphas=tuple(args.bridge_saga_student_alphas),
+            saga_teacher_alphas=tuple(args.bridge_saga_teacher_alphas),
+            saga_teachers=tuple(args.bridge_saga_teachers),
+        ),
         # Phase and component weights are resolved upstream of loss execution.
         loss=LossConfig(
             p1_sup_weight=1.0,
@@ -129,7 +146,9 @@ def build_training_config(args) -> TrainingConfig:
             p2_distill_weight=0.7,
             p3_sup_weight=0.5,
             p3_distill_weight=1.0,
-            p4_sup_weight=1.0,
+            # GAN source GT uses gan_bridge.source_sup_weight in its final
+            # stage. Keep its pre-merge metadata compatible with saved runs.
+            p4_sup_weight=0.0 if args.workflow == "gan_bridge" else 1.0,
             p4_distill_weight=1.0,
             weight_logits=4.0,
             weight_deltas=1.0,
@@ -241,6 +260,15 @@ def main(args) -> None:
         phase_evaluator.print_history()
 
 
+def _bridge_ratios(value):
+    try:
+        ratios = tuple(tuple(float(weight) for weight in row.split(":")) for row in value.split(","))
+        BridgeScheduleConfig(phase_ratios=ratios)
+        return ratios
+    except (ValueError, TypeError) as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
 def parse_args():
     # Declare launch options here; build_training_config translates them into
     # one effective configuration before any training dependency is assembled.
@@ -311,7 +339,7 @@ def parse_args():
     )
     parser.add_argument(
         "--workflow",
-        choices=("curriculum", "rgb_baseline"),
+        choices=("curriculum", "rgb_baseline", "gan_bridge"),
         default="curriculum",
     )
     parser.add_argument(
@@ -322,6 +350,18 @@ def parse_args():
     )
     parser.add_argument("--phase2-rgb-ratio", type=float, default=0.7)
     parser.add_argument("--phase3-rgb-ratio", type=float, default=0.3)
+    parser.add_argument(
+        "--domain-sampling", choices=("grouped", "interleaved"), default="grouped",
+        help="Group existing curriculum routes in short cycles or spread them per iteration",
+    )
+    parser.add_argument("--gan-weights", default=None, help="Pretrained RGB(3)->IR(1) CycleGAN G_A checkpoint")
+    parser.add_argument("--bridge-ratios", type=_bridge_ratios, default=BridgeScheduleConfig().phase_ratios)
+    parser.add_argument("--bridge-phase-fractions", type=float, nargs=5, default=(0.2, 0.4, 0.6, 0.8, 1.0))
+    parser.add_argument("--bridge-source-sup-weight", type=float, default=1.0)
+    parser.add_argument("--bridge-saga-student-alphas", type=float, nargs=5, default=(1, 0.75, 0.5, 0.25, 0.25))
+    parser.add_argument("--bridge-saga-teacher-alphas", type=float, nargs=5, default=(1, 0.75, 0.5, 0.5, 0.25))
+    parser.add_argument("--bridge-saga-teachers", choices=("none", "rgb", "ir"), nargs=5,
+                        default=("none", "rgb", "ir", "ir", "ir"))
     parser.add_argument(
         "--phase4-rgb-ratio", type=float, default=0.2,
         help="Fraction of phase-4 steps using supervised RGB; use 0 for IR-only",

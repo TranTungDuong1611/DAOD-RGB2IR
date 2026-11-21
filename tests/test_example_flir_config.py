@@ -11,6 +11,19 @@ from models.torchvision_fcos_adapter import ClassificationInitMode
 
 
 class EntrypointConfigTests(unittest.TestCase):
+    def test_cli_interleaved_mode_changes_the_effective_route_sequence(self):
+        from scheduler import CurriculumScheduler
+
+        with mock.patch.object(sys, "argv", [
+            "example_flir.py", "--data_root", "synthetic", "--total_iters", "10",
+            "--phase1-end", "0", "--phase2-end", "10", "--phase3-end", "10",
+            "--domain-sampling", "interleaved",
+        ]):
+            config = make_training_config(parse_args())
+        schedule = CurriculumScheduler(config)
+        self.assertEqual(schedule.get_next_step(0), "p2_rgb_flow")
+        self.assertEqual(schedule.get_next_step(1), "p2_ir_flow")
+
     def test_phase4_rgb_sampling_rejects_invalid_fractions(self):
         for ratio in (-0.1, 1.1, float("nan"), float("inf")):
             with self.subTest(ratio=ratio):

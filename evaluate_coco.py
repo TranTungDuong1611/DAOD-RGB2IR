@@ -19,7 +19,8 @@ from data import (
     ir_val_collate,
     rgb_collate,
 )
-from models.fcos_factory import CHECKPOINT_SCHEMA_VERSION, build_fcos_d3t_model
+from models.fcos_factory import build_fcos_d3t_model
+from training.checkpointing import CHECKPOINT_SCHEMA_VERSION
 
 
 logger = logging.getLogger(__name__)
