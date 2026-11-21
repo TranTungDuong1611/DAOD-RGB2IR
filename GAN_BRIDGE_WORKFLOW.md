@@ -143,10 +143,28 @@ continues using the project's existing AP50 and loss/HM phase labels; stages 3/4
 share the adaptation policy. A real GAN checkpoint and FLIR data are needed to
 measure accuracy; automated smoke tests do not establish an AP gain.
 
-Dataset splits retain the source branch's behavior. This change does not introduce
-a disjoint RGB/IR split. Inspect translated real samples before a long experiment:
-reusing RGB boxes assumes the GAN preserves object geometry, which a tensor shape
-check alone cannot establish.
+Training loaders use an ordered disjoint partition of `align_train.txt`: the first
+`N // 2` IDs supply labeled RGB source images, and the remaining IDs supply
+unlabeled real-IR target images. For an odd number of IDs, the extra ID belongs
+to the target group. The manifest order is preserved and the partition is made
+before filtering missing image files. Duplicate IDs and manifests with fewer than
+two IDs are rejected. Split files are read from the data root, or from
+`ImageSets/Main/` when absent at the root; the files themselves are not modified.
+
+RGB, SAGA and GAN-IR all use the same source group. The curriculum and RGB-baseline
+train loaders use this source partition too. Validation loaders and standalone
+evaluation still use the complete `align_validation.txt` manifest. This implements
+the disjoint training principle; matching the exact D3T benchmark also requires
+matching its image IDs, ordering and evaluation protocol.
+
+Start a new experiment and output directory when moving from the previous shared
+RGB/IR training set to this partition. Resuming an old checkpoint does not erase
+its earlier exposure to both modalities of the same scenes; the checkpoint loader
+does not currently validate this data-partition change.
+
+Inspect translated real samples before a long experiment: reusing RGB boxes
+assumes the GAN preserves object geometry, which a tensor shape check alone
+cannot establish.
 
 ## Verification
 
