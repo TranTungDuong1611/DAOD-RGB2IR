@@ -1,4 +1,4 @@
-"""Detector-neutral supervised and distillation losses for D3T."""
+"""Detector-neutral supervised and distillation losses."""
 
 import math
 from typing import Optional, Sequence
@@ -7,9 +7,9 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 
-from models.d3t_adapter import (
+from models.detector_adapter import (
     CriterionResult,
-    D3TCriterion,
+    DetectorCriterion,
     DistillationPair,
     DistillationSettings,
     Losses,
@@ -154,8 +154,8 @@ def select_distillation_masks(predictions, settings):
     return tuple(selected.split([len(p.boxes) for p in predictions]))
 
 
-class D3TLossCriterion(D3TCriterion):
-    """HM-Focal supervised loss and position-wise D3T distillation."""
+class DetectionLossCriterion(DetectorCriterion):
+    """HM-Focal supervised loss and position-wise distillation."""
 
     def __init__(
         self,
@@ -252,7 +252,7 @@ class D3TLossCriterion(D3TCriterion):
         return s_cls, t_cls, s_boxes, t_boxes, s_quality, t_quality
 
     def _uhl_loss(self, pair: DistillationPair, selected: Tensor) -> Tensor:
-        """Build D3T overlap targets per image and supervise student logits."""
+        """Build overlap targets per image and supervise student logits."""
 
         logits = []
         targets = []
@@ -412,7 +412,7 @@ class D3TLossCriterion(D3TCriterion):
 
 
 __all__ = [
-    "D3TLossCriterion",
+    "DetectionLossCriterion",
     "select_distillation_masks",
     "_hm_focal_elementwise",
     "_iou_loss_xyxy",

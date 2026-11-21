@@ -1,4 +1,4 @@
-"""Detector-independent contracts used by the D3T training path.
+"""Detector-independent contracts for detection and distillation.
 
 Detector adapters own transforms, target assignment, decoding, postprocessing,
 and the rules used to establish student/teacher correspondence.  The criterion
@@ -222,7 +222,7 @@ class DetectorAdapter(nn.Module, ABC):
         raise NotImplementedError
 
 
-class D3TCriterion(nn.Module, ABC):
+class DetectorCriterion(nn.Module, ABC):
     """Shared loss formulas receive prepared data, never detector internals."""
 
     @abstractmethod

@@ -1,4 +1,4 @@
-"""Detector-independent D3T orchestration."""
+"""Detector-independent detection and distillation orchestration."""
 
 from dataclasses import replace
 from typing import Optional, Sequence, Tuple
@@ -6,10 +6,10 @@ from typing import Optional, Sequence, Tuple
 import torch
 from torch import Tensor, nn
 
-from .d3t_adapter import (
+from .detector_adapter import (
     AdapterOutput,
     CriterionResult,
-    D3TCriterion,
+    DetectorCriterion,
     DetectorAdapter,
     DistillationSettings,
     Losses,
@@ -23,10 +23,10 @@ _DEFAULT_DISTILLATION_SETTINGS = DistillationSettings(
 )
 
 
-class D3TWrapper(nn.Module):
+class DetectorWrapper(nn.Module):
     """Combine one detector adapter with one detector-neutral criterion."""
 
-    def __init__(self, adapter: DetectorAdapter, criterion: D3TCriterion):
+    def __init__(self, adapter: DetectorAdapter, criterion: DetectorCriterion):
         super().__init__()
         self.adapter = adapter
         self.criterion = criterion
@@ -79,7 +79,7 @@ class D3TWrapper(nn.Module):
             duplicates = merged.keys() & losses.keys()
             if duplicates:
                 raise ValueError(
-                    f"Duplicate native/D3T loss names: {sorted(duplicates)}"
+                    f"Duplicate native/criterion loss names: {sorted(duplicates)}"
                 )
             merged.update(losses)
         return merged
@@ -158,7 +158,7 @@ class D3TWrapper(nn.Module):
     def distill(
         self,
         student_images: Sequence[Tensor] | Tensor,
-        teacher: "D3TWrapper",
+        teacher: "DetectorWrapper",
         teacher_images: Sequence[Tensor] | Tensor,
         settings: Optional[DistillationSettings] = None,
         sample_ids: Optional[Sequence[str]] = None,

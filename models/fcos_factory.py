@@ -1,4 +1,4 @@
-"""Factories for the Torchvision FCOS D3T student/teacher models."""
+"""Factories for the Torchvision FCOS student/teacher models."""
 
 import copy
 from typing import Callable, Optional, Tuple
@@ -11,8 +11,8 @@ from torchvision.models.detection import (
 )
 
 from config import FCOSModelConfig, TrainingConfig
-from loss.d3t_criterion import D3TLossCriterion
-from .d3t_wrapper import D3TWrapper
+from loss.detection_criterion import DetectionLossCriterion
+from .detector_wrapper import DetectorWrapper
 from .torchvision_fcos_adapter import (
     ClassificationInitMode,
     FCOSIoUHead,
@@ -65,12 +65,12 @@ def _make_base_detector(
     )
 
 
-def build_fcos_d3t_model(
+def build_fcos_model(
     config: TrainingConfig,
     *,
     base_detector: Optional[nn.Module] = None,
     detector_builder: Optional[Callable[..., nn.Module]] = None,
-) -> D3TWrapper:
+) -> DetectorWrapper:
     """Build one student wrapper from the effective FCOS configuration."""
 
     if not isinstance(config, TrainingConfig):
@@ -106,26 +106,26 @@ def build_fcos_d3t_model(
         base_detector,
         class_names=config.model.class_names,
     )
-    criterion = D3TLossCriterion(
+    criterion = DetectionLossCriterion(
         alpha=config.model.vfl_alpha,
         gamma=config.model.vfl_gamma,
         weight_type=config.model.vfl_weight_type,
     )
-    wrapper = D3TWrapper(adapter, criterion)
+    wrapper = DetectorWrapper(adapter, criterion)
     wrapper.effective_config = config
     wrapper.classification_init_mode = config.model.classification_init_mode
     return wrapper
 
 
-def build_fcos_d3t_trio(
+def build_fcos_trio(
     config: TrainingConfig,
     *,
     base_detector: Optional[nn.Module] = None,
     detector_builder: Optional[Callable[..., nn.Module]] = None,
-) -> Tuple[D3TWrapper, Optional[D3TWrapper], Optional[D3TWrapper]]:
+) -> Tuple[DetectorWrapper, Optional[DetectorWrapper], Optional[DetectorWrapper]]:
     """Build student plus independent RGB/IR teachers."""
 
-    student = build_fcos_d3t_model(
+    student = build_fcos_model(
         config,
         base_detector=base_detector,
         detector_builder=detector_builder,
@@ -151,6 +151,6 @@ def build_fcos_d3t_trio(
 
 __all__ = [
     "ClassificationInitMode",
-    "build_fcos_d3t_model",
-    "build_fcos_d3t_trio",
+    "build_fcos_model",
+    "build_fcos_trio",
 ]

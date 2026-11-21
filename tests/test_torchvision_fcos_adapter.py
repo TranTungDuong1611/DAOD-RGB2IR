@@ -11,8 +11,8 @@ from models.torchvision_fcos_adapter import (
     FCOSIoUHead,
     TorchvisionFCOSAdapter,
 )
-from loss.d3t_criterion import D3TLossCriterion
-from models.d3t_wrapper import D3TWrapper
+from loss.detection_criterion import DetectionLossCriterion
+from models.detector_wrapper import DetectorWrapper
 from torchvision.models.detection import FCOS
 
 
@@ -54,8 +54,8 @@ def build_adapter(min_size=64, max_size=128):
 
 class TorchvisionFCOSAdapterTests(unittest.TestCase):
     def test_shared_resize_override_aligns_train_student_and_eval_teacher(self):
-        student = D3TWrapper(
-            build_adapter(min_size=(64, 96)), D3TLossCriterion()
+        student = DetectorWrapper(
+            build_adapter(min_size=(64, 96)), DetectionLossCriterion()
         )
         teacher = copy.deepcopy(student).eval()
         student.train()
@@ -81,8 +81,8 @@ class TorchvisionFCOSAdapterTests(unittest.TestCase):
         )
 
     def test_distill_convenience_selects_one_shared_resize(self):
-        student = D3TWrapper(
-            build_adapter(min_size=(64, 96)), D3TLossCriterion()
+        student = DetectorWrapper(
+            build_adapter(min_size=(64, 96)), DetectionLossCriterion()
         )
         teacher = copy.deepcopy(student).eval()
         student.train()

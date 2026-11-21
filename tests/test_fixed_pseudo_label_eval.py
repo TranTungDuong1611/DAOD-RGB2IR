@@ -14,9 +14,9 @@ from torch.utils.data import DataLoader, Subset
 from data.datasets import FLIRIRDataset
 from data.dataloaders import ir_collate
 from data.ir_annotations import IRAnnotationReader
-from loss.d3t_criterion import D3TLossCriterion
-from models.d3t_adapter import DistillationPair, DistillationSettings, Predictions
-from models.d3t_wrapper import D3TWrapper
+from loss.detection_criterion import DetectionLossCriterion
+from models.detector_adapter import DistillationPair, DistillationSettings, Predictions
+from models.detector_wrapper import DetectorWrapper
 from test_torchvision_fcos_adapter import build_adapter
 
 
@@ -40,7 +40,7 @@ def validation_root():
 
 
 def test_shared_teacher_selection_matches_batch_global_training_mask():
-    from loss.d3t_criterion import select_distillation_masks
+    from loss.detection_criterion import select_distillation_masks
 
     predictions = tuple(Predictions(
         torch.logit(torch.tensor(values)).reshape(-1, 1),
@@ -49,7 +49,7 @@ def test_shared_teacher_selection_matches_batch_global_training_mask():
     settings = DistillationSettings(.34, 0., hm_alpha=1., hm_beta=0.)
     masks = select_distillation_masks(predictions, settings)
     assert [m.tolist() for m in masks] == [[False], [True, True]]
-    trained = D3TLossCriterion().distillation(DistillationPair(predictions, predictions), settings)
+    trained = DetectionLossCriterion().distillation(DistillationPair(predictions, predictions), settings)
     assert all(torch.equal(a, b) for a, b in zip(masks, trained.selected_masks))
 
 
@@ -102,7 +102,7 @@ def make_evaluator(root):
 
 def test_fixed_and_full_passes_keep_last_batch_and_restore_model_and_rng(validation_root):
     evaluator = make_evaluator(validation_root)
-    model = D3TWrapper(build_adapter(), D3TLossCriterion())
+    model = DetectorWrapper(build_adapter(), DetectionLossCriterion())
     model.train()
     model.adapter.detector.backbone.eval()  # Preserve mixed child modes too.
     modes = {n: m.training for n, m in model.named_modules()}
@@ -131,7 +131,7 @@ def test_fixed_and_full_passes_keep_last_batch_and_restore_model_and_rng(validat
 
 def test_evaluation_restores_state_when_teacher_forward_raises(validation_root):
     evaluator = make_evaluator(validation_root)
-    model = D3TWrapper(build_adapter(), D3TLossCriterion()).train()
+    model = DetectorWrapper(build_adapter(), DetectionLossCriterion()).train()
     before = torch.get_rng_state().clone()
     def fail(*args, **kwargs):
         torch.rand(1)
@@ -187,6 +187,6 @@ def test_fixed_subset_fails_clearly_when_no_validation_labels_are_available(vali
 def test_fixed_pass_rejects_changed_image_order(validation_root):
     evaluator = make_evaluator(validation_root)
     evaluator.fixed_sample_ids = tuple(reversed(evaluator.fixed_sample_ids))
-    model = D3TWrapper(build_adapter(), D3TLossCriterion())
+    model = DetectorWrapper(build_adapter(), DetectionLossCriterion())
     with pytest.raises(ValueError, match="order"):
         evaluator.evaluate(model, DistillationSettings(.1, 0.), iou_threshold=.5, resize_short_edge=64)

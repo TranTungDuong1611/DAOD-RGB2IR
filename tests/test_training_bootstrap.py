@@ -28,7 +28,7 @@ class TrainingBootstrapTests(unittest.TestCase):
         with (
             mock.patch("training.bootstrap.build_dataloaders", return_value=loaders),
             mock.patch(
-                "training.bootstrap.build_fcos_d3t_trio",
+                "training.bootstrap.build_fcos_trio",
                 return_value=(student, rgb_teacher, ir_teacher),
             ),
         ):

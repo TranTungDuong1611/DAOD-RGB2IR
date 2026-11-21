@@ -1,4 +1,4 @@
-"""Torchvision FCOS adapter for detector-neutral D3T training.
+"""Torchvision FCOS adapter for detector-neutral training.
 
 Only this module knows Torchvision's FCOS head layout, anchor assignment, box
 coder, and native detection postprocessing.  The public output is decoded XYXY
@@ -20,7 +20,7 @@ from torchvision.models.detection.transform import resize_boxes
 
 from configs.types import ClassificationInitMode
 
-from .d3t_adapter import (
+from .detector_adapter import (
     AdapterOutput,
     DetectorAdapter,
     DistillationPair,
@@ -226,7 +226,7 @@ def _aligned_box_iou(pred_boxes: Tensor, target_boxes: Tensor, eps: float = 1e-7
 
 
 class TorchvisionFCOSAdapter(DetectorAdapter):
-    """Run Torchvision FCOS once and expose D3T-compatible tensors."""
+    """Run Torchvision FCOS once and expose normalized detection tensors."""
 
     def __init__(
         self,
@@ -345,7 +345,7 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
         if len(anchors_per_location) != len(feature_list):
             raise ValueError("anchor generator levels do not match FPN levels")
         if any(value != 1 for value in anchors_per_location):
-            raise ValueError("FCOS D3T adapter requires one anchor per location")
+            raise ValueError("FCOS adapter requires one anchor per location")
         num_anchors_per_level = tuple(
             int(feature.shape[-2] * feature.shape[-1] * anchors_per_location[level])
             for level, feature in enumerate(feature_list)
@@ -407,7 +407,7 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
         target: Mapping[str, Any],
         num_anchors_per_level: Sequence[int],
     ) -> Tensor:
-        """Assign FCOS locations with D3T-compatible center sampling."""
+        """Assign FCOS locations with configured center sampling."""
 
         if anchors.ndim != 2 or anchors.shape[-1] != 4:
             raise ValueError("anchors must have shape [N, 4]")

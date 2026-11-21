@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from data.ir_annotations import IRAnnotation
-from models.d3t_adapter import AdapterOutput, Predictions
+from models.detector_adapter import AdapterOutput, Predictions
 from models.torchvision_fcos_adapter import FCOSAdapterContext
 from test_torchvision_fcos_adapter import build_adapter
 

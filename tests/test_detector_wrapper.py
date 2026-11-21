@@ -1,17 +1,17 @@
 import unittest
 import torch
 from torch import nn
-from models.d3t_adapter import (
+from models.detector_adapter import (
     AdapterOutput,
     CriterionResult,
-    D3TCriterion,
+    DetectorCriterion,
     DetectorAdapter,
     DistillationPair,
     DistillationSettings,
     Predictions,
     SupervisedBatch,
 )
-from models.d3t_wrapper import D3TWrapper
+from models.detector_wrapper import DetectorWrapper
 
 
 class TinyAdapter(DetectorAdapter):
@@ -49,7 +49,7 @@ class TinyAdapter(DetectorAdapter):
                  'labels': p.class_logits.argmax(-1)} for p in output.predictions]
 
 
-class TinyCriterion(D3TCriterion):
+class TinyCriterion(DetectorCriterion):
     def supervised(self, batch):
         return {'classification': sum(p.class_logits.square().mean() for p in batch.predictions)}
 
@@ -67,23 +67,23 @@ class WrapperTests(unittest.TestCase):
         self.targets = [{'boxes': torch.empty(0, 4), 'labels': torch.empty(0, dtype=torch.long)}]
 
     def test_supervised_keeps_native_loss_and_gradient(self):
-        model = D3TWrapper(TinyAdapter(), TinyCriterion())
+        model = DetectorWrapper(TinyAdapter(), TinyCriterion())
         losses = model(self.images, self.targets)
         self.assertEqual(set(losses), {'classification', 'rpn'})
         sum(losses.values()).backward()
         self.assertEqual(model.adapter.weight.grad.item(), 4.0)
 
     def test_eval_uses_adapter_postprocessing(self):
-        model = D3TWrapper(TinyAdapter(5), TinyCriterion()).eval()
+        model = DetectorWrapper(TinyAdapter(5), TinyCriterion()).eval()
         self.assertEqual(model(self.images)[0]['boxes'].shape, (5, 4))
 
     def test_requires_targets_in_training(self):
         with self.assertRaisesRegex(ValueError, 'targets'):
-            D3TWrapper(TinyAdapter(), TinyCriterion())(self.images)
+            DetectorWrapper(TinyAdapter(), TinyCriterion())(self.images)
 
     def test_distillation_only_updates_student(self):
-        student = D3TWrapper(TinyAdapter(), TinyCriterion())
-        teacher = D3TWrapper(TinyAdapter(), TinyCriterion()).eval()
+        student = DetectorWrapper(TinyAdapter(), TinyCriterion())
+        teacher = DetectorWrapper(TinyAdapter(), TinyCriterion()).eval()
         with torch.no_grad():
             teacher.adapter.weight.fill_(2)
         losses = student.distill(
@@ -96,13 +96,13 @@ class WrapperTests(unittest.TestCase):
         self.assertFalse(teacher.training)
 
     def test_teacher_must_be_in_eval_mode(self):
-        student = D3TWrapper(TinyAdapter(), TinyCriterion())
+        student = DetectorWrapper(TinyAdapter(), TinyCriterion())
         with self.assertRaisesRegex(ValueError, 'eval'):
-            student.distill(self.images, D3TWrapper(TinyAdapter(), TinyCriterion()), self.images)
+            student.distill(self.images, DetectorWrapper(TinyAdapter(), TinyCriterion()), self.images)
 
     def test_different_prediction_counts_need_explicit_matching(self):
-        student = D3TWrapper(TinyAdapter(2), TinyCriterion())
-        teacher = D3TWrapper(TinyAdapter(3), TinyCriterion()).eval()
+        student = DetectorWrapper(TinyAdapter(2), TinyCriterion())
+        teacher = DetectorWrapper(TinyAdapter(3), TinyCriterion()).eval()
         with self.assertRaisesRegex(ValueError, 'matched'):
             student.distill(
                 self.images, teacher, self.images,
@@ -110,9 +110,9 @@ class WrapperTests(unittest.TestCase):
             )
 
     def test_registered_parameters_and_checkpoint(self):
-        model = D3TWrapper(TinyAdapter(), TinyCriterion()).double()
+        model = DetectorWrapper(TinyAdapter(), TinyCriterion()).double()
         self.assertEqual(dict(model.named_parameters())['adapter.weight'].dtype, torch.float64)
-        copy = D3TWrapper(TinyAdapter(), TinyCriterion()).double()
+        copy = DetectorWrapper(TinyAdapter(), TinyCriterion()).double()
         copy.load_state_dict(model.state_dict())
         self.assertEqual(copy.adapter.weight.item(), 1.0)
 
@@ -125,11 +125,11 @@ class WrapperTests(unittest.TestCase):
             def supervised(self, batch):
                 return {'rpn': batch.predictions[0].class_logits.mean()}
         with self.assertRaisesRegex(ValueError, 'Duplicate'):
-            D3TWrapper(TinyAdapter(), ConflictingCriterion())(self.images, self.targets)
+            DetectorWrapper(TinyAdapter(), ConflictingCriterion())(self.images, self.targets)
 
     def test_loss_from_existing_output_does_not_forward_again(self):
         adapter = TinyAdapter()
-        model = D3TWrapper(adapter, TinyCriterion())
+        model = DetectorWrapper(adapter, TinyCriterion())
         output = model.raw(self.images, self.targets, sample_ids=('frame-1',))
         losses = model.supervised_from_output(output, self.targets)
         self.assertEqual(adapter.forward_calls, 1)
@@ -150,8 +150,8 @@ class ContractTests(unittest.TestCase):
                 'foreground': torch.zeros(2, dtype=torch.bool)},))
 
     def test_empty_predictions_can_produce_differentiable_zero(self):
-        model = D3TWrapper(TinyAdapter(0), TinyCriterion())
-        teacher = D3TWrapper(TinyAdapter(0), TinyCriterion()).eval()
+        model = DetectorWrapper(TinyAdapter(0), TinyCriterion())
+        teacher = DetectorWrapper(TinyAdapter(0), TinyCriterion()).eval()
         class SumCriterion(TinyCriterion):
             def distillation(self, pair, settings=None):
                 return CriterionResult(
@@ -169,7 +169,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(model.adapter.weight.grad.item(), 0.0)
 
     def test_raw_rejects_empty_or_mismatched_batches(self):
-        model = D3TWrapper(TinyAdapter(), TinyCriterion())
+        model = DetectorWrapper(TinyAdapter(), TinyCriterion())
         with self.assertRaisesRegex(ValueError, 'images'):
             model.raw([])
         with self.assertRaisesRegex(ValueError, 'targets'):

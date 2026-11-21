@@ -12,8 +12,8 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
 from config import Phase, StepRouting, TrainingConfig
-from models.d3t_adapter import DistillationSettings
-from models.d3t_wrapper import D3TWrapper as D3TWrapper
+from models.detector_adapter import DistillationSettings
+from models.detector_wrapper import DetectorWrapper as DetectorWrapper
 from scheduler import BridgeDomainScheduler, CurriculumScheduler, should_evaluate_pseudo_labels
 from data.augmentations import StudentAugmentor
 from training import teachers

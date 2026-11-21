@@ -2,10 +2,10 @@
 
 import torch
 
-from loss.d3t_criterion import D3TLossCriterion
-from models.d3t_adapter import DistillationPair, DistillationSettings, Predictions
+from loss.detection_criterion import DetectionLossCriterion
+from models.detector_adapter import DistillationPair, DistillationSettings, Predictions
 from training.loss_flow import LossFlow
-from models.d3t_wrapper import D3TWrapper
+from models.detector_wrapper import DetectorWrapper
 from test_curriculum_wrapper_integration import TinyAdapter
 
 
@@ -15,14 +15,14 @@ def test_selection_masks_preserve_batch_global_topk_and_image_boundaries():
         torch.tensor([[0., 0., 2., 2.]] * len(probs)), torch.zeros(len(probs))
     ) for probs in ([.1, .9], [.8]))
     settings = DistillationSettings(top_ratio=.34, min_hm=0., hm_alpha=1., hm_beta=0.)
-    result = D3TLossCriterion().distillation(DistillationPair(teacher, teacher), settings)
+    result = DetectionLossCriterion().distillation(DistillationPair(teacher, teacher), settings)
     assert [mask.tolist() for mask in result.selected_masks] == [[False, True], [True]]
     assert sum(mask.sum().item() for mask in result.selected_masks) == 2
     assert all(not mask.requires_grad for mask in result.selected_masks)
 
 
 def test_loss_flow_exposes_selection_without_adding_masks_to_loss_or_logs():
-    wrapper = D3TWrapper(TinyAdapter(), D3TLossCriterion())
+    wrapper = DetectorWrapper(TinyAdapter(), DetectionLossCriterion())
     output = wrapper.raw(torch.ones(1, 3, 4, 4), sample_ids=("a",))
     flow = LossFlow(uhl=1., quality=1., deltas=1., logits=1.)
     result = flow.distill(wrapper, output, output, DistillationSettings(1., 1.),

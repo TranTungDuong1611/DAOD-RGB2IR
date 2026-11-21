@@ -1,5 +1,5 @@
-"""Detector-neutral D3T loss exports."""
+"""Detector-neutral detection and distillation loss exports."""
 
-from .d3t_criterion import D3TLossCriterion
+from .detection_criterion import DetectionLossCriterion
 
-__all__ = ["D3TLossCriterion"]
+__all__ = ["DetectionLossCriterion"]

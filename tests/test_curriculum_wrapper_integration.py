@@ -19,16 +19,16 @@ from config import (
     TrainingConfig,
     TeacherSchedule,
 )
-from models.d3t_adapter import (
+from models.detector_adapter import (
     AdapterOutput,
     CriterionResult,
-    D3TCriterion,
+    DetectorCriterion,
     DetectorAdapter,
     DistillationPair,
     Predictions,
     SupervisedBatch,
 )
-from models.d3t_wrapper import D3TWrapper
+from models.detector_wrapper import DetectorWrapper
 from scheduler import CurriculumScheduler
 from trainer import CurriculumDomainAdaptationTrainer
 from ema import copy_student_to_teacher, ema_update
@@ -75,7 +75,7 @@ class TinyAdapter(DetectorAdapter):
         return []
 
 
-class TinyCriterion(D3TCriterion):
+class TinyCriterion(DetectorCriterion):
     def __init__(self):
         super().__init__()
         self.distill_calls = 0
@@ -207,9 +207,9 @@ def build_config(**kwargs):
 
 
 def build_trainer(config):
-    student = D3TWrapper(TinyAdapter(), TinyCriterion())
-    rgb_teacher = D3TWrapper(TinyAdapter(), TinyCriterion())
-    ir_teacher = D3TWrapper(TinyAdapter(), TinyCriterion())
+    student = DetectorWrapper(TinyAdapter(), TinyCriterion())
+    rgb_teacher = DetectorWrapper(TinyAdapter(), TinyCriterion())
+    ir_teacher = DetectorWrapper(TinyAdapter(), TinyCriterion())
     rgb_loader = DataLoader(RGBDataset(), batch_size=1, collate_fn=collate_rgb)
     ir_loader = DataLoader(IRDataset(), batch_size=1, collate_fn=collate_ir)
     optimizer = torch.optim.SGD(student.parameters(), lr=0.1)
@@ -516,8 +516,8 @@ class CurriculumIntegrationTests(unittest.TestCase):
         self.assertIsNone(data["targets"])
 
     def test_positionwise_wrapper_rejects_different_sample_ids(self):
-        student = D3TWrapper(TinyAdapter(), TinyCriterion())
-        teacher = D3TWrapper(TinyAdapter(), TinyCriterion()).eval()
+        student = DetectorWrapper(TinyAdapter(), TinyCriterion())
+        teacher = DetectorWrapper(TinyAdapter(), TinyCriterion()).eval()
         student_output = student.raw(
             [torch.zeros(3, 8, 8)], sample_ids=("sample-a",)
         )

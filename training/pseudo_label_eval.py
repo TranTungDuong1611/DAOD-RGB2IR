@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 import torch
 
-from loss.d3t_criterion import select_distillation_masks
+from loss.detection_criterion import select_distillation_masks
 from models.torchvision_fcos_adapter import _aligned_box_iou
 
 

@@ -12,8 +12,8 @@ import torch
 from PIL import Image
 
 from config import CurriculumConfig, EMAConfig, PseudoLabelEvalConfig, TeacherSchedule
-from loss.d3t_criterion import D3TLossCriterion
-from models.d3t_wrapper import D3TWrapper
+from loss.detection_criterion import DetectionLossCriterion
+from models.detector_wrapper import DetectorWrapper
 from trainer import CurriculumDomainAdaptationTrainer
 from training.bootstrap import build_pseudo_label_evaluator
 from test_curriculum_wrapper_integration import build_config
@@ -66,7 +66,7 @@ def write_annotation(directory, label="person"):
 
 
 def test_trainer_audits_fixed_ir_validation_and_resumes_without_duplicate_window():
-    base = D3TWrapper(build_adapter(), D3TLossCriterion())
+    base = DetectorWrapper(build_adapter(), DetectionLossCriterion())
     with tempfile.TemporaryDirectory() as directory:
         write_annotation(directory)
         trainer = make_trainer(base, directory, enabled=True)
@@ -113,7 +113,7 @@ def test_trainer_audits_fixed_ir_validation_and_resumes_without_duplicate_window
 
 def test_audit_enabled_changed_or_missing_gt_preserves_losses_updates_and_rng():
     torch.manual_seed(31)
-    base = D3TWrapper(build_adapter(min_size=(64, 96)), D3TLossCriterion())
+    base = DetectorWrapper(build_adapter(min_size=(64, 96)), DetectionLossCriterion())
     runs = []
     with tempfile.TemporaryDirectory() as directory:
         for name, enabled, label in [("off", False, "person"), ("on", True, "person"),
@@ -160,7 +160,7 @@ def test_audit_enabled_changed_or_missing_gt_preserves_losses_updates_and_rng():
 
 
 def test_empty_kd_mask_is_reported_and_legacy_checkpoint_remains_loadable():
-    base = D3TWrapper(build_adapter(), D3TLossCriterion())
+    base = DetectorWrapper(build_adapter(), DetectionLossCriterion())
     with tempfile.TemporaryDirectory() as directory:
         write_annotation(directory)
         trainer = make_trainer(base, directory, enabled=True)
@@ -192,7 +192,7 @@ def test_empty_kd_mask_is_reported_and_legacy_checkpoint_remains_loadable():
 
 
 def test_training_completion_evaluates_full_ir_validation_once_and_saves_progress():
-    base = D3TWrapper(build_adapter(), D3TLossCriterion())
+    base = DetectorWrapper(build_adapter(), DetectionLossCriterion())
     with tempfile.TemporaryDirectory() as directory:
         write_annotation(directory)
         trainer = make_trainer(base, directory, enabled=True)
@@ -214,7 +214,7 @@ def test_cli_smoke_runs_all_phases_and_persists_final_full_audit():
     import sys
     from example_flir import main, parse_args
 
-    base = D3TWrapper(build_adapter(), D3TLossCriterion())
+    base = DetectorWrapper(build_adapter(), DetectionLossCriterion())
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         write_annotation(root)
@@ -230,7 +230,7 @@ def test_cli_smoke_runs_all_phases_and_persists_final_full_audit():
         # Keep real CLI/config/data/optimizer/evaluation/checkpoint execution;
         # replace only heavyweight model assembly with actual tiny-backbone FCOS.
         with mock.patch.object(sys, "argv", args), \
-             mock.patch("training.bootstrap.build_fcos_d3t_trio",
+             mock.patch("training.bootstrap.build_fcos_trio",
                         side_effect=lambda config: tuple(copy.deepcopy(base) for _ in range(3))), \
              mock.patch("example_flir.configure_training_logging", return_value=root / "train.log"):
             main(parse_args())

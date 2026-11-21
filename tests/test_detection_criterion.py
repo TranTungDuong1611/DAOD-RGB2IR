@@ -3,8 +3,8 @@ import unittest
 
 import torch
 
-from loss.d3t_criterion import D3TLossCriterion
-from models.d3t_adapter import (
+from loss.detection_criterion import DetectionLossCriterion
+from models.detector_adapter import (
     DistillationPair,
     DistillationSettings,
     Predictions,
@@ -23,9 +23,9 @@ def supervised_batch(class_logits, boxes, quality_logits, class_targets, box_tar
     },))
 
 
-class D3TCriterionTests(unittest.TestCase):
+class DetectorCriterionTests(unittest.TestCase):
     def test_uhl_uses_intra_image_box_overlap_and_teacher_labels(self):
-        criterion = D3TLossCriterion(alpha=0.75, gamma=2.0, weight_type="iou")
+        criterion = DetectionLossCriterion(alpha=0.75, gamma=2.0, weight_type="iou")
         student_logits = torch.zeros(3, 2, requires_grad=True)
         student_boxes = torch.tensor(
             [
@@ -83,7 +83,7 @@ class D3TCriterionTests(unittest.TestCase):
             for _ in range(2)
         )
 
-        result = D3TLossCriterion().distillation(
+        result = DetectionLossCriterion().distillation(
             DistillationPair(student_predictions, teacher_predictions),
             DistillationSettings(top_ratio=1.0, min_hm=0.0),
         )
@@ -96,7 +96,7 @@ class D3TCriterionTests(unittest.TestCase):
         )
 
     def test_supervised_reduction_matches_literal_hm_focal_and_quality(self):
-        criterion = D3TLossCriterion(alpha=0.75, gamma=2.0, weight_type='iou')
+        criterion = DetectionLossCriterion(alpha=0.75, gamma=2.0, weight_type='iou')
         batch = supervised_batch(
             class_logits=torch.tensor([[0.0], [0.0]], requires_grad=True),
             boxes=torch.tensor([[0.0, 0.0, 2.0, 2.0], [0.0, 0.0, 1.0, 1.0]],
@@ -117,7 +117,7 @@ class D3TCriterionTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(batch.predictions[0].class_logits.grad).all())
 
     def test_supervised_box_iou_loss_for_shifted_box(self):
-        criterion = D3TLossCriterion()
+        criterion = DetectionLossCriterion()
         batch = supervised_batch(
             class_logits=torch.zeros(1, 1, requires_grad=True),
             boxes=torch.tensor([[1.0, 0.0, 3.0, 2.0]], requires_grad=True),
@@ -131,7 +131,7 @@ class D3TCriterionTests(unittest.TestCase):
         self.assertAlmostEqual(losses['loss_box'].item(), 2.0 / 3.0, places=6)
 
     def test_no_foreground_returns_finite_graph_connected_zeros(self):
-        criterion = D3TLossCriterion()
+        criterion = DetectionLossCriterion()
         logits = torch.zeros(2, 2, requires_grad=True)
         boxes = torch.zeros(2, 4, requires_grad=True)
         quality = torch.zeros(2, requires_grad=True)
@@ -146,7 +146,7 @@ class D3TCriterionTests(unittest.TestCase):
         self.assertEqual(quality.grad.abs().sum().item(), 0.0)
 
     def test_distillation_selects_top_ratio_then_threshold_and_detaches_teacher(self):
-        criterion = D3TLossCriterion()
+        criterion = DetectionLossCriterion()
         student_logits = torch.zeros(3, 1, requires_grad=True)
         student_boxes = torch.tensor([
             [0.0, 0.0, 2.0, 2.0],
@@ -179,7 +179,7 @@ class D3TCriterionTests(unittest.TestCase):
         self.assertIsNone(teacher_logits.grad)
 
     def test_distillation_empty_selection_returns_zero_without_student_gradient(self):
-        criterion = D3TLossCriterion()
+        criterion = DetectionLossCriterion()
         student = Predictions(
             torch.zeros(2, 1, requires_grad=True),
             torch.zeros(2, 4, requires_grad=True),
@@ -199,7 +199,7 @@ class D3TCriterionTests(unittest.TestCase):
         self.assertEqual(student.class_logits.grad.abs().sum().item(), 0.0)
 
     def test_teacher_predictions_are_not_mutated_or_connected(self):
-        criterion = D3TLossCriterion()
+        criterion = DetectionLossCriterion()
         teacher_logits = torch.zeros(1, 1, requires_grad=True)
         result = criterion.distillation(
             DistillationPair(

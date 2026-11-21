@@ -19,7 +19,7 @@ from data import (
     ir_val_collate,
     rgb_collate,
 )
-from models.fcos_factory import build_fcos_d3t_model
+from models.fcos_factory import build_fcos_model
 from training.checkpointing import CHECKPOINT_SCHEMA_VERSION
 
 
@@ -155,7 +155,7 @@ def _load_checkpoint_model(checkpoint_path: str, device: torch.device, score_thr
         teacher_mode=str(metadata.get("teacher_mode", "two_teacher")),
         device=str(device),
     )
-    model = build_fcos_d3t_model(config)
+    model = build_fcos_model(config)
     model.load_state_dict(checkpoint["student"])
     model.to(device).eval()
     return model, class_names

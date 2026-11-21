@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 
 import config as configs
-from models.d3t_wrapper import D3TWrapper
+from models.detector_wrapper import DetectorWrapper
 from trainer import CurriculumDomainAdaptationTrainer
 from test_curriculum_wrapper_integration import (
     TinyAdapter, TinyCriterion, RGBDataset, IRDataset, collate_rgb, collate_ir,
@@ -37,7 +37,7 @@ def make_trainer(config, translator=None, *, pseudo_label_evaluator=None):
 
     if translator is None:
         translator = FrozenGANTranslator(FirstChannelGenerator(), identity={"sha256": "fixture", "architecture": "fixture"})
-    student = D3TWrapper(TinyAdapter(), TinyCriterion())
+    student = DetectorWrapper(TinyAdapter(), TinyCriterion())
     rgb_teacher, ir_teacher = copy.deepcopy(student), copy.deepcopy(student)
     return CurriculumDomainAdaptationTrainer(
         student, rgb_teacher, ir_teacher, torch.optim.SGD(student.parameters(), lr=0.01, momentum=0.9), config,
@@ -107,7 +107,7 @@ class BridgeTrainingTests(unittest.TestCase):
             self.assertEqual(resumed.global_step, 21)
 
     def test_real_fcos_dense_distillation_runs_on_each_domain_with_shared_resize(self):
-        from loss.d3t_criterion import D3TLossCriterion
+        from loss.detection_criterion import DetectionLossCriterion
         from test_torchvision_fcos_adapter import build_adapter
 
         config = bridge_config()
@@ -116,7 +116,7 @@ class BridgeTrainingTests(unittest.TestCase):
         )
         config.distill = configs.DistillConfig(rgb_teacher=schedule, ir_teacher=copy.deepcopy(schedule))
         trainer = make_trainer(config)
-        student = D3TWrapper(build_adapter(min_size=(64, 96), max_size=128), D3TLossCriterion())
+        student = DetectorWrapper(build_adapter(min_size=(64, 96), max_size=128), DetectionLossCriterion())
         trainer.student = student
         trainer.rgb_teacher, trainer.ir_teacher = copy.deepcopy(student), copy.deepcopy(student)
         trainer._setup_models()
@@ -356,12 +356,12 @@ class BridgeTrainingTests(unittest.TestCase):
         from test_gan_bridge import FirstChannelGenerator
 
         config = bridge_config()
-        student = D3TWrapper(TinyAdapter(), TinyCriterion())
+        student = DetectorWrapper(TinyAdapter(), TinyCriterion())
         loader = DataLoader(RGBDataset(), batch_size=1, collate_fn=collate_rgb)
         translator = FrozenGANTranslator(FirstChannelGenerator(), identity={"sha256": "fixture"})
         with mock.patch("training.bootstrap.build_dataloaders", return_value=dict.fromkeys(
             ("rgb_train", "ir_train", "rgb_val", "ir_val"), loader
-        )), mock.patch("training.bootstrap.build_fcos_d3t_trio", return_value=(student, copy.deepcopy(student), copy.deepcopy(student))), mock.patch(
+        )), mock.patch("training.bootstrap.build_fcos_trio", return_value=(student, copy.deepcopy(student), copy.deepcopy(student))), mock.patch(
             "training.bootstrap.load_gan_translator", return_value=translator
         ):
             trainer = build_training(config, logger=logging.getLogger(__name__))

@@ -2,7 +2,7 @@
 
 import torch
 
-from models.d3t_adapter import CriterionResult
+from models.detector_adapter import CriterionResult
 
 
 def component_weight(name: str, *, uhl: float, quality: float, deltas: float, logits: float):
