@@ -449,7 +449,7 @@ class CurriculumIntegrationTests(unittest.TestCase):
                 trainer.load_checkpoint(
                     f"{output_dir}/resume.pth"
                 )
-                trainer._ensure_ema_initialized()
+                trainer.train_one_iteration()
                 hard_copy.assert_not_called()
 
     def test_checkpoint_restores_phase_evaluator_state(self):
@@ -498,22 +498,40 @@ class CurriculumIntegrationTests(unittest.TestCase):
         self.assertIn("loss_kd_cls_rgb", logs)
 
     def test_p2_ir_route_keeps_rgb_ground_truth(self):
-        config = build_config()
+        config = build_config(curriculum=CurriculumConfig(
+            phase1_end=0, phase2_end=10, phase3_end=20,
+            phase2_rgb_sampling_ratio=0.0,
+        ))
         trainer, _, _, _ = build_trainer(config)
-        route = config.mid_routing.p2_ir_flow
-        data = trainer._prepare_data_by_route("p2_ir_flow", route)
-        self.assertIsNotNone(data["targets"])
-        self.assertEqual(data["sample_ids"], ("rgb-0",))
-        self.assertEqual(data["targets"][0]["stem"], "rgb-0")
+        with mock.patch.object(trainer.student, "raw", wraps=trainer.student.raw) as raw:
+            logs = trainer.train_one_iteration()
+        self.assertEqual(logs["step_type"], "p2_ir_flow")
+        targets = raw.call_args.args[1]
+        self.assertIsNotNone(targets)
+        self.assertEqual(raw.call_args.kwargs["sample_ids"], ("rgb-0",))
+        self.assertEqual(targets[0]["stem"], "rgb-0")
+        self.assertGreater(logs["sup_loss_cls"], 0)
 
     def test_ir_route_uses_one_sample_for_both_views(self):
-        config = build_config()
+        config = build_config(
+            curriculum=CurriculumConfig(
+                phase1_end=0, phase2_end=0, phase3_end=20,
+                phase3_rgb_sampling_ratio=0.0,
+            ),
+            ema=EMAConfig(alpha=0.0, start_steps=0),
+        )
         trainer, _, _, _ = build_trainer(config)
-        route = config.mid_routing.p3_ir_flow
-        data = trainer._prepare_data_by_route("p3_ir_flow", route)
-        self.assertEqual(data["sample_ids"], ("ir-0",))
-        self.assertTrue(torch.equal(data["student_images"], data["teacher_images"]))
-        self.assertIsNone(data["targets"])
+        with (
+            mock.patch.object(trainer.student, "raw", wraps=trainer.student.raw) as student_raw,
+            mock.patch.object(trainer.ir_teacher, "raw", wraps=trainer.ir_teacher.raw) as teacher_raw,
+        ):
+            logs = trainer.train_one_iteration()
+        self.assertEqual(logs["step_type"], "p3_ir_flow")
+        self.assertEqual(student_raw.call_args.kwargs["sample_ids"], ("ir-0",))
+        self.assertEqual(teacher_raw.call_args.kwargs["sample_ids"], ("ir-0",))
+        self.assertTrue(torch.equal(student_raw.call_args.args[0], teacher_raw.call_args.args[0]))
+        self.assertIsNone(student_raw.call_args.args[1])
+        self.assertFalse(any(name.startswith("sup_") for name in logs))
 
     def test_positionwise_wrapper_rejects_different_sample_ids(self):
         student = DetectorWrapper(TinyAdapter(), TinyCriterion())

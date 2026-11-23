@@ -1,4 +1,4 @@
-"""Frozen GAN image translation and explicit four-domain teacher routing."""
+"""Load and execute frozen RGB-to-IR GAN translation."""
 
 import hashlib
 from pathlib import Path
@@ -7,7 +7,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from config import StepRouting
 from models.cyclegan_generator import CycleGANGenerator
 
 
@@ -77,16 +76,3 @@ def load_gan_translator(checkpoint: str, device, *, generator_factory=CycleGANGe
         raise ValueError("GAN checkpoint is incompatible with the RGB(3)->IR(1) ResNet-9/instance-norm architecture") from error
     identity = {"sha256": digest.hexdigest(), "architecture": "cyclegan_resnet9_rgb3_ir1_instance_ngf64"}
     return FrozenGANTranslator(generator, identity=identity).to(device)
-
-
-def bridge_route(config, stage: int, domain: str) -> StepRouting:
-    if domain not in {"rgb", "saga", "ir_gan", "ir_real"}:
-        raise ValueError(f"unknown bridge domain: {domain}")
-    if stage == 0:
-        if domain != "rgb":
-            raise ValueError("bridge warmup is RGB-only")
-        return StepRouting(use_gt=True)
-    teacher = "rgb" if domain == "rgb" else "ir"
-    if domain == "saga":
-        teacher = config.gan_bridge.saga_teachers[stage]
-    return StepRouting(ema_target=teacher, use_gt=domain != "ir_real", teacher_names=(teacher,))

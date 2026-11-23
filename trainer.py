@@ -11,8 +11,7 @@ import torch.nn as nn
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
-from config import Phase, StepRouting, TrainingConfig
-from models.detector_adapter import DistillationSettings
+from config import TrainingConfig
 from models.detector_wrapper import DetectorWrapper as DetectorWrapper
 from scheduler import BridgeDomainScheduler, CurriculumScheduler, should_evaluate_pseudo_labels
 from data.augmentations import StudentAugmentor
@@ -20,13 +19,13 @@ from training import teachers
 from training.data_flow import RouteDataFlow
 from training.loss_flow import LossFlow, component_weight
 from training.observability import log_iteration, log_pseudo_label_evaluation
-from training.gan_bridge import bridge_route
+from training.step_policy import configured_teacher_names, distillation_settings, resolve_step
 
 logger = logging.getLogger(__name__)
 
 
 class CurriculumDomainAdaptationTrainer:
-    """Own routing, optimization, EMA, checkpointing, and evaluation hooks."""
+    """Execute step plans and own training progress, updates and persistence."""
 
     def __init__(
         self,
@@ -95,84 +94,8 @@ class CurriculumDomainAdaptationTrainer:
     def _setup_models(self) -> None:
         teachers.prepare_models(self.student, self._teacher_models(), device=self.device)
 
-    def _alpha_map(self):
-        # Resolve appearance-level names from config before invoking data flow;
-        # these levels describe SAGA strength, not the physical input domain.
-        ss_cfg = self.config.soft_saga
-        return {
-            "rgb": 1.0,
-            "weak": ss_cfg.alpha_near_rgb,
-            "mid": ss_cfg.alpha_intermediate,
-            "high": ss_cfg.alpha_near_ir,
-            "ir": 0.0,
-        }
-
-    def _prepare_data_by_route(self, step_name: str, route: StepRouting):
-        """Resolve configured values before delegating data execution."""
-        if self.config.workflow == "gan_bridge":
-            domain = step_name.removeprefix("bridge_")
-            stage = self.config.bridge_schedule.stage_for_step(self.global_step, self.config.max_iter)
-            return self.data_flow.prepare(
-                source_domain="ir" if domain == "ir_real" else "rgb",
-                appearance_domain=domain, use_gt=route.use_gt,
-                student_alpha=self.config.gan_bridge.saga_student_alphas[stage] if domain == "saga" else None,
-                teacher_alpha=self.config.gan_bridge.saga_teacher_alphas[stage] if domain == "saga" else None,
-            )
-        source_domain = self.scheduler.get_source_domain(step_name)
-        alpha_map = self._alpha_map()
-        return self.data_flow.prepare(
-            source_domain=source_domain,
-            use_gt=route.use_gt,
-            student_alpha=(
-                alpha_map[route.student_saga_level] if source_domain == "rgb" else None
-            ),
-            teacher_alpha=(
-                alpha_map[route.teacher_saga_level] if source_domain == "rgb" else None
-            ),
-        )
-
-    def _ensure_ema_initialized(self) -> None:
-        # Decide whether initialization is due from persisted state and config.
-        # A resumed, initialized run must continue without another hard copy.
-        if self.ema_initialized:
-            return
-        if self.global_step < self.config.ema.start_steps:
-            return
-        # Select the enabled references here, then ask the teacher executor to
-        # copy weights; schedule decisions remain on the orchestration side.
-        if self.config.teacher_mode == "two_teacher":
-            active_names = ("rgb", "ir")
-        else:
-            active_names = (self.config.teacher_mode,)
-        teachers.initialize_teachers(
-            self.student, self._teacher_models(), names=active_names
-        )
-        self.ema_initialized = True
-
-    def _enabled_teacher_names(self, route: StepRouting) -> tuple[str, ...]:
-        # Intersect this route's teacher requests with the experiment's enabled
-        # teacher mode while preserving the configured route order.
-        if self.config.teacher_mode == "two_teacher":
-            enabled = {"rgb", "ir"}
-        else:
-            enabled = {self.config.teacher_mode}
-        return tuple(name for name in route.teacher_names if name in enabled)
-
     def _teacher_for_name(self, name: str) -> nn.Module:
         return teachers.get_teacher(self._teacher_models(), name)
-
-    def _distillation_settings(self, teacher_name: str, phase: Phase):
-        # Resolve teacher-specific selection thresholds and shared KD settings
-        # for this phase before passing them to the loss executor.
-        schedule = getattr(self.config.distill, f"{teacher_name}_teacher")
-        top_ratio, min_hm = schedule.get_params(phase)
-        return DistillationSettings(
-            top_ratio=top_ratio,
-            min_hm=min_hm,
-            hm_alpha=self.config.distill.hm_alpha,
-            hm_beta=self.config.distill.hm_beta,
-            uncertainty_alpha=self.config.distill.un_regular_alpha,
-        )
 
     @staticmethod
     def _component_weight(name: str, config) -> float:
@@ -197,33 +120,32 @@ class CurriculumDomainAdaptationTrainer:
             raise
 
     def _train_one_iteration(self) -> Dict[str, Any]:
-        # Route selection: the baseline uses its fixed supervised route, while
-        # curriculum training asks the scheduler for the current step's route.
         self.student.train()
-        if self.config.workflow == "gan_bridge":
-            domain = self.scheduler.get_next_domain(self.global_step)
-            stage = self.config.bridge_schedule.stage_for_step(self.global_step, self.config.max_iter)
-            step_name = f"bridge_{domain}"
-            route = bridge_route(self.config, stage, domain)
-        elif self.config.workflow == "rgb_baseline":
-            step_name = "p1_rgb_supervised"
-            route = self.config.mid_routing.p1_rgb_supervised
-        else:
-            step_name = self.scheduler.get_next_step(self.global_step)
-            route = self.config.mid_routing.get_routing(step_name)
-        phase = self.config.get_phase(self.global_step)
+        plan = resolve_step(
+            self.config, self.scheduler, self.global_step,
+            ema_initialized=self.ema_initialized,
+        )
 
         # Data preparation: obtain one source batch with aligned student/teacher
         # views, optional GT, and explicit sample identity.
-        data = self._prepare_data_by_route(step_name, route)
+        data = self.data_flow.prepare(
+            source_domain=plan.source_domain,
+            appearance_domain=plan.appearance_domain,
+            use_gt=plan.use_gt,
+            student_alpha=plan.student_alpha,
+            teacher_alpha=plan.teacher_alpha,
+        )
         targets = data["targets"]
         sample_ids = data["sample_ids"]
         iteration_lr = float(self.optimizer.param_groups[0]["lr"])
         self.optimizer.zero_grad(set_to_none=True)
 
         # Establish teacher references before any forward that can consume them.
-        if self.config.workflow != "rgb_baseline":
-            self._ensure_ema_initialized()
+        if plan.initialize_teacher_names:
+            teachers.initialize_teachers(
+                self.student, self._teacher_models(), names=plan.initialize_teacher_names,
+            )
+            self.ema_initialized = True
 
         # Student forward: choose resize once and reuse this raw output for
         # every applicable loss, avoiding a second student forward for KD.
@@ -239,52 +161,38 @@ class CurriculumDomainAdaptationTrainer:
         student_output = self.student.raw(
             data["student_images"], targets, **student_raw_kwargs
         )
-        # Loss setup: resolve phase/component weights in the orchestrator and
-        # give the executor a fresh accumulator for this iteration only.
+        # Each iteration gets a fresh accumulator; the plan supplies phase weights.
         losses = LossFlow(
             uhl=self.config.loss.weight_uhl,
             quality=self.config.loss.weight_quality,
             deltas=self.config.loss.weight_deltas,
             logits=self.config.loss.weight_logits,
         )
-        sup_weight, distill_weight = self.config.loss.get_phase_weights(phase)
-        if self.config.workflow == "rgb_baseline":
-            sup_weight, distill_weight = 1.0, 0.0
-        elif self.config.workflow == "gan_bridge" and stage == 4 and route.use_gt:
-            sup_weight = self.config.gan_bridge.source_sup_weight
-
         # Supervised contribution: use transformed GT only when this route and
         # the effective phase weight request it.
-        if targets is not None and route.use_gt and sup_weight > 0:
+        if targets is not None and plan.use_gt and plan.supervised_weight > 0:
             losses.supervised(
-                self.student, student_output, targets, phase_weight=sup_weight
+                self.student, student_output, targets, phase_weight=plan.supervised_weight,
             )
 
         # Distillation contribution: use only enabled, initialized references.
         # Each teacher consumes the paired view with the student's resize.
-        if (
-            self.config.workflow != "rgb_baseline"
-            and self.ema_initialized
-            and distill_weight > 0
-        ):
-            enabled_teacher_names = self._enabled_teacher_names(route)
-            for teacher_name in enabled_teacher_names:
-                teacher = self._teacher_for_name(teacher_name)
-                teacher_output = teachers.forward_teacher(
-                    teacher,
-                    data["teacher_images"],
-                    sample_ids=sample_ids,
-                    resize_short_edge=resize_short_edge,
-                )
-                settings = self._distillation_settings(teacher_name, phase)
-                losses.distill(
-                    self.student,
-                    student_output,
-                    teacher_output,
-                    settings,
-                    teacher_name=teacher_name,
-                    phase_weight=distill_weight,
-                )
+        for teacher_name, settings in plan.distillation:
+            teacher = self._teacher_for_name(teacher_name)
+            teacher_output = teachers.forward_teacher(
+                teacher,
+                data["teacher_images"],
+                sample_ids=sample_ids,
+                resize_short_edge=resize_short_edge,
+            )
+            losses.distill(
+                self.student,
+                student_output,
+                teacher_output,
+                settings,
+                teacher_name=teacher_name,
+                phase_weight=plan.distill_weight,
+            )
 
         # Preserve the existing optimizer eligibility rule, including a scalar
         # fallback when this route produced no differentiable contributions.
@@ -309,13 +217,9 @@ class CurriculumDomainAdaptationTrainer:
 
         # Teacher update: follow an eligible student update with EMA only for
         # the teacher targeted by this route and enabled by the experiment.
-        if (
-            did_step
-            and self.ema_initialized
-            and route.ema_target in self._enabled_teacher_names(route)
-        ):
+        if did_step and plan.ema_target is not None:
             teachers.update_teacher(
-                self._teacher_for_name(route.ema_target),
+                self._teacher_for_name(plan.ema_target),
                 self.student,
                 alpha=self.config.ema.alpha,
                 global_step=self.global_step,
@@ -324,22 +228,12 @@ class CurriculumDomainAdaptationTrainer:
         # Observation and progress: collect detached values after updates, then
         # advance the global step once and return the existing metric payload.
         logs["total_loss"] = float(total_loss.detach().item())
-        logs["step_type"] = step_name
-        logs["phase"] = phase.name
+        logs["step_type"] = plan.step_name
+        logs["phase"] = plan.phase.name
         logs["ema_initialized"] = float(self.ema_initialized)
         logs["lr"] = iteration_lr
-        if self.config.workflow == "gan_bridge":
-            logs.update(
-                domain=domain, source_domain="ir" if domain == "ir_real" else "rgb",
-                bridge_stage=stage + 1, domain_ratio=self.config.bridge_schedule.phase_ratios[stage],
-                teacher_names=",".join(self._enabled_teacher_names(route)) if self.ema_initialized else "none",
-                ema_target=route.ema_target if did_step and self.ema_initialized else "none",
-                supervised_weight=sup_weight if route.use_gt else 0.0, distill_weight=distill_weight,
-            )
-            if domain == "saga":
-                logs["saga_student_alpha"] = self.config.gan_bridge.saga_student_alphas[stage]
-                logs["saga_teacher_alpha"] = self.config.gan_bridge.saga_teacher_alphas[stage]
-        self.loss_history[step_name].append(logs["total_loss"])
+        logs.update(plan.log_metadata(did_step=did_step, ema_initialized=self.ema_initialized))
+        self.loss_history[plan.step_name].append(logs["total_loss"])
         self.global_step += 1
         logs["global_step"] = self.global_step
         # Observe the current teachers after the iteration/EMA update using a
@@ -351,15 +245,15 @@ class CurriculumDomainAdaptationTrainer:
                 last_eval_step=self.last_pseudo_label_eval_step,
             )
         ):
-            logs["pseudo_label_evaluations"] = self._evaluate_pseudo_labels(phase)
+            logs["pseudo_label_evaluations"] = self._evaluate_pseudo_labels(plan.phase)
         return logs
 
     def _evaluate_pseudo_labels(self, phase, *, full_dataset=False):
-        """Resolve teacher/settings policy and delegate isolated IR evaluation."""
-        names = ("rgb", "ir") if self.config.teacher_mode == "two_teacher" else (self.config.teacher_mode,)
+        """Execute isolated IR evaluation with the shared teacher/settings policy."""
+        names = configured_teacher_names(self.config)
         records = []
         for name in names:
-            settings = self._distillation_settings(name, phase)
+            settings = distillation_settings(self.config, name, phase)
             result = self.pseudo_label_evaluator.evaluate(
                 self._teacher_for_name(name), settings,
                 iou_threshold=self.config.pseudo_label_eval.iou_threshold,
