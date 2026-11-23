@@ -1,6 +1,5 @@
 """Verify assembled training dependencies and the best-checkpoint callback."""
 
-import copy
 import logging
 import unittest
 from unittest import mock
@@ -13,27 +12,48 @@ from config import FCOSModelConfig, TrainingConfig
 from training.bootstrap import build_training
 
 
+class PlacementModel(nn.Linear):
+    def __init__(self):
+        super().__init__(1, 1)
+        self.placements = 0
+
+    def to(self, device):
+        self.placements += 1
+        # Simulate a device conversion that replaces parameters. The optimizer
+        # must bind the final parameters, and the trainer must leave them alone.
+        self.weight = nn.Parameter(self.weight.detach().clone(), requires_grad=self.weight.requires_grad)
+        self.bias = nn.Parameter(self.bias.detach().clone(), requires_grad=self.bias.requires_grad)
+        return super().to(device)
+
+
 class TrainingBootstrapTests(unittest.TestCase):
     def _build(self, teacher_mode):
         config = TrainingConfig(
             model=FCOSModelConfig(weights=None, pretrained_backbone=False),
             device="cpu", teacher_mode=teacher_mode,
         )
-        student = nn.Linear(1, 1)
-        rgb_teacher = copy.deepcopy(student) if teacher_mode == "two_teacher" else None
-        ir_teacher = copy.deepcopy(student)
+        student = PlacementModel()
         loader = DataLoader(TensorDataset(torch.zeros(2, 3, 8, 8)))
         loaders = dict.fromkeys(("rgb_train", "ir_train", "rgb_val", "ir_val"), loader)
         # Replace external data/model creation while exercising the real assembly.
         with (
             mock.patch("training.bootstrap.build_dataloaders", return_value=loaders),
             mock.patch(
-                "training.bootstrap.build_fcos_trio",
-                return_value=(student, rgb_teacher, ir_teacher),
+                "models.fcos_factory.build_fcos_model", return_value=student,
             ),
         ):
             trainer = build_training(config, logger=logging.getLogger(__name__))
-        return trainer, student, rgb_teacher, ir_teacher
+        return trainer, student, trainer.rgb_teacher, trainer.ir_teacher
+
+    def test_models_are_placed_once_before_optimizer_binding(self):
+        trainer, student, rgb_teacher, ir_teacher = self._build("two_teacher")
+
+        self.assertEqual([model.placements for model in (student, rgb_teacher, ir_teacher)], [1, 1, 1])
+        optimized = {id(p) for group in trainer.optimizer.param_groups for p in group["params"]}
+        self.assertEqual(optimized, {id(p) for p in student.parameters()})
+        for teacher in (rgb_teacher, ir_teacher):
+            self.assertFalse(teacher.training)
+            self.assertTrue(all(not p.requires_grad for p in teacher.parameters()))
 
     def test_bootstrap_wires_models_optimizer_and_evaluator(self):
         trainer, student, rgb_teacher, ir_teacher = self._build("two_teacher")

@@ -104,8 +104,8 @@ class RGBBaselineIntegrationTests(unittest.TestCase):
             device='cpu',
         )
         student = CountingWrapper()
-        rgb_teacher = CountingWrapper()
-        ir_teacher = CountingWrapper()
+        rgb_teacher = CountingWrapper().eval().requires_grad_(False)
+        ir_teacher = CountingWrapper().eval().requires_grad_(False)
         optimizer = CountingOptimizer(student.parameters())
         loader = DataLoader(RGBDataset(), batch_size=2, collate_fn=collate_rgb)
         ir_loader = DataLoader(IRDataset(), batch_size=2, collate_fn=collate_ir)

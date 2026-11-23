@@ -11,10 +11,11 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
 from config import TrainingConfig
+from models import fcos_factory
 from models.detector_wrapper import DetectorWrapper as DetectorWrapper
 from scheduler import BridgeDomainScheduler, CurriculumScheduler, should_evaluate_pseudo_labels
 from data.augmentations import StudentAugmentor
-from training import checkpointing, teachers
+from training import checkpointing
 from training.data_flow import RouteDataFlow
 from training.loss_flow import LossFlow, component_weight
 from training.observability import log_iteration, log_pseudo_label_evaluation
@@ -40,8 +41,7 @@ class CurriculumDomainAdaptationTrainer:
         gan_translator: Optional[nn.Module] = None,
         pseudo_label_evaluator: Any = None,
     ) -> None:
-        # Retain the live dependencies and effective configuration on the
-        # orchestrator so execution modules receive resolved inputs per step.
+        """Receive prepared models and an optimizer bound after device placement."""
         self.student = student
         self.rgb_teacher = rgb_teacher
         self.ir_teacher = ir_teacher
@@ -57,11 +57,7 @@ class CurriculumDomainAdaptationTrainer:
                 raise ValueError("gan_bridge requires a frozen GAN translator with checkpoint identity")
             if rgb_teacher is None or ir_teacher is None:
                 raise ValueError("gan_bridge requires both RGB and IR teachers")
-            self.gan_translator.to(self.device).eval().requires_grad_(False)
 
-        # Prepare model state before constructing lazy data cursors. Their
-        # creation order is kept stable to preserve the existing RNG behavior.
-        self._setup_models()
         self.data_flow = RouteDataFlow(
             rgb_loader, ir_loader, device=self.device, augmentor=self.augmentor,
             gan_translator=gan_translator,
@@ -90,11 +86,8 @@ class CurriculumDomainAdaptationTrainer:
         # References stay on the trainer so checkpoint keys and ownership are unchanged.
         return {"rgb": self.rgb_teacher, "ir": self.ir_teacher}
 
-    def _setup_models(self) -> None:
-        teachers.prepare_models(self.student, self._teacher_models(), device=self.device)
-
     def _teacher_for_name(self, name: str) -> nn.Module:
-        return teachers.get_teacher(self._teacher_models(), name)
+        return fcos_factory.get_teacher(self._teacher_models(), name)
 
     @staticmethod
     def _component_weight(name: str, config) -> float:
@@ -141,7 +134,7 @@ class CurriculumDomainAdaptationTrainer:
 
         # Establish teacher references before any forward that can consume them.
         if plan.initialize_teacher_names:
-            teachers.initialize_teachers(
+            fcos_factory.initialize_teachers(
                 self.student, self._teacher_models(), names=plan.initialize_teacher_names,
             )
             self.ema_initialized = True
@@ -178,7 +171,7 @@ class CurriculumDomainAdaptationTrainer:
         # Each teacher consumes the paired view with the student's resize.
         for teacher_name, settings in plan.distillation:
             teacher = self._teacher_for_name(teacher_name)
-            teacher_output = teachers.forward_teacher(
+            teacher_output = fcos_factory.forward_teacher(
                 teacher,
                 data["teacher_images"],
                 sample_ids=sample_ids,
@@ -217,7 +210,7 @@ class CurriculumDomainAdaptationTrainer:
         # Teacher update: follow an eligible student update with EMA only for
         # the teacher targeted by this route and enabled by the experiment.
         if did_step and plan.ema_target is not None:
-            teachers.update_teacher(
+            fcos_factory.ema_update(
                 self._teacher_for_name(plan.ema_target),
                 self.student,
                 alpha=self.config.ema.alpha,

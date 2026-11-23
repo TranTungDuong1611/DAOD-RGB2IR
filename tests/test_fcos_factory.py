@@ -7,6 +7,7 @@ import torch
 from config import FCOSModelConfig, TrainingConfig
 from loss.detection_criterion import DetectionLossCriterion
 from models.detector_wrapper import DetectorWrapper
+from models import fcos_factory
 from models.fcos_factory import (
     build_fcos_model,
     build_fcos_trio,
@@ -25,6 +26,50 @@ def build_config(
         min_sizes=(64, 96),
         max_size=128,
     ), device='cpu', teacher_mode=teacher_mode)
+
+
+class TeacherLifecycleTests(unittest.TestCase):
+    def test_initialize_selected_teacher_copies_parameters_and_buffers(self):
+        student = torch.nn.BatchNorm1d(2)
+        rgb, ir = copy.deepcopy(student), copy.deepcopy(student)
+        with torch.no_grad():
+            student.weight.fill_(3)
+            student.running_mean.fill_(4)
+            student.num_batches_tracked.fill_(7)
+        fcos_factory.initialize_teachers(student, {"rgb": rgb, "ir": ir}, names=("ir",))
+        for name, value in student.state_dict().items():
+            self.assertTrue(torch.equal(ir.state_dict()[name], value))
+        self.assertTrue(torch.equal(rgb.weight, torch.ones(2)))
+        self.assertEqual(rgb.num_batches_tracked.item(), 0)
+
+    def test_ema_preserves_warmup_and_integer_buffer_behavior(self):
+        for step, expected in ((0, 9.), (10, 4.5), (100, 1.)):
+            with self.subTest(step=step):
+                student = torch.nn.BatchNorm1d(2)
+                teacher = copy.deepcopy(student).requires_grad_(False)
+                with torch.no_grad():
+                    student.weight.fill_(10)
+                    student.running_mean.fill_(10)
+                    student.num_batches_tracked.fill_(7)
+                    teacher.weight.zero_()
+                fcos_factory.ema_update(teacher, student, alpha=.9, global_step=step)
+                torch.testing.assert_close(teacher.weight, torch.full((2,), expected))
+                torch.testing.assert_close(teacher.running_mean, torch.full((2,), expected))
+                self.assertEqual(teacher.num_batches_tracked.item(), 7)
+                self.assertIsNone(student.weight.grad)
+
+    def test_teacher_forward_uses_eval_without_autograd_and_reuses_geometry(self):
+        class Teacher(torch.nn.Module):
+            def raw(self, images, **kwargs):
+                self.seen = (self.training, kwargs)
+                return images.square()
+
+        teacher = fcos_factory.get_teacher({"ir": Teacher()}, "ir")
+        output = fcos_factory.forward_teacher(
+            teacher, torch.ones(1, requires_grad=True), sample_ids=("ir-1",), resize_short_edge=96,
+        )
+        self.assertFalse(output.requires_grad)
+        self.assertEqual(teacher.seen, (False, {"sample_ids": ("ir-1",), "resize_short_edge": 96}))
 
 
 class FactoryTests(unittest.TestCase):

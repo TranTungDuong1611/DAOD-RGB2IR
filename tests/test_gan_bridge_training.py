@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 
 import config as configs
 from models.detector_wrapper import DetectorWrapper
+from models.fcos_factory import build_fcos_trio
 from trainer import CurriculumDomainAdaptationTrainer
 from test_curriculum_wrapper_integration import (
     TinyAdapter, TinyCriterion, RGBDataset, IRDataset, collate_rgb, collate_ir,
@@ -38,7 +39,8 @@ def make_trainer(config, translator=None, *, pseudo_label_evaluator=None):
     if translator is None:
         translator = FrozenGANTranslator(FirstChannelGenerator(), identity={"sha256": "fixture", "architecture": "fixture"})
     student = DetectorWrapper(TinyAdapter(), TinyCriterion())
-    rgb_teacher, ir_teacher = copy.deepcopy(student), copy.deepcopy(student)
+    with mock.patch("models.fcos_factory.build_fcos_model", return_value=student):
+        student, rgb_teacher, ir_teacher = build_fcos_trio(config)
     return CurriculumDomainAdaptationTrainer(
         student, rgb_teacher, ir_teacher, torch.optim.SGD(student.parameters(), lr=0.01, momentum=0.9), config,
         DataLoader(RGBDataset(), batch_size=1, collate_fn=collate_rgb),
@@ -117,9 +119,8 @@ class BridgeTrainingTests(unittest.TestCase):
         config.distill = configs.DistillConfig(rgb_teacher=schedule, ir_teacher=copy.deepcopy(schedule))
         trainer = make_trainer(config)
         student = DetectorWrapper(build_adapter(min_size=(64, 96), max_size=128), DetectionLossCriterion())
-        trainer.student = student
-        trainer.rgb_teacher, trainer.ir_teacher = copy.deepcopy(student), copy.deepcopy(student)
-        trainer._setup_models()
+        with mock.patch("models.fcos_factory.build_fcos_model", return_value=student):
+            trainer.student, trainer.rgb_teacher, trainer.ir_teacher = build_fcos_trio(config)
         trainer.optimizer = torch.optim.SGD(student.parameters(), lr=0.001)
         # Jump to stage 3 via real scheduler state; the lifecycle flags represent
         # an already warmed student, allowing a short real-FCOS smoke test.
@@ -173,7 +174,7 @@ class BridgeTrainingTests(unittest.TestCase):
             for key, model in (("student", resumed.student), ("rgb_teacher", resumed.rgb_teacher), ("ir_teacher", resumed.ir_teacher)):
                 for name, value in model.state_dict().items():
                     self.assertTrue(torch.equal(value, checkpoint[key][name]))
-            with mock.patch("training.teachers.initialize_teachers", side_effect=AssertionError("resumed teacher was reset")):
+            with mock.patch("models.fcos_factory.initialize_teachers", side_effect=AssertionError("resumed teacher was reset")):
                 self.assertEqual([resumed.train_one_iteration()["domain"] for _ in range(47)], expected_domains)
 
     def test_resume_accepts_changed_bridge_policy(self):
@@ -353,7 +354,7 @@ class BridgeTrainingTests(unittest.TestCase):
         translator = FrozenGANTranslator(FirstChannelGenerator(), identity={"sha256": "fixture"})
         with mock.patch("training.bootstrap.build_dataloaders", return_value=dict.fromkeys(
             ("rgb_train", "ir_train", "rgb_val", "ir_val"), loader
-        )), mock.patch("training.bootstrap.build_fcos_trio", return_value=(student, copy.deepcopy(student), copy.deepcopy(student))), mock.patch(
+        )), mock.patch("models.fcos_factory.build_fcos_model", return_value=student), mock.patch(
             "training.bootstrap.load_gan_translator", return_value=translator
         ):
             trainer = build_training(config, logger=logging.getLogger(__name__))

@@ -61,7 +61,7 @@ def build_pseudo_label_evaluator(config, *, logger):
 def build_training(
     config: TrainingConfig, *, logger: logging.Logger
 ) -> CurriculumDomainAdaptationTrainer:
-    """Build and wire the existing factories in their original order."""
+    """Prepare models, data, optimizers and evaluators before handing off to training."""
     # Data assembly: create all source/target training and validation loaders
     # from the effective config, then expose their sizes in the existing log.
     device = torch.device(config.device)
@@ -86,8 +86,8 @@ def build_training(
         len(ir_val_loader.dataset),
     )
 
-    # Model assembly: build the student and configured teachers before binding
-    # optimization state to the student's actual device-resident parameters.
+    # The factory freezes teachers; bootstrap places every model before binding
+    # optimization state. The trainer receives these dependencies ready to run.
     student, rgb_teacher, ir_teacher = move_model_trio_to_device(
         *build_fcos_trio(config),
         device,
