@@ -53,8 +53,8 @@ class CurriculumDomainAdaptationTrainer:
         self.augmentor = StudentAugmentor(config)
         self.gan_translator = gan_translator
         if config.workflow == "gan_bridge":
-            if gan_translator is None or not getattr(gan_translator, "identity", None):
-                raise ValueError("gan_bridge requires a frozen GAN translator with checkpoint identity")
+            if gan_translator is None:
+                raise ValueError("gan_bridge requires a frozen GAN translator")
             if rgb_teacher is None or ir_teacher is None:
                 raise ValueError("gan_bridge requires both RGB and IR teachers")
 

@@ -70,7 +70,7 @@ class GANTranslationTests(unittest.TestCase):
         self.assertEqual(output.shape, (1, 3, 17, 19))
         self.assertTrue(bool(((output >= 0) & (output <= 1)).all()))
 
-    def test_checkpoint_load_is_strict_and_fingerprint_survives_file_move(self):
+    def test_checkpoint_load_preserves_weights_rng_and_translation_at_any_path(self):
         from models.cyclegan_generator import CycleGANGenerator
         from training.gan_bridge import load_gan_translator
 
@@ -80,13 +80,18 @@ class GANTranslationTests(unittest.TestCase):
             torch.save(source.state_dict(), first)
             second.write_bytes(first.read_bytes())
             rng = torch.random.get_rng_state().clone()
-            factory = lambda: CycleGANGenerator(ngf=4)
+            def factory():
+                return CycleGANGenerator(ngf=4)
+
             loaded = load_gan_translator(str(first), "cpu", generator_factory=factory)
             moved = load_gan_translator(str(second), "cpu", generator_factory=factory)
             self.assertTrue(torch.equal(rng, torch.random.get_rng_state()))
-            self.assertEqual(loaded.identity, moved.identity)
-            self.assertEqual(len(loaded.identity["sha256"]), 64)
-            self.assertTrue(torch.equal(source.state_dict()["model.1.weight"], loaded.generator.state_dict()["model.1.weight"]))
+            for name, value in source.state_dict().items():
+                self.assertTrue(torch.equal(value, loaded.generator.state_dict()[name]))
+            images = torch.rand(1, 3, 17, 19)
+            self.assertTrue(torch.equal(loaded(images), moved(images)))
+            self.assertFalse(loaded.training)
+            self.assertTrue(all(not p.requires_grad for p in loaded.parameters()))
             broken = copy.deepcopy(source.state_dict())
             broken.pop("model.1.weight")
             torch.save(broken, first)

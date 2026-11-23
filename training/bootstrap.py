@@ -71,7 +71,7 @@ def build_training(
         logger.info(
             "GAN bridge: domains=rgb:saga:ir_gan:ir_real ratios=%s fractions=%s generator=%s",
             config.bridge_schedule.phase_ratios, config.bridge_schedule.phase_fractions,
-            gan_translator.identity,
+            config.gan_bridge.checkpoint,
         )
     loaders = build_dataloaders(config)
     rgb_train_loader = loaders["rgb_train"]

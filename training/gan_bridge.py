@@ -1,6 +1,5 @@
 """Load and execute frozen RGB-to-IR GAN translation."""
 
-import hashlib
 from pathlib import Path
 
 import torch
@@ -13,10 +12,9 @@ from models.cyclegan_generator import CycleGANGenerator
 class FrozenGANTranslator(nn.Module):
     """Translate [B,3,H,W] RGB in [0,1] without changing detector coordinates."""
 
-    def __init__(self, generator: nn.Module, *, identity=None):
+    def __init__(self, generator: nn.Module):
         super().__init__()
         self.generator = generator
-        self.identity = dict(identity or {})
         self.requires_grad_(False)
         self.eval()
 
@@ -50,16 +48,11 @@ class FrozenGANTranslator(nn.Module):
 
 
 def load_gan_translator(checkpoint: str, device, *, generator_factory=CycleGANGenerator):
-    """Load a strict G_A state dict; identify its bytes independently of its path."""
+    """Load G_A weights, freeze the translator and place it on the requested device."""
     path = Path(checkpoint)
     if not path.is_file():
         raise FileNotFoundError(f"GAN checkpoint not found: {path}")
-    with path.open("rb") as stream:
-        digest = hashlib.sha256()
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-        stream.seek(0)
-        state = torch.load(stream, map_location="cpu", weights_only=True)
+    state = torch.load(path, map_location="cpu", weights_only=True)
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
     if not isinstance(state, dict) or not state or not all(isinstance(key, str) for key in state):
@@ -74,5 +67,4 @@ def load_gan_translator(checkpoint: str, device, *, generator_factory=CycleGANGe
         generator.load_state_dict(state, strict=True)
     except (RuntimeError, TypeError) as error:
         raise ValueError("GAN checkpoint is incompatible with the RGB(3)->IR(1) ResNet-9/instance-norm architecture") from error
-    identity = {"sha256": digest.hexdigest(), "architecture": "cyclegan_resnet9_rgb3_ir1_instance_ngf64"}
-    return FrozenGANTranslator(generator, identity=identity).to(device)
+    return FrozenGANTranslator(generator).to(device)

@@ -37,7 +37,7 @@ def make_trainer(config, translator=None, *, pseudo_label_evaluator=None):
     from test_gan_bridge import FirstChannelGenerator
 
     if translator is None:
-        translator = FrozenGANTranslator(FirstChannelGenerator(), identity={"sha256": "fixture", "architecture": "fixture"})
+        translator = FrozenGANTranslator(FirstChannelGenerator())
     student = DetectorWrapper(TinyAdapter(), TinyCriterion())
     with mock.patch("models.fcos_models.build_fcos_model", return_value=student):
         student, rgb_teacher, ir_teacher = build_fcos_trio(config)
@@ -202,7 +202,7 @@ class BridgeTrainingTests(unittest.TestCase):
                         self.assertTrue(torch.equal(value, original.student.state_dict()[name]))
                     self.assertEqual(resumed.train_one_iteration()["global_step"], 24)
 
-    def test_resume_ignores_legacy_metadata_and_generator_identity(self):
+    def test_resume_ignores_legacy_metadata_with_different_generator_weights(self):
         with tempfile.TemporaryDirectory() as directory:
             trainer = make_trainer(bridge_config(directory))
             for _ in range(23):
@@ -216,8 +216,10 @@ class BridgeTrainingTests(unittest.TestCase):
             }
             torch.save(checkpoint, path)
             different = make_trainer(bridge_config(directory))
-            different.gan_translator.identity["sha256"] = "other-weights"
+            with torch.no_grad():
+                different.gan_translator.generator.scale.fill_(0.5)
             different.load_checkpoint(str(path))
+            self.assertEqual(different.gan_translator.generator.scale.item(), 0.5)
             self.assertEqual(different.global_step, 23)
             self.assertTrue(different.ema_initialized)
             self.assertEqual(different.scheduler.state_dict(), trainer.scheduler.state_dict())
@@ -351,7 +353,7 @@ class BridgeTrainingTests(unittest.TestCase):
         config = bridge_config()
         student = DetectorWrapper(TinyAdapter(), TinyCriterion())
         loader = DataLoader(RGBDataset(), batch_size=1, collate_fn=collate_rgb)
-        translator = FrozenGANTranslator(FirstChannelGenerator(), identity={"sha256": "fixture"})
+        translator = FrozenGANTranslator(FirstChannelGenerator())
         with mock.patch("training.bootstrap.build_dataloaders", return_value=dict.fromkeys(
             ("rgb_train", "ir_train", "rgb_val", "ir_val"), loader
         )), mock.patch("models.fcos_models.build_fcos_model", return_value=student), mock.patch(
@@ -361,6 +363,7 @@ class BridgeTrainingTests(unittest.TestCase):
         self.assertIs(trainer.gan_translator, translator)
         optimized = {id(p) for group in trainer.optimizer.param_groups for p in group["params"]}
         self.assertTrue(optimized.isdisjoint(id(p) for p in translator.parameters()))
+        self.assertEqual(trainer.train_one_iteration()["global_step"], 1)
 
 
 if __name__ == "__main__":
