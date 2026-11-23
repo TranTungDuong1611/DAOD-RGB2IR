@@ -470,7 +470,7 @@ class CurriculumIntegrationTests(unittest.TestCase):
                 resumed.phase_evaluator.state["history"], [{"global_step": 3}]
             )
 
-    def test_checkpoint_rejects_missing_enabled_teacher_state(self):
+    def test_missing_teacher_state_raises_from_pytorch_load_state_dict(self):
         with tempfile.TemporaryDirectory() as output_dir:
             config = build_config(output_dir=output_dir)
             trainer, _, _, _ = build_trainer(config)
@@ -483,7 +483,7 @@ class CurriculumIntegrationTests(unittest.TestCase):
             torch.save(checkpoint, checkpoint_path)
 
             resumed, _, _, _ = build_trainer(config)
-            with self.assertRaisesRegex(ValueError, "ir_teacher"):
+            with self.assertRaises(TypeError):
                 resumed.load_checkpoint(checkpoint_path)
 
     def test_trainer_can_run_with_only_the_selected_teacher(self):

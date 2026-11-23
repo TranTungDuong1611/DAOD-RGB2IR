@@ -125,11 +125,11 @@ Repeat the same training command and add:
 
 Checkpoints contain student, both teachers, optimizer, LR scheduler, domain
 allocation progress, global step, teacher initialization state and evaluation
-history. They record the GAN file SHA-256 and architecture, all five ratios and
-durations, SAGA policies, source GT weight and training settings. Incompatible
-bridge settings or generator bytes are rejected before model restoration.
-Identical GAN bytes at a different path can resume. Changing `total_iters` changes
-the stage boundaries and requires a new run rather than resume.
+history. Metadata contains only model settings for standalone COCO evaluation.
+Training restores runtime state directly, without comparing experiment metadata
+or GAN generator identity. Existing checkpoints with the older metadata format
+remain loadable. The domain scheduler restores its own state, so keep the same
+stage schedule and `total_iters` when continuing the domain sequence.
 
 Domain sequence continuation is deterministic. Complete numerical reproduction is
 not promised: existing data-loader cursor/RNG state is not checkpointed. If a
@@ -175,4 +175,4 @@ python -m unittest discover -s tests -v
 The bridge tests include range/shape contracts, strict weight loading, SAGA masks,
 all five domain allocations, full short training with small model doubles, dense
 distillation with a real Torchvision FCOS head and lightweight backbone, freezing,
-GT on source routes, teacher/EMA routing, saved progress and incompatible resume.
+GT on source routes, teacher/EMA routing, saved progress and metadata-free resume.

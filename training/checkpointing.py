@@ -1,114 +1,75 @@
-"""Checkpoint metadata serialization and compatibility validation."""
+"""Save and restore trainer state, with model settings for standalone evaluation."""
 
-from dataclasses import fields, is_dataclass
-from enum import Enum
-from typing import Any
+import logging
+from pathlib import Path
 
-from config import TrainingConfig
-
-
-CHECKPOINT_SCHEMA_VERSION = 1
+import torch
 
 
-def _serialize(value):
-    if isinstance(value, Enum):
-        return value.value
-    if is_dataclass(value):
-        return {
-            field.name: _serialize(getattr(value, field.name))
-            for field in fields(value)
-        }
-    if isinstance(value, tuple):
-        return [_serialize(item) for item in value]
-    if isinstance(value, list):
-        return [_serialize(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _serialize(item) for key, item in value.items()}
-    return value
+logger = logging.getLogger(__name__)
 
 
-def serialize_effective_config(config: TrainingConfig) -> dict[str, Any]:
-    """Convert the effective dataclass configuration to checkpoint-safe data."""
-
-    return _serialize(config)
-
-
-def _bridge_signature(config, generator_identity):
-    if not isinstance(generator_identity, dict) or not generator_identity.get("sha256"):
-        raise ValueError("bridge checkpoint requires a GAN generator fingerprint")
-    settings = _serialize(config.gan_bridge)
-    settings.pop("checkpoint")  # Identical weights may live at a different path.
-    return {
-        "generator": _serialize(generator_identity),
-        "schedule": _serialize(config.bridge_schedule),
-        "settings": settings,
-        "total_iters": config.max_iter,
-        "ema": _serialize(config.ema),
-        "loss": _serialize(config.loss),
-        "distill": _serialize(config.distill),
-        "model": _serialize(config.model),
-        "augmentation": _serialize(config.aug),
-        "optimizer": _serialize(config.optimizer),
+def save_checkpoint(trainer, filename: str) -> None:
+    """Persist runtime state and the model settings needed by COCO evaluation."""
+    path = Path(trainer.config.output_dir) / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    model_config = trainer.config.model
+    evaluator = trainer.phase_evaluator
+    payload = {
+        "metadata": {"model": {
+            **vars(model_config),
+            "classification_init_mode": model_config.classification_init_mode.value,
+        }},
+        "student": trainer.student.state_dict(),
+        "rgb_teacher": None if trainer.rgb_teacher is None else trainer.rgb_teacher.state_dict(),
+        "ir_teacher": None if trainer.ir_teacher is None else trainer.ir_teacher.state_dict(),
+        "optimizer": trainer.optimizer.state_dict(),
+        "scheduler": trainer.scheduler.state_dict(),
+        "lr_scheduler": None if trainer.lr_scheduler is None else trainer.lr_scheduler.state_dict(),
+        "global_step": trainer.global_step,
+        "best_map": trainer.best_map,
+        "ema_initialized": trainer.ema_initialized,
+        "phase_evaluator": (
+            evaluator.state_dict()
+            if evaluator is not None and hasattr(evaluator, "state_dict") else None
+        ),
+        "last_pseudo_label_eval_step": trainer.last_pseudo_label_eval_step,
+        "last_full_pseudo_label_eval_step": trainer.last_full_pseudo_label_eval_step,
+        "pseudo_label_evaluator": (
+            None if trainer.pseudo_label_evaluator is None
+            else trainer.pseudo_label_evaluator.state_dict()
+        ),
     }
+    torch.save(payload, path)
+    logger.info("Checkpoint saved -> %s", path)
 
 
-def build_checkpoint_metadata(
-    config: TrainingConfig, *, generator_identity=None
-) -> dict[str, Any]:
-    """Build the compatibility metadata stored beside model and optimizer state."""
-
-    metadata = {
-        "schema_version": CHECKPOINT_SCHEMA_VERSION,
-        "num_classes": config.model.num_classes,
-        "class_names": list(config.model.class_names),
-        "classification_init_mode": config.model.classification_init_mode.value,
-        "teacher_mode": config.teacher_mode,
-        "config": serialize_effective_config(config),
-        "workflow": config.workflow,
-    }
-    if config.workflow == "gan_bridge":
-        metadata["bridge"] = _bridge_signature(config, generator_identity)
-    return metadata
-
-
-def validate_checkpoint_metadata(
-    metadata: dict[str, Any],
-    config: TrainingConfig,
-    *,
-    generator_identity=None,
-) -> None:
-    """Reject checkpoints whose schema or training setup is incompatible."""
-
-    if metadata.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
-        raise ValueError(
-            "Unsupported checkpoint schema; expected "
-            f"{CHECKPOINT_SCHEMA_VERSION}, got {metadata.get('schema_version')}"
-        )
-    if metadata.get("num_classes") != config.model.num_classes:
-        raise ValueError("Checkpoint class count does not match the effective config")
-    if tuple(metadata.get("class_names", ())) != tuple(config.model.class_names):
-        raise ValueError("Checkpoint class order does not match the effective config")
-    if metadata.get("classification_init_mode") != config.model.classification_init_mode.value:
-        raise ValueError(
-            "Checkpoint classification initialization mode does not match the effective config"
-        )
-    if metadata.get("teacher_mode") != config.teacher_mode:
-        raise ValueError("Checkpoint teacher mode does not match the effective config")
-    saved_workflow = metadata.get(
-        "workflow", metadata.get("config", {}).get("workflow", "curriculum")
-    )
-    if "gan_bridge" in {saved_workflow, config.workflow}:
-        if saved_workflow != config.workflow:
-            raise ValueError("Checkpoint workflow does not match the GAN bridge workflow")
-        if metadata.get("bridge") != _bridge_signature(config, generator_identity):
-            raise ValueError(
-                "Checkpoint bridge settings, schedule or GAN generator identity do not match"
-            )
+def load_checkpoint(trainer, path: str) -> None:
+    """Restore saved state directly; model loading retains PyTorch's strict checks."""
+    checkpoint = torch.load(path, map_location=trainer.device, weights_only=False)
+    trainer.student.load_state_dict(checkpoint["student"])
+    for name in ("rgb_teacher", "ir_teacher"):
+        teacher = getattr(trainer, name)
+        if teacher is not None:
+            teacher.load_state_dict(checkpoint[name])
+    trainer.optimizer.load_state_dict(checkpoint["optimizer"])
+    trainer.scheduler.load_state_dict(checkpoint["scheduler"])
+    if trainer.lr_scheduler is not None:
+        trainer.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+    evaluator_state = checkpoint.get("phase_evaluator")
+    if (evaluator_state is not None and trainer.phase_evaluator is not None
+            and hasattr(trainer.phase_evaluator, "load_state_dict")):
+        trainer.phase_evaluator.load_state_dict(evaluator_state)
+    trainer.global_step = int(checkpoint.get("global_step", 0))
+    trainer.best_map = float(checkpoint.get("best_map", 0.0))
+    trainer.ema_initialized = bool(checkpoint.get("ema_initialized", False))
+    # Older checkpoints can omit observer state and progress.
+    trainer.last_pseudo_label_eval_step = int(checkpoint.get("last_pseudo_label_eval_step", 0))
+    trainer.last_full_pseudo_label_eval_step = int(checkpoint.get("last_full_pseudo_label_eval_step", 0))
+    audit_state = checkpoint.get("pseudo_label_evaluator")
+    if trainer.pseudo_label_evaluator is not None and audit_state is not None:
+        trainer.pseudo_label_evaluator.load_state_dict(audit_state)
+    logger.info("Resumed from step %s", trainer.global_step)
 
 
-__all__ = [
-    "CHECKPOINT_SCHEMA_VERSION",
-    "build_checkpoint_metadata",
-    "serialize_effective_config",
-    "validate_checkpoint_metadata",
-]
+__all__ = ["save_checkpoint", "load_checkpoint"]

@@ -180,8 +180,8 @@ def test_empty_kd_mask_is_reported_and_legacy_checkpoint_remains_loadable():
         payload.pop("last_pseudo_label_eval_step")
         payload.pop("pseudo_label_evaluator")
         payload.pop("last_full_pseudo_label_eval_step")
-        # An older baseline config had no observer section either.
-        payload["metadata"]["config"].pop("pseudo_label_eval")
+        # Training resume does not require metadata from older checkpoints.
+        payload.pop("metadata")
         torch.save(payload, checkpoint_path)
         restored = make_trainer(base, directory, enabled=True)
         restored.load_checkpoint(str(checkpoint_path))

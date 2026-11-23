@@ -176,7 +176,7 @@ class BridgeTrainingTests(unittest.TestCase):
             with mock.patch("training.teachers.initialize_teachers", side_effect=AssertionError("resumed teacher was reset")):
                 self.assertEqual([resumed.train_one_iteration()["domain"] for _ in range(47)], expected_domains)
 
-    def test_resume_rejects_changed_bridge_policy_before_mutating_model(self):
+    def test_resume_accepts_changed_bridge_policy(self):
         with tempfile.TemporaryDirectory() as directory:
             original = make_trainer(bridge_config(directory))
             for _ in range(23):
@@ -191,44 +191,39 @@ class BridgeTrainingTests(unittest.TestCase):
                 config = bridge_config(directory)
                 setattr(config.gan_bridge, field, value)
                 changed_configs.append(config)
-            schedule_config = bridge_config(directory, bridge_schedule=configs.BridgeScheduleConfig(
-                phase_fractions=(0.1, 0.3, 0.5, 0.7, 1)
-            ))
-            changed_configs.append(schedule_config)
             for config in changed_configs:
                 with self.subTest(settings=config.gan_bridge):
                     resumed = make_trainer(config)
-                    before = copy.deepcopy(resumed.student.state_dict())
-                    with self.assertRaisesRegex(ValueError, "bridge|schedule"):
-                        resumed.load_checkpoint(str(Path(directory) / "bridge.pth"))
-                    self.assertEqual(resumed.global_step, 0)
+                    resumed.load_checkpoint(str(Path(directory) / "bridge.pth"))
+                    self.assertEqual(resumed.global_step, 23)
+                    self.assertEqual(resumed.scheduler.state_dict(), original.scheduler.state_dict())
                     for name, value in resumed.student.state_dict().items():
-                        self.assertTrue(torch.equal(value, before[name]))
+                        self.assertTrue(torch.equal(value, original.student.state_dict()[name]))
+                    self.assertEqual(resumed.train_one_iteration()["global_step"], 24)
 
-    def test_generator_identity_and_scheduler_progress_are_checked_before_restore(self):
+    def test_resume_ignores_legacy_metadata_and_generator_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             trainer = make_trainer(bridge_config(directory))
             for _ in range(23):
                 trainer.train_one_iteration()
             trainer.save_checkpoint("bridge.pth")
             path = Path(directory) / "bridge.pth"
+            checkpoint = torch.load(path, weights_only=False)
+            checkpoint["metadata"] = {
+                "schema_version": 999, "num_classes": 99,
+                "bridge": {"generator": {"sha256": "old-identity"}},
+            }
+            torch.save(checkpoint, path)
             different = make_trainer(bridge_config(directory))
             different.gan_translator.identity["sha256"] = "other-weights"
-            with self.assertRaisesRegex(ValueError, "GAN|generator|bridge"):
-                different.load_checkpoint(str(path))
-            checkpoint = torch.load(path, weights_only=False)
-            for mutate in (lambda c: c.pop("scheduler"), lambda c: c.update(global_step=24),
-                           lambda c: c.update(ema_initialized=False)):
-                broken = copy.deepcopy(checkpoint)
-                mutate(broken)
-                torch.save(broken, path)
-                fresh = make_trainer(bridge_config(directory))
-                before = fresh.student.adapter.weight.detach().clone()
-                with self.assertRaises(ValueError):
-                    fresh.load_checkpoint(str(path))
-                self.assertTrue(torch.equal(fresh.student.adapter.weight, before))
+            different.load_checkpoint(str(path))
+            self.assertEqual(different.global_step, 23)
+            self.assertTrue(different.ema_initialized)
+            self.assertEqual(different.scheduler.state_dict(), trainer.scheduler.state_dict())
+            self.assertTrue(torch.equal(different.student.adapter.weight, trainer.student.adapter.weight))
+            self.assertEqual(different.train_one_iteration()["global_step"], 24)
 
-    def test_identical_generator_at_new_path_can_resume_but_legacy_workflow_cannot(self):
+    def test_identical_generator_at_new_path_can_resume(self):
         with tempfile.TemporaryDirectory() as directory:
             trainer = make_trainer(bridge_config(directory))
             trainer.train_one_iteration()
@@ -238,9 +233,6 @@ class BridgeTrainingTests(unittest.TestCase):
             moved = make_trainer(config)
             moved.load_checkpoint(str(Path(directory) / "bridge.pth"))
             self.assertEqual(moved.global_step, 1)
-            legacy = make_trainer(configs.TrainingConfig(device="cpu", output_dir=directory))
-            with self.assertRaisesRegex(ValueError, "workflow|bridge"):
-                legacy.load_checkpoint(str(Path(directory) / "bridge.pth"))
 
     def test_log_exposes_domain_stage_ratio_and_ema_target(self):
         trainer = make_trainer(bridge_config())

@@ -2,7 +2,6 @@
 
 from collections import defaultdict
 import logging
-import os
 import time
 from typing import Any, Dict, Optional
 
@@ -15,7 +14,7 @@ from config import TrainingConfig
 from models.detector_wrapper import DetectorWrapper as DetectorWrapper
 from scheduler import BridgeDomainScheduler, CurriculumScheduler, should_evaluate_pseudo_labels
 from data.augmentations import StudentAugmentor
-from training import teachers
+from training import checkpointing, teachers
 from training.data_flow import RouteDataFlow
 from training.loss_flow import LossFlow, component_weight
 from training.observability import log_iteration, log_pseudo_label_evaluation
@@ -315,119 +314,10 @@ class CurriculumDomainAdaptationTrainer:
             )
 
     def save_checkpoint(self, filename: str) -> None:
-        from training.checkpointing import build_checkpoint_metadata
-
-        # Snapshot model, optimization, routing, and evaluation progress together
-        # using the existing payload keys consumed by resume and evaluation.
-        os.makedirs(self.config.output_dir, exist_ok=True)
-        path = os.path.join(self.config.output_dir, filename)
-        payload = {
-            "metadata": build_checkpoint_metadata(
-                self.config,
-                generator_identity=self.gan_translator.identity if self.config.workflow == "gan_bridge" else None,
-            ),
-            "global_step": self.global_step,
-            "best_map": self.best_map,
-            "ema_initialized": self.ema_initialized,
-            "last_pseudo_label_eval_step": self.last_pseudo_label_eval_step,
-            "last_full_pseudo_label_eval_step": self.last_full_pseudo_label_eval_step,
-            "pseudo_label_evaluator": (None if self.pseudo_label_evaluator is None
-                                       else self.pseudo_label_evaluator.state_dict()),
-            "student": self.student.state_dict(),
-            "rgb_teacher": None if self.rgb_teacher is None else self.rgb_teacher.state_dict(),
-            "ir_teacher": None if self.ir_teacher is None else self.ir_teacher.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
-            "lr_scheduler": (
-                None if self.lr_scheduler is None else self.lr_scheduler.state_dict()
-            ),
-            "phase_evaluator": (
-                self.phase_evaluator.state_dict()
-                if self.phase_evaluator is not None
-                and hasattr(self.phase_evaluator, "state_dict")
-                else None
-            ),
-        }
-        torch.save(payload, path)
-        logger.info("Checkpoint saved -> %s", path)
+        checkpointing.save_checkpoint(self, filename)
 
     def load_checkpoint(self, path: str) -> None:
-        from training.checkpointing import validate_checkpoint_metadata
-
-        # Validate experiment compatibility and required teacher states before
-        # restoring model tensors, keeping the current rejection behavior.
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
-        metadata = checkpoint.get("metadata")
-        if metadata is None:
-            raise ValueError("Checkpoint has no D3T metadata; legacy checkpoints are unsupported")
-        validate_checkpoint_metadata(
-            metadata, self.config,
-            generator_identity=self.gan_translator.identity if self.config.workflow == "gan_bridge" else None,
-        )
-        configured_teachers = {
-            "rgb_teacher": self.rgb_teacher,
-            "ir_teacher": self.ir_teacher,
-        }
-        missing_teacher_states = [
-            name
-            for name, teacher in configured_teachers.items()
-            if teacher is not None and checkpoint.get(name) is None
-        ]
-        if missing_teacher_states:
-            missing = ", ".join(missing_teacher_states)
-            raise ValueError(
-                f"Checkpoint is missing state for configured teacher(s): {missing}"
-            )
-        # Validate routing progress before loading any model or optimizer tensors.
-        restored_scheduler = self._new_scheduler()
-        if "scheduler" in checkpoint:
-            restored_scheduler.load_state_dict(checkpoint["scheduler"])
-        if self.config.workflow == "gan_bridge":
-            step = checkpoint.get("global_step")
-            initialized = checkpoint.get("ema_initialized")
-            if ("scheduler" not in checkpoint or type(step) is not int
-                    or not 0 <= step <= self.config.max_iter
-                    or restored_scheduler.state_dict()["next_step"] != step):
-                raise ValueError("Checkpoint bridge scheduler progress does not match global_step")
-            if (type(initialized) is not bool
-                    or (step > self.config.ema.start_steps and not initialized)
-                    or (step < self.config.ema.start_steps and initialized)):
-                raise ValueError("Checkpoint bridge teacher initialization state is inconsistent")
-        if self.lr_scheduler is not None and checkpoint.get("lr_scheduler") is None:
-            raise ValueError("Checkpoint is missing LR scheduler state")
-        # Restore learned state first, followed by optimization and routing
-        # state, so the next iteration continues with the saved update schedule.
-        self.student.load_state_dict(checkpoint["student"])
-        for name, teacher in configured_teachers.items():
-            if teacher is not None:
-                teacher.load_state_dict(checkpoint[name])
-        self.optimizer.load_state_dict(checkpoint["optimizer"])
-        self.scheduler = restored_scheduler
-        if self.lr_scheduler is not None:
-            lr_scheduler_state = checkpoint.get("lr_scheduler")
-            if lr_scheduler_state is None:
-                raise ValueError("Checkpoint is missing LR scheduler state")
-            self.lr_scheduler.load_state_dict(lr_scheduler_state)
-        # Restore evaluation history and lifecycle flags, including the EMA
-        # initialization flag that prevents an unintended teacher reset.
-        evaluator_state = checkpoint.get("phase_evaluator")
-        if (
-            evaluator_state is not None
-            and self.phase_evaluator is not None
-            and hasattr(self.phase_evaluator, "load_state_dict")
-        ):
-            self.phase_evaluator.load_state_dict(evaluator_state)
-        self.global_step = int(checkpoint.get("global_step", 0))
-        self.best_map = float(checkpoint.get("best_map", 0.0))
-        self.ema_initialized = bool(checkpoint.get("ema_initialized", False))
-        # Older baseline checkpoints do not carry observer progress. An audit
-        # is eligible after teacher initialization if a global tick has passed.
-        self.last_pseudo_label_eval_step = int(checkpoint.get("last_pseudo_label_eval_step", 0))
-        self.last_full_pseudo_label_eval_step = int(checkpoint.get("last_full_pseudo_label_eval_step", 0))
-        audit_state = checkpoint.get("pseudo_label_evaluator")
-        if self.pseudo_label_evaluator is not None and audit_state is not None:
-            self.pseudo_label_evaluator.load_state_dict(audit_state)
-        logger.info("Resumed from step %s", self.global_step)
+        checkpointing.load_checkpoint(self, path)
 
     def _log(self, log: Dict[str, Any]) -> None:
         log_iteration(log, self.global_step, logger=logger)
