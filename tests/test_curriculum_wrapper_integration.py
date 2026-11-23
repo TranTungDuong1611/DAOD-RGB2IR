@@ -32,6 +32,7 @@ from models.detector_wrapper import DetectorWrapper
 from scheduler import CurriculumScheduler
 from trainer import CurriculumDomainAdaptationTrainer
 from models.fcos_models import build_fcos_trio, copy_student_to_teacher, ema_update
+from training.loss_flow import LossFlow
 
 
 class TinyAdapter(DetectorAdapter):
@@ -383,6 +384,11 @@ class CurriculumIntegrationTests(unittest.TestCase):
             self.assertEqual(resumed.lr_scheduler.steps, 1)
 
     def test_uhl_uses_its_dedicated_component_weight(self):
+        class UHLCriterion(TinyCriterion):
+            def distillation(self, pair, settings):
+                result = super().distillation(pair, settings)
+                return CriterionResult({"loss_kd_uhl": result.losses["loss_kd_cls"]}, {})
+
         loss_config = LossConfig(
             weight_logits=4.0,
             weight_deltas=3.0,
@@ -390,11 +396,27 @@ class CurriculumIntegrationTests(unittest.TestCase):
             weight_uhl=0.25,
         )
 
-        weight = CurriculumDomainAdaptationTrainer._component_weight(
-            "loss_kd_uhl", loss_config
+        flow = LossFlow(
+            uhl=loss_config.weight_uhl, quality=loss_config.weight_quality,
+            deltas=loss_config.weight_deltas, logits=loss_config.weight_logits,
+        )
+        student = DetectorWrapper(TinyAdapter(), UHLCriterion())
+        teacher = DetectorWrapper(TinyAdapter(), TinyCriterion()).requires_grad_(False)
+        with torch.no_grad():
+            teacher.adapter.weight.fill_(3.0)
+        images = torch.zeros(1, 3, 16, 16)
+        flow.distill(
+            student, student.raw(images, sample_ids=("sample",)),
+            teacher.raw(images, sample_ids=("sample",)), None,
+            teacher_name="ir", phase_weight=0.5,
         )
 
-        self.assertEqual(weight, 0.25)
+        # Raw squared error is 4, scaled by UHL weight .25 and phase weight .5.
+        self.assertEqual(flow.total_loss.item(), 0.5)
+        self.assertEqual(flow.logs["loss_kd_uhl_ir"], 0.5)
+        flow.total_loss.backward()
+        self.assertEqual(student.adapter.weight.grad.item(), -0.5)
+        self.assertIsNone(teacher.adapter.weight.grad)
 
     def test_ema_copies_integral_buffers_and_interpolates_float_buffers(self):
         student = nn.BatchNorm1d(2)
@@ -457,15 +479,16 @@ class CurriculumIntegrationTests(unittest.TestCase):
             config = build_config(output_dir=output_dir)
             trainer, _, _, _ = build_trainer(config)
             trainer.phase_evaluator = StatefulPhaseEvaluator(
-                {"best_ir_map": 0.61, "history": [{"global_step": 3}]}
+                {"history": [{"global_step": 3}]}
             )
+            trainer.best_map = 0.61
             trainer.save_checkpoint("evaluator-state.pth")
 
             resumed, _, _, _ = build_trainer(config)
             resumed.phase_evaluator = StatefulPhaseEvaluator()
             resumed.load_checkpoint(f"{output_dir}/evaluator-state.pth")
 
-            self.assertEqual(resumed.phase_evaluator.state["best_ir_map"], 0.61)
+            self.assertEqual(resumed.best_map, 0.61)
             self.assertEqual(
                 resumed.phase_evaluator.state["history"], [{"global_step": 3}]
             )

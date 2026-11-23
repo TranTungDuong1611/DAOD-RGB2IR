@@ -46,36 +46,22 @@ class RouteDataFlow:
             })
         return moved
 
-    @staticmethod
-    def _ids_from_targets(targets) -> tuple[str, ...]:
-        # Support labeled loaders that carry identity inside targets rather than
-        # as a separate batch field; correspondence must still be explicit.
-        ids = tuple(target.get("stem") for target in targets)
-        if any(not isinstance(value, str) or not value.strip() for value in ids):
-            raise ValueError("labeled batches must carry one non-empty sample stem per image")
-        return ids
-
     def _unpack_rgb_batch(self, batch):
-        # Normalize the labeled source contract before view creation so images,
-        # annotations, and identity stay associated throughout augmentation.
-        if not isinstance(batch, (tuple, list)) or len(batch) not in (2, 3):
-            raise ValueError("RGB loader must return (images, targets[, sample_ids])")
-        images, targets = batch[0], list(batch[1])
-        ids = tuple(batch[2]) if len(batch) == 3 else self._ids_from_targets(targets)
+        """Read the (images, targets, sample_ids) batch produced by rgb_collate."""
+        if not isinstance(batch, (tuple, list)) or len(batch) != 3:
+            raise ValueError("RGB loader must return (images, targets, sample_ids)")
+        images, targets, ids = batch
+        targets, ids = list(targets), tuple(ids)
         if len(ids) != len(targets):
             raise ValueError("RGB sample_ids must match target count")
         return self._move_images(images), self._move_targets(targets), ids
 
     def _unpack_ir_batch(self, batch):
-        # Normalize the unlabeled target contract; identity is required even
-        # though real IR training batches do not provide supervised targets.
-        if not isinstance(batch, (tuple, list)) or len(batch) not in (1, 2, 3):
-            raise ValueError("IR loader must return (images[, sample_ids])")
-        images = self._move_images(batch[0])
-        if len(batch) >= 2:
-            ids = tuple(batch[1])
-        else:
-            raise ValueError("unlabeled IR batches must carry sample_ids")
+        """Read the (images, sample_ids) batch produced by ir_collate."""
+        if not isinstance(batch, (tuple, list)) or len(batch) != 2:
+            raise ValueError("IR loader must return (images, sample_ids)")
+        images, ids = batch
+        images, ids = self._move_images(images), tuple(ids)
         image_count = images.shape[0] if isinstance(images, torch.Tensor) else len(images)
         if len(ids) != image_count or any(not isinstance(value, str) or not value.strip() for value in ids):
             raise ValueError("IR sample_ids must contain one non-empty ID per image")

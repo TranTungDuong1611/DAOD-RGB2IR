@@ -122,6 +122,24 @@ class BridgeDataFlowTests(unittest.TestCase):
             student_alpha=alpha, teacher_alpha=alpha, appearance_domain=domain,
         )
 
+    def test_rgb_batch_requires_explicit_sample_ids(self):
+        prepared = self.build_flow()
+        flow = RouteDataFlow(
+            [(self.images, [self.target])], None,
+            device="cpu", augmentor=prepared.augmentor,
+        )
+        with self.assertRaisesRegex(ValueError, "RGB loader must return"):
+            self.prepare(flow, "rgb")
+
+    def test_ir_batch_rejects_extra_fields(self):
+        prepared = self.build_flow()
+        flow = RouteDataFlow(
+            [], [(self.images, ("target",), [self.target])],
+            device="cpu", augmentor=prepared.augmentor,
+        )
+        with self.assertRaisesRegex(ValueError, "IR loader must return"):
+            self.prepare(flow, "ir_real")
+
     def test_each_appearance_selects_the_correct_source_and_gt(self):
         flow = self.build_flow()
         rgb = self.prepare(flow, "rgb")

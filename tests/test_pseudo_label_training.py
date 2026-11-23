@@ -97,7 +97,7 @@ def test_trainer_audits_fixed_ir_validation_and_resumes_without_duplicate_window
                 assert call.args[1] is None
         assert all(not k.startswith("sup_") for log in logs if "ir" in log["step_type"]
                    and log["phase"] != "PHASE2_TRANSITION" for k in log)
-        assert trainer.best_map == 0.
+        assert trainer.best_map == -1.  # Teacher audits do not establish student validation best.
         trainer.save_checkpoint("resume.pth")
         restored = make_trainer(base, directory, enabled=True)
         restored.load_checkpoint(str(Path(directory) / "resume.pth"))

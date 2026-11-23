@@ -1,4 +1,4 @@
-"""Small dependency-free detection evaluator and phase callback."""
+"""Detection metrics and domain evaluation for the training lifecycle."""
 
 from collections import defaultdict
 import copy
@@ -148,7 +148,7 @@ class DetectionEvaluator:
 
 
 class PhaseEvaluator:
-    """Evaluate domains and invoke the best callback exactly on improvement."""
+    """Evaluate domains and retain completed results; the trainer owns best metrics."""
 
     def __init__(
         self,
@@ -165,32 +165,22 @@ class PhaseEvaluator:
         self.device = device
         self.eval_every_n = eval_every_n
         self.vis_dir = vis_dir
-        self.best_ir_map = -1.0
-        self.best_rgb_map = -1.0
         self._last_phase = None
         self.history = []
-        self.on_new_best_fn = None
-
-    def register_best_fn(self, fn) -> None:
-        self.on_new_best_fn = fn
 
     def state_dict(self) -> Dict:
-        """Return persistent evaluation state without serializing callbacks/loaders."""
+        """Return evaluation progress and history without loaders or best metrics."""
 
         return {
-            "best_ir_map": float(self.best_ir_map),
-            "best_rgb_map": float(self.best_rgb_map),
             "last_phase": self._last_phase,
             "history": copy.deepcopy(self.history),
         }
 
     def load_state_dict(self, state: Dict) -> None:
-        """Restore evaluation progress used by periodic and best-model decisions."""
+        """Restore evaluation progress; checkpoint loading migrates legacy best metrics."""
 
         if not isinstance(state, dict):
             raise TypeError("phase evaluator state must be a dictionary")
-        self.best_ir_map = float(state.get("best_ir_map", -1.0))
-        self.best_rgb_map = float(state.get("best_rgb_map", -1.0))
         self._last_phase = state.get("last_phase")
         self.history = copy.deepcopy(state.get("history", []))
 
@@ -217,20 +207,13 @@ class PhaseEvaluator:
             else:
                 ir_results = {"mAP@0.5": 0.0}
             results.update(ir_results)
-            if ir_results.get("mAP@0.5", 0.0) > self.best_ir_map:
-                self.best_ir_map = ir_results["mAP@0.5"]
-                results["is_best_ir"] = True
-                if self.on_new_best_fn is not None:
-                    self.on_new_best_fn(results)
-
             if self.rgb_val_loader is not None and phase_name in {
                 "PHASE1_RGB_WARMUP", "PHASE2_TRANSITION"
             }:
                 rgb_results = self._run_eval_on_loader(model, self.rgb_val_loader, "RGB")
                 results.update({f"rgb_{key}": value for key, value in rgb_results.items()})
-                if rgb_results.get("mAP@0.5", 0.0) > self.best_rgb_map:
-                    self.best_rgb_map = rgb_results["mAP@0.5"]
-                    results["is_best_rgb"] = True
+            # Return this completed history record so the trainer can annotate
+            # best flags before persisting the same record in a checkpoint.
             self.history.append(results)
             return results
         finally:

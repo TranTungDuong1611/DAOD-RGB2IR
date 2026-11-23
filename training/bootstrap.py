@@ -96,7 +96,7 @@ def build_training(
     lr_scheduler = build_lr_scheduler(optimizer, config)
 
     # Evaluation assembly: pair the existing AP50 metric implementation with
-    # domain loaders, evaluation cadence, and best-result tracking.
+    # domain loaders, evaluation cadence, and history tracking.
     evaluator = DetectionEvaluator(
         num_classes=NUM_CLASSES,
         class_names=list(FLIR_CLASSES),
@@ -125,17 +125,6 @@ def build_training(
         gan_translator=gan_translator,
         pseudo_label_evaluator=build_pseudo_label_evaluator(config, logger=logger),
     )
-
-    # Connect an evaluator improvement to saving the complete training state.
-    # Bind it before initial evaluation or resume, as in the original entrypoint.
-    def on_best_found(results):
-        trainer.save_checkpoint("best_model.pth")
-        logger.info(
-            "New best IR mAP@0.5 saved: %.4f",
-            results.get("mAP@0.5", 0.0),
-        )
-
-    phase_evaluator.register_best_fn(on_best_found)
 
     # Return a ready-to-run object without starting training during assembly.
     return trainer

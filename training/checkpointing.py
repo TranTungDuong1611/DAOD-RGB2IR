@@ -28,6 +28,7 @@ def save_checkpoint(trainer, filename: str) -> None:
         "lr_scheduler": None if trainer.lr_scheduler is None else trainer.lr_scheduler.state_dict(),
         "global_step": trainer.global_step,
         "best_map": trainer.best_map,
+        "best_rgb_map": trainer.best_rgb_map,
         "ema_initialized": trainer.ema_initialized,
         "phase_evaluator": (
             evaluator.state_dict()
@@ -57,11 +58,18 @@ def load_checkpoint(trainer, path: str) -> None:
     if trainer.lr_scheduler is not None:
         trainer.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
     evaluator_state = checkpoint.get("phase_evaluator")
+    trainer.best_map = float(checkpoint.get("best_map", -1.0))
+    trainer.best_rgb_map = float(checkpoint.get("best_rgb_map", -1.0))
+    if evaluator_state is not None:
+        # Legacy best callbacks could save a stale trainer score before the
+        # evaluator returned. Merge both sources once into trainer-owned state.
+        evaluator_state = dict(evaluator_state)
+        trainer.best_map = max(trainer.best_map, float(evaluator_state.pop("best_ir_map", -1.0)))
+        trainer.best_rgb_map = max(trainer.best_rgb_map, float(evaluator_state.pop("best_rgb_map", -1.0)))
     if (evaluator_state is not None and trainer.phase_evaluator is not None
             and hasattr(trainer.phase_evaluator, "load_state_dict")):
         trainer.phase_evaluator.load_state_dict(evaluator_state)
     trainer.global_step = int(checkpoint.get("global_step", 0))
-    trainer.best_map = float(checkpoint.get("best_map", 0.0))
     trainer.ema_initialized = bool(checkpoint.get("ema_initialized", False))
     # Older checkpoints can omit observer state and progress.
     trainer.last_pseudo_label_eval_step = int(checkpoint.get("last_pseudo_label_eval_step", 0))

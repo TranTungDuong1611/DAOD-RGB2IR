@@ -17,10 +17,11 @@ class CheckpointingTests(unittest.TestCase):
             config = build_config(output_dir=directory)
             trainer, _, _, _ = build_trainer(config)
             trainer.lr_scheduler = StatefulLRScheduler()
-            trainer.phase_evaluator = StatefulPhaseEvaluator({"best_ir_map": .61})
+            trainer.phase_evaluator = StatefulPhaseEvaluator({"history": [{"global_step": 3}]})
             for _ in range(3):
                 trainer.train_one_iteration()
             trainer.best_map = .61
+            trainer.best_rgb_map = .72
             trainer.last_pseudo_label_eval_step = 3
             trainer.last_full_pseudo_label_eval_step = 2
             trainer.save_checkpoint("run.pth")
@@ -36,11 +37,12 @@ class CheckpointingTests(unittest.TestCase):
 
             self.assertEqual(resumed.global_step, 3)
             self.assertEqual(resumed.best_map, .61)
+            self.assertEqual(resumed.best_rgb_map, .72)
             self.assertTrue(resumed.ema_initialized)
             self.assertEqual(resumed.last_pseudo_label_eval_step, 3)
             self.assertEqual(resumed.last_full_pseudo_label_eval_step, 2)
             self.assertEqual(resumed.lr_scheduler.steps, 3)
-            self.assertEqual(resumed.phase_evaluator.state, {"best_ir_map": .61})
+            self.assertEqual(resumed.phase_evaluator.state, {"history": [{"global_step": 3}]})
             self.assertEqual(resumed.scheduler.state_dict(), trainer.scheduler.state_dict())
             for name in ("student", "rgb_teacher", "ir_teacher"):
                 for key, value in getattr(resumed, name).state_dict().items():

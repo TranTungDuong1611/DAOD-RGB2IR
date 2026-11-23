@@ -17,7 +17,7 @@ from scheduler import BridgeDomainScheduler, CurriculumScheduler, should_evaluat
 from data.augmentations import StudentAugmentor
 from training import checkpointing
 from training.data_flow import RouteDataFlow
-from training.loss_flow import LossFlow, component_weight
+from training.loss_flow import LossFlow
 from training.observability import log_iteration, log_pseudo_label_evaluation
 from training.step_policy import configured_teacher_names, distillation_settings, resolve_step
 
@@ -66,7 +66,10 @@ class CurriculumDomainAdaptationTrainer:
         # save/resume; execution modules do not maintain competing copies.
         self.scheduler = self._new_scheduler()
         self.global_step = 0
-        self.best_map = 0.0
+        # A negative sentinel preserves the first-evaluation behavior, including
+        # a first measured mAP of zero. Best metrics belong only to this trainer.
+        self.best_map = -1.0
+        self.best_rgb_map = -1.0
         self.loss_history = defaultdict(list)
         self.ema_initialized = False
         # Bootstrap supplies isolated IR validation loaders. Audit progress stays
@@ -88,14 +91,6 @@ class CurriculumDomainAdaptationTrainer:
 
     def _teacher_for_name(self, name: str) -> nn.Module:
         return fcos_models.get_teacher(self._teacher_models(), name)
-
-    @staticmethod
-    def _component_weight(name: str, config) -> float:
-        """Keep the existing helper while passing explicit weights to the executor."""
-        return component_weight(
-            name, uhl=config.weight_uhl, quality=config.weight_quality,
-            deltas=config.weight_deltas, logits=config.weight_logits,
-        )
 
     def train_one_iteration(self) -> Dict[str, Any]:
         if self.config.workflow != "gan_bridge":
@@ -268,6 +263,35 @@ class CurriculumDomainAdaptationTrainer:
             self.last_pseudo_label_eval_step = self.global_step
         return records
 
+    def evaluate(self, *, current_phase=None, trigger_reason: str = "manual") -> Optional[Dict[str, Any]]:
+        """Complete evaluation, update best metrics, then persist an IR improvement."""
+        if self.phase_evaluator is None:
+            return None
+        if current_phase is None:
+            current_phase = self.config.get_phase(self.global_step)
+        if trigger_reason == "scheduled":
+            results = self.phase_evaluator.step(self.student, self.global_step, current_phase)
+        else:
+            results = self.phase_evaluator.evaluate(
+                self.student, self.global_step, current_phase, trigger_reason=trigger_reason,
+            )
+        if results is None:
+            return None
+
+        ir_map = results.get("mAP@0.5")
+        is_best_ir = ir_map is not None and ir_map > self.best_map
+        if is_best_ir:
+            self.best_map = ir_map
+            results["is_best_ir"] = True
+        rgb_map = results.get("rgb_mAP@0.5")
+        if rgb_map is not None and rgb_map > self.best_rgb_map:
+            self.best_rgb_map = rgb_map
+            results["is_best_rgb"] = True
+        if is_best_ir:
+            self.save_checkpoint("best_model.pth")
+            logger.info("New best IR mAP@0.5 saved: %.4f", self.best_map)
+        return results
+
     def train(self) -> None:
         logger.info(
             "Starting training: total_iters=%s starting_from_step=%s workflow=%s",
@@ -283,15 +307,9 @@ class CurriculumDomainAdaptationTrainer:
             if self.global_step % self.config.log_interval == 0:
                 logs["iter_time"] = time.time() - started
                 self._log(logs)
-            # Delegate evaluation triggers and best-model callbacks to the
-            # evaluator, then retain the best score in trainer checkpoint state.
-            if self.phase_evaluator is not None:
-                phase = self.config.get_phase(self.global_step)
-                results = self.phase_evaluator.step(
-                    self.student, self.global_step, phase
-                )
-                if results and "mAP@0.5" in results:
-                    self.best_map = max(self.best_map, results["mAP@0.5"])
+            # Initial/manual and scheduled validation share the same best/save
+            # ordering. Domain metrics and history finish before checkpointing.
+            self.evaluate(trigger_reason="scheduled")
             # Preserve the current periodic snapshot cadence alongside the
             # separately triggered best-model and final-model saves.
             if self.global_step > 0 and self.global_step % 5000 == 0:

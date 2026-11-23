@@ -1,4 +1,4 @@
-"""Verify assembled training dependencies and the best-checkpoint callback."""
+"""Verify bootstrap assembles models, optimization and evaluation dependencies."""
 
 import logging
 import unittest
@@ -71,13 +71,12 @@ class TrainingBootstrapTests(unittest.TestCase):
         self.assertEqual(trainer.phase_evaluator.evaluator.interp, "voc11")
         self.assertEqual(trainer.phase_evaluator.evaluator.iou_thresholds, [0.5])
 
-    def test_ir_only_bootstrap_keeps_best_checkpoint_callback(self):
+    def test_ir_only_bootstrap_prepares_the_enabled_teacher(self):
         trainer, _, _, _ = self._build("ir")
 
         self.assertIsNone(trainer.rgb_teacher)
-        with mock.patch.object(trainer, "save_checkpoint") as save:
-            trainer.phase_evaluator.on_new_best_fn({"mAP@0.5": 0.6})
-        save.assert_called_once_with("best_model.pth")
+        self.assertFalse(trainer.ir_teacher.training)
+        self.assertTrue(all(not p.requires_grad for p in trainer.ir_teacher.parameters()))
 
 
 if __name__ == "__main__":

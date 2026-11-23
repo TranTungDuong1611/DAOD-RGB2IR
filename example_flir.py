@@ -233,7 +233,6 @@ def main(args) -> None:
     # Bootstrap wires dependencies; this entrypoint retains the sequence of
     # resume/initial evaluation, training, interruption handling, and final save.
     trainer = build_training(config, logger=logger)
-    student = trainer.student
     phase_evaluator = trainer.phase_evaluator
 
     # Resume saved progress or evaluate the initial model using the original
@@ -242,9 +241,7 @@ def main(args) -> None:
         trainer.load_checkpoint(args.resume)
     else:
         logger.info("Running initial IR evaluation")
-        phase_evaluator.evaluate(
-            student,
-            global_step=trainer.global_step,
+        trainer.evaluate(
             current_phase=Phase.PHASE1_RGB_WARMUP,
             trigger_reason="initial",
         )
