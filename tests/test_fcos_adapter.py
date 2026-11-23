@@ -6,7 +6,7 @@ from unittest import mock
 import torch
 from torch import nn
 
-from models.torchvision_fcos_adapter import (
+from models.fcos_adapter import (
     ClassificationInitMode,
     FCOSIoUHead,
     TorchvisionFCOSAdapter,

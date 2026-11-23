@@ -26,7 +26,7 @@ from config import (
     TrainingConfig,
 )
 from data import FLIR_CLASSES, NUM_CLASSES
-from models.torchvision_fcos_adapter import ClassificationInitMode
+from models.fcos_adapter import ClassificationInitMode
 from training.bootstrap import build_training, move_model_trio_to_device
 from training.observability import configure_training_logging
 

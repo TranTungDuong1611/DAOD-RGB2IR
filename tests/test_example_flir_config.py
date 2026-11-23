@@ -7,7 +7,7 @@ from torch import nn
 
 from example_flir import _move_model_trio_to_device, make_training_config, parse_args
 from config import CurriculumConfig, FCOSModelConfig, Phase
-from models.torchvision_fcos_adapter import ClassificationInitMode
+from models.fcos_adapter import ClassificationInitMode
 
 
 class EntrypointConfigTests(unittest.TestCase):

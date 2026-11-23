@@ -8,8 +8,8 @@ import torch
 
 from config import ClassificationInitMode, FCOSModelConfig, TrainingConfig
 from evaluate_coco import _load_checkpoint_model, build_coco_inputs, summarize_coco_eval
-from models.fcos_factory import build_fcos_model
-from test_torchvision_fcos_adapter import TinyBackbone
+from models.fcos_models import build_fcos_model
+from test_fcos_adapter import TinyBackbone
 from torchvision.models.detection import FCOS
 
 

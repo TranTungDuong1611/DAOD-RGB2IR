@@ -11,7 +11,7 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
 from config import TrainingConfig
-from models import fcos_factory
+from models import fcos_models
 from models.detector_wrapper import DetectorWrapper as DetectorWrapper
 from scheduler import BridgeDomainScheduler, CurriculumScheduler, should_evaluate_pseudo_labels
 from data.augmentations import StudentAugmentor
@@ -87,7 +87,7 @@ class CurriculumDomainAdaptationTrainer:
         return {"rgb": self.rgb_teacher, "ir": self.ir_teacher}
 
     def _teacher_for_name(self, name: str) -> nn.Module:
-        return fcos_factory.get_teacher(self._teacher_models(), name)
+        return fcos_models.get_teacher(self._teacher_models(), name)
 
     @staticmethod
     def _component_weight(name: str, config) -> float:
@@ -134,7 +134,7 @@ class CurriculumDomainAdaptationTrainer:
 
         # Establish teacher references before any forward that can consume them.
         if plan.initialize_teacher_names:
-            fcos_factory.initialize_teachers(
+            fcos_models.initialize_teachers(
                 self.student, self._teacher_models(), names=plan.initialize_teacher_names,
             )
             self.ema_initialized = True
@@ -171,7 +171,7 @@ class CurriculumDomainAdaptationTrainer:
         # Each teacher consumes the paired view with the student's resize.
         for teacher_name, settings in plan.distillation:
             teacher = self._teacher_for_name(teacher_name)
-            teacher_output = fcos_factory.forward_teacher(
+            teacher_output = fcos_models.forward_teacher(
                 teacher,
                 data["teacher_images"],
                 sample_ids=sample_ids,
@@ -210,7 +210,7 @@ class CurriculumDomainAdaptationTrainer:
         # Teacher update: follow an eligible student update with EMA only for
         # the teacher targeted by this route and enabled by the experiment.
         if did_step and plan.ema_target is not None:
-            fcos_factory.ema_update(
+            fcos_models.ema_update(
                 self._teacher_for_name(plan.ema_target),
                 self.student,
                 alpha=self.config.ema.alpha,

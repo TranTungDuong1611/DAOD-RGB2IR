@@ -3,7 +3,7 @@ import unittest
 
 import torch
 
-from models.torchvision_fcos_adapter import ClassificationInitMode, FCOSIoUHead
+from models.fcos_adapter import ClassificationInitMode, FCOSIoUHead
 from torchvision.models.detection import fcos_resnet50_fpn
 
 

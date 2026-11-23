@@ -7,12 +7,12 @@ import torch
 from config import FCOSModelConfig, TrainingConfig
 from loss.detection_criterion import DetectionLossCriterion
 from models.detector_wrapper import DetectorWrapper
-from models import fcos_factory
-from models.fcos_factory import (
+from models import fcos_models
+from models.fcos_models import (
     build_fcos_model,
     build_fcos_trio,
 )
-from models.torchvision_fcos_adapter import ClassificationInitMode
+from models.fcos_adapter import ClassificationInitMode
 from torchvision.models.detection import fcos_resnet50_fpn
 
 
@@ -36,7 +36,7 @@ class TeacherLifecycleTests(unittest.TestCase):
             student.weight.fill_(3)
             student.running_mean.fill_(4)
             student.num_batches_tracked.fill_(7)
-        fcos_factory.initialize_teachers(student, {"rgb": rgb, "ir": ir}, names=("ir",))
+        fcos_models.initialize_teachers(student, {"rgb": rgb, "ir": ir}, names=("ir",))
         for name, value in student.state_dict().items():
             self.assertTrue(torch.equal(ir.state_dict()[name], value))
         self.assertTrue(torch.equal(rgb.weight, torch.ones(2)))
@@ -52,7 +52,7 @@ class TeacherLifecycleTests(unittest.TestCase):
                     student.running_mean.fill_(10)
                     student.num_batches_tracked.fill_(7)
                     teacher.weight.zero_()
-                fcos_factory.ema_update(teacher, student, alpha=.9, global_step=step)
+                fcos_models.ema_update(teacher, student, alpha=.9, global_step=step)
                 torch.testing.assert_close(teacher.weight, torch.full((2,), expected))
                 torch.testing.assert_close(teacher.running_mean, torch.full((2,), expected))
                 self.assertEqual(teacher.num_batches_tracked.item(), 7)
@@ -64,8 +64,8 @@ class TeacherLifecycleTests(unittest.TestCase):
                 self.seen = (self.training, kwargs)
                 return images.square()
 
-        teacher = fcos_factory.get_teacher({"ir": Teacher()}, "ir")
-        output = fcos_factory.forward_teacher(
+        teacher = fcos_models.get_teacher({"ir": Teacher()}, "ir")
+        output = fcos_models.forward_teacher(
             teacher, torch.ones(1, requires_grad=True), sample_ids=("ir-1",), resize_short_edge=96,
         )
         self.assertFalse(output.requires_grad)

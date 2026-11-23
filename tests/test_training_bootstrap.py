@@ -39,7 +39,7 @@ class TrainingBootstrapTests(unittest.TestCase):
         with (
             mock.patch("training.bootstrap.build_dataloaders", return_value=loaders),
             mock.patch(
-                "models.fcos_factory.build_fcos_model", return_value=student,
+                "models.fcos_models.build_fcos_model", return_value=student,
             ),
         ):
             trainer = build_training(config, logger=logging.getLogger(__name__))

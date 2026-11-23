@@ -12,7 +12,7 @@ from data.datasets import FLIRIRDataset
 from data.dataloaders import ir_collate
 from data.ir_annotations import IRAnnotationReader
 from evaluator import DetectionEvaluator, PhaseEvaluator
-from models.fcos_factory import build_fcos_trio
+from models.fcos_models import build_fcos_trio
 from optimization import build_lr_scheduler, build_optimizer
 from trainer import CurriculumDomainAdaptationTrainer
 from training.gan_bridge import load_gan_translator

@@ -17,7 +17,7 @@ from data.ir_annotations import IRAnnotationReader
 from loss.detection_criterion import DetectionLossCriterion
 from models.detector_adapter import DistillationPair, DistillationSettings, Predictions
 from models.detector_wrapper import DetectorWrapper
-from test_torchvision_fcos_adapter import build_adapter
+from test_fcos_adapter import build_adapter
 
 
 @pytest.fixture

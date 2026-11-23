@@ -14,11 +14,11 @@ from PIL import Image
 from config import CurriculumConfig, EMAConfig, PseudoLabelEvalConfig, TeacherSchedule
 from loss.detection_criterion import DetectionLossCriterion
 from models.detector_wrapper import DetectorWrapper
-from models.fcos_factory import build_fcos_trio
+from models.fcos_models import build_fcos_trio
 from trainer import CurriculumDomainAdaptationTrainer
 from training.bootstrap import build_pseudo_label_evaluator
 from test_curriculum_wrapper_integration import build_config
-from test_torchvision_fcos_adapter import build_adapter
+from test_fcos_adapter import build_adapter
 
 
 def make_trainer(base, directory, *, enabled, interval=2):
@@ -38,7 +38,7 @@ def make_trainer(base, directory, *, enabled, interval=2):
     config.distill.rgb_teacher = config.distill.ir_teacher = schedule
     # Exercise both teachers' existing KD paths as well as their audit passes.
     config.mid_routing.p3_ir_flow.teacher_names = ("rgb", "ir")
-    with mock.patch("models.fcos_factory.build_fcos_model", return_value=copy.deepcopy(base)):
+    with mock.patch("models.fcos_models.build_fcos_model", return_value=copy.deepcopy(base)):
         student, rgb, ir = build_fcos_trio(config)
     optimizer = torch.optim.SGD(student.parameters(), lr=.001, momentum=.9)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=.8)
@@ -232,7 +232,7 @@ def test_cli_smoke_runs_all_phases_and_persists_final_full_audit():
         # Keep real CLI/config/data/optimizer/evaluation/checkpoint execution;
         # replace only heavyweight model assembly with actual tiny-backbone FCOS.
         with mock.patch.object(sys, "argv", args), \
-             mock.patch("models.fcos_factory.build_fcos_model",
+             mock.patch("models.fcos_models.build_fcos_model",
                         side_effect=lambda *args, **kwargs: copy.deepcopy(base)), \
              mock.patch("example_flir.configure_training_logging", return_value=root / "train.log"):
             main(parse_args())

@@ -31,7 +31,7 @@ from models.detector_adapter import (
 from models.detector_wrapper import DetectorWrapper
 from scheduler import CurriculumScheduler
 from trainer import CurriculumDomainAdaptationTrainer
-from models.fcos_factory import build_fcos_trio, copy_student_to_teacher, ema_update
+from models.fcos_models import build_fcos_trio, copy_student_to_teacher, ema_update
 
 
 class TinyAdapter(DetectorAdapter):
@@ -208,7 +208,7 @@ def build_config(**kwargs):
 
 def build_trainer(config):
     student = DetectorWrapper(TinyAdapter(), TinyCriterion())
-    with mock.patch("models.fcos_factory.build_fcos_model", return_value=student):
+    with mock.patch("models.fcos_models.build_fcos_model", return_value=student):
         student, rgb_teacher, ir_teacher = build_fcos_trio(config)
     rgb_loader = DataLoader(RGBDataset(), batch_size=1, collate_fn=collate_rgb)
     ir_loader = DataLoader(IRDataset(), batch_size=1, collate_fn=collate_ir)
@@ -445,7 +445,7 @@ class CurriculumIntegrationTests(unittest.TestCase):
             )
 
             trainer.save_checkpoint("resume.pth")
-            with mock.patch("models.fcos_factory.copy_student_to_teacher") as hard_copy:
+            with mock.patch("models.fcos_models.copy_student_to_teacher") as hard_copy:
                 trainer.load_checkpoint(
                     f"{output_dir}/resume.pth"
                 )

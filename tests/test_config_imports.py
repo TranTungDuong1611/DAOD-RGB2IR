@@ -42,12 +42,12 @@ class ConfigImportTests(unittest.TestCase):
     def test_legacy_adapter_enum_and_config_enum_are_identical_in_both_import_orders(self):
         for first_import in (
             "import config",
-            "import models.torchvision_fcos_adapter",
+            "import models.fcos_adapter",
         ):
             with self.subTest(first_import=first_import):
                 self.run_isolated(first_import + "\n" + textwrap.dedent("""
                     from config import ClassificationInitMode, FCOSModelConfig
-                    from models.torchvision_fcos_adapter import ClassificationInitMode as AdapterMode
+                    from models.fcos_adapter import ClassificationInitMode as AdapterMode
                     assert ClassificationInitMode is AdapterMode
                     config = FCOSModelConfig(classification_init_mode=AdapterMode.RANDOM_HEAD)
                     assert config.classification_init_mode is AdapterMode.RANDOM_HEAD

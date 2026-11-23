@@ -19,7 +19,7 @@ from data import (
     ir_val_collate,
     rgb_collate,
 )
-from models.fcos_factory import build_fcos_model
+from models.fcos_models import build_fcos_model
 
 
 logger = logging.getLogger(__name__)

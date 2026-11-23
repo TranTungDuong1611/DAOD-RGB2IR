@@ -14,7 +14,7 @@ from torchvision.models.detection import (
 from config import FCOSModelConfig, TrainingConfig
 from loss.detection_criterion import DetectionLossCriterion
 from .detector_wrapper import DetectorWrapper
-from .torchvision_fcos_adapter import (
+from .fcos_adapter import (
     ClassificationInitMode,
     FCOSIoUHead,
     TorchvisionFCOSAdapter,

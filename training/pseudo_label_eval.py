@@ -8,7 +8,7 @@ from PIL import Image
 import torch
 
 from loss.detection_criterion import select_distillation_masks
-from models.torchvision_fcos_adapter import _aligned_box_iou
+from models.fcos_adapter import _aligned_box_iou
 
 
 def _ratio(numerator, denominator):
