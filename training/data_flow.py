@@ -47,7 +47,7 @@ class RouteDataFlow:
         return moved
 
     def _unpack_rgb_batch(self, batch):
-        """Read the (images, targets, sample_ids) batch produced by rgb_collate."""
+        """Read the (images, targets, sample_ids) batch produced by detection_collate."""
         if not isinstance(batch, (tuple, list)) or len(batch) != 3:
             raise ValueError("RGB loader must return (images, targets, sample_ids)")
         images, targets, ids = batch

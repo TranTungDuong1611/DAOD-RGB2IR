@@ -10,15 +10,14 @@ from typing import Sequence
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
-from config import FCOSModelConfig, TrainingConfig
+from config import EvalLoaderConfig, FCOSModelConfig, TrainingConfig
 from data import (
     FLIRIRValDataset,
     FLIRRGBDataset,
-    ir_val_collate,
-    rgb_collate,
+    detection_collate,
 )
+from data.dataloaders import build_loader
 from models.fcos_models import build_fcos_model
 
 
@@ -141,21 +140,15 @@ def _load_checkpoint_model(checkpoint_path: str, device: torch.device, score_thr
     return model, model_config.class_names
 
 
-def _build_loader(data_root: str, domain: str, batch_size: int, workers: int):
+def _build_loader(data_root: str, domain: str, batch_size: int, workers: int, device):
     if domain == "ir":
         dataset = FLIRIRValDataset(data_root, split="validation")
-        collate_fn = ir_val_collate
     else:
         dataset = FLIRRGBDataset(data_root, split="validation")
-        collate_fn = rgb_collate
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=workers,
-        pin_memory=True,
-        collate_fn=collate_fn,
-    )
+    settings = EvalLoaderConfig(batch_size=batch_size, num_workers=workers)
+    return build_loader(dataset, settings, collate_fn=detection_collate, device=device,
+                        shuffle=False, drop_last=False,
+                        generator=torch.Generator().manual_seed(settings.seed))
 
 
 def _collect(model, loader, device: torch.device):
@@ -197,7 +190,7 @@ def evaluate(args) -> dict[str, float]:
         args.checkpoint, device, args.score_thresh
     )
     loader = _build_loader(
-        args.data_root, args.domain, args.batch_size, args.workers
+        args.data_root, args.domain, args.batch_size, args.workers, device
     )
     logger.info(
         "COCO evaluation: checkpoint=%s domain=%s images=%d device=%s",

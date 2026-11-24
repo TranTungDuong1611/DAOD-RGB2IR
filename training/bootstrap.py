@@ -3,13 +3,13 @@
 import logging
 
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import Subset
 
 from config import TrainingConfig
 from data import FLIR_CLASSES, NUM_CLASSES, build_dataloaders
 from data.augmentations import StudentAugmentor
 from data.datasets import FLIRIRDataset
-from data.dataloaders import ir_collate
+from data.dataloaders import build_loader, ir_collate
 from data.ir_annotations import IRAnnotationReader
 from evaluator import DetectionEvaluator, TrainingEvaluator, PseudoLabelEvaluator, select_fixed_ir_subset
 from models.fcos_models import build_fcos_trio
@@ -44,10 +44,9 @@ def build_pseudo_label_evaluator(config, *, logger):
     # Each loader owns a generator so iterator/worker seeding never consumes
     # the global RNG used by training. Retain the final incomplete batch.
     def loader(data):
-        return DataLoader(
-            data, batch_size=config.loader.eval.batch_size,
-            num_workers=config.loader.eval.num_workers, shuffle=False, drop_last=False,
-            pin_memory=config.device.startswith("cuda"), collate_fn=ir_collate,
+        return build_loader(
+            data, config.loader.eval, collate_fn=ir_collate, device=config.device,
+            shuffle=False, drop_last=False,
             generator=torch.Generator().manual_seed(audit.subset_seed),
         )
     logger.info("Pseudo-label IR validation: fixed_images=%d full_images=%d batch_size=%d seed=%d",

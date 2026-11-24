@@ -21,6 +21,7 @@ class EvalLoaderConfig:
     batch_size: int = 4
     num_workers: int = 4
     shuffle: bool = False
+    seed: int = 0
 
 
 @dataclass

@@ -86,6 +86,8 @@ class DisjointTrainDataTests(unittest.TestCase):
     def test_validation_keeps_the_complete_manifest_and_files_are_not_rewritten(self):
         before = (self.root / "align_train.txt").read_bytes()
         loaders = build_dataloaders(self.config)
+        self.assertTrue(all(not loader.pin_memory for loader in loaders.values()))
+        self.assertEqual(tuple(next(iter(loaders["ir_val"]))[2]), tuple(self.validation_stems))
         self.assertEqual(loaders["rgb_val"].dataset.stems, self.validation_stems)
         self.assertEqual(loaders["ir_val"].dataset.stems, self.validation_stems)
         self.assertEqual((self.root / "align_train.txt").read_bytes(), before)
