@@ -423,7 +423,7 @@ class TrainingEvaluator:
         if self.pseudo_label_evaluator is None or not audit.enabled or not ema_initialized:
             return []
         if final:
-            if global_step < self.config.max_iter or self.last_full_pseudo_label_eval_step == global_step:
+            if global_step < self.config.total_iters or self.last_full_pseudo_label_eval_step == global_step:
                 return []
         elif global_step // audit.interval <= self.last_pseudo_label_eval_step // audit.interval:
             return []

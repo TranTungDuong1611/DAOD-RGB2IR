@@ -218,11 +218,11 @@ class CurriculumDomainAdaptationTrainer:
     def train(self) -> None:
         logger.info(
             "Starting training: total_iters=%s starting_from_step=%s workflow=%s",
-            self.config.max_iter,
+            self.config.total_iters,
             self.global_step,
             self.config.workflow,
         )
-        for _ in range(self.global_step, self.config.max_iter):
+        for _ in range(self.global_step, self.config.total_iters):
             # Execute one iteration before applying the existing log, validation,
             # and checkpoint cadence to the resulting global step.
             started = time.time()

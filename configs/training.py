@@ -90,8 +90,7 @@ class TrainingConfig:
     loader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
     pseudo_label_eval: PseudoLabelEvalConfig = field(default_factory=PseudoLabelEvalConfig)
 
-    max_iter: int = 10000
-    total_iters: Optional[int] = None
+    total_iters: int = 10000
     grad_clip: float = 10.0
     device: str = "cuda"
     log_interval: int = 50
@@ -102,14 +101,8 @@ class TrainingConfig:
     eval_period: int = 500
 
     def __post_init__(self):
-        if self.total_iters is not None:
-            if self.total_iters <= 0:
-                raise ValueError("total_iters must be positive")
-            self.max_iter = self.total_iters
-        else:
-            self.total_iters = self.max_iter
-        if self.max_iter <= 0:
-            raise ValueError("max_iter must be positive")
+        if self.total_iters <= 0:
+            raise ValueError("total_iters must be positive")
         if self.grad_clip < 0 or self.log_interval <= 0 or self.eval_period <= 0:
             raise ValueError("training intervals and grad_clip are invalid")
         if self.workflow not in {"curriculum", "rgb_baseline", "gan_bridge"}:
@@ -128,7 +121,7 @@ class TrainingConfig:
                 raise ValueError("gan_bridge requires a pretrained GAN checkpoint (--gan-weights)")
             if self.teacher_mode != "two_teacher":
                 raise ValueError("gan_bridge requires teacher_mode='two_teacher'")
-            warmup_end = self.bridge_schedule.phase_ends(self.max_iter)[0]
+            warmup_end = self.bridge_schedule.phase_ends(self.total_iters)[0]
             if self.ema.start_steps is not None and self.ema.start_steps != warmup_end:
                 raise ValueError("gan_bridge EMA start must match the end of RGB warmup")
         if self.optimizer.warmup_iters is None:
@@ -139,7 +132,7 @@ class TrainingConfig:
     def get_phase(self, global_step: int) -> Phase:
         """Determines the phase using CurriculumConfig boundaries."""
         if self.workflow == "gan_bridge":
-            stage = self.bridge_schedule.stage_for_step(global_step, self.max_iter)
+            stage = self.bridge_schedule.stage_for_step(global_step, self.total_iters)
             return (
                 Phase.PHASE1_RGB_WARMUP, Phase.PHASE2_TRANSITION,
                 Phase.PHASE3_ADAPTATION, Phase.PHASE3_ADAPTATION, Phase.PHASE4_IR_FOCUS,

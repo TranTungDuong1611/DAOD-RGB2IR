@@ -226,7 +226,6 @@ class EntrypointConfigTests(unittest.TestCase):
         config = make_training_config(args)
 
         self.assertEqual(config.total_iters, 17)
-        self.assertEqual(config.max_iter, 17)
         self.assertEqual(config.loader.train.batch_size, 2)
         self.assertEqual(config.loader.eval.batch_size, 3)
         self.assertEqual(config.loader.train.num_workers, 0)

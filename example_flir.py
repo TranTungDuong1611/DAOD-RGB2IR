@@ -189,7 +189,6 @@ def build_training_config(args) -> TrainingConfig:
             ),
         ),
         # Run lifecycle, output, workflow, and monitoring cadence settings.
-        max_iter=total_iters,
         total_iters=total_iters,
         output_dir=args.output_dir,
         device=args.device,

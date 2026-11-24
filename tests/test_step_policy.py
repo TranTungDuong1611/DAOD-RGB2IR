@@ -66,7 +66,7 @@ def test_bridge_resolves_each_domain_at_each_adaptation_stage(stage, domain):
         gan_bridge=GANBridgeConfig(checkpoint="fixture.pth", source_sup_weight=.65),
         bridge_schedule=BridgeScheduleConfig(phase_ratios=((1, 0, 0, 0),) + (ratio,) * 4),
     )
-    scheduler = BridgeDomainScheduler(config.bridge_schedule, config.max_iter)
+    scheduler = BridgeDomainScheduler(config.bridge_schedule, config.total_iters)
     for step in range(stage * 2):
         scheduler.get_next_domain(step)
     plan = policy.resolve_step(config, scheduler, stage * 2, ema_initialized=True)
@@ -135,10 +135,10 @@ def test_policy_uses_restored_scheduler_without_consuming_training_rng():
         workflow="gan_bridge", total_iters=100,
         gan_bridge=GANBridgeConfig(checkpoint="fixture.pth"),
     )
-    scheduler = BridgeDomainScheduler(config.bridge_schedule, config.max_iter)
+    scheduler = BridgeDomainScheduler(config.bridge_schedule, config.total_iters)
     for step in range(53):
         policy.resolve_step(config, scheduler, step, ema_initialized=step >= 20)
-    resumed = BridgeDomainScheduler(config.bridge_schedule, config.max_iter)
+    resumed = BridgeDomainScheduler(config.bridge_schedule, config.total_iters)
     resumed.load_state_dict(scheduler.state_dict())
     rng = torch.random.get_rng_state().clone()
     expected = [policy.resolve_step(config, scheduler, step, ema_initialized=True) for step in range(53, 100)]

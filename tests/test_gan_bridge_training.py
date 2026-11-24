@@ -53,7 +53,7 @@ def make_trainer(config, translator=None, *, pseudo_label_evaluator=None):
             DataLoader(IRDataset(), batch_size=1, collate_fn=collate_ir),
             device=config.device, augmentor=StudentAugmentor(config), gan_translator=translator,
         ),
-        BridgeDomainScheduler(config.bridge_schedule, config.max_iter),
+        BridgeDomainScheduler(config.bridge_schedule, config.total_iters),
         evaluator=TrainingEvaluator(config, teachers={"rgb": rgb_teacher, "ir": ir_teacher},
                                     pseudo_label_evaluator=pseudo_label_evaluator),
     )

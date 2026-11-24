@@ -117,7 +117,7 @@ def build_training(
         augmentor=StudentAugmentor(config), gan_translator=gan_translator,
     )
     scheduler = (
-        BridgeDomainScheduler(config.bridge_schedule, config.max_iter)
+        BridgeDomainScheduler(config.bridge_schedule, config.total_iters)
         if config.workflow == "gan_bridge" else CurriculumScheduler(config)
     )
     trainer = CurriculumDomainAdaptationTrainer(

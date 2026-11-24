@@ -96,7 +96,7 @@ def resolve_step(
     domain_ratio = None
     if config.workflow == "gan_bridge":
         domain = scheduler.get_next_domain(global_step)
-        stage = config.bridge_schedule.stage_for_step(global_step, config.max_iter)
+        stage = config.bridge_schedule.stage_for_step(global_step, config.total_iters)
         step_name = f"bridge_{domain}"
         route = bridge_route(config, stage, domain)
         source = "ir" if domain == "ir_real" else "rgb"
