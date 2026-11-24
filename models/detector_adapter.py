@@ -206,7 +206,7 @@ class DetectorCriterion(nn.Module, ABC):
     """Shared loss formulas receive prepared data, never detector internals."""
 
     @abstractmethod
-    def supervised(self, batch: SupervisedBatch) -> Losses:
+    def supervised(self, batch: SupervisedBatch) -> CriterionResult:
         raise NotImplementedError
 
     @abstractmethod

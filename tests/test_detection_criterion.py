@@ -107,7 +107,7 @@ class DetectorCriterionTests(unittest.TestCase):
             quality_targets=torch.tensor([0.5, 0.0]),
             foreground=torch.tensor([True, False]),
         )
-        losses = criterion.supervised(batch)
+        losses = criterion.supervised(batch).losses
         bce = math.log(2.0)
         expected_cls = bce * 0.5 + bce * (0.75 * 0.5 ** 2)
         self.assertAlmostEqual(losses['loss_cls'].item(), expected_cls, places=6)
@@ -127,7 +127,7 @@ class DetectorCriterionTests(unittest.TestCase):
             quality_targets=torch.ones(1),
             foreground=torch.ones(1, dtype=torch.bool),
         )
-        losses = criterion.supervised(batch)
+        losses = criterion.supervised(batch).losses
         self.assertAlmostEqual(losses['loss_box'].item(), 2.0 / 3.0, places=6)
 
     def test_no_foreground_returns_finite_graph_connected_zeros(self):
@@ -139,7 +139,7 @@ class DetectorCriterionTests(unittest.TestCase):
             logits, boxes, quality,
             torch.zeros(2, 2), torch.zeros(2, 4), torch.zeros(2),
             torch.zeros(2, dtype=torch.bool),
-        ))
+        )).losses
         self.assertTrue(all(torch.isfinite(value) for value in losses.values()))
         (losses['loss_box'] + losses['loss_quality']).backward()
         self.assertEqual(boxes.grad.abs().sum().item(), 0.0)

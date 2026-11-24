@@ -20,6 +20,7 @@ from config import (
     TrainLoaderConfig,
     TrainingConfig,
 )
+from models.detector_adapter import CriterionResult
 from trainer import CurriculumDomainAdaptationTrainer
 
 
@@ -68,7 +69,7 @@ class CountingWrapper(nn.Module):
 
     def supervised_from_output(self, output, targets):
         self.supervised_calls += 1
-        return {'loss_cls': self.weight.square()}
+        return CriterionResult({'loss_cls': self.weight.square()})
 
     def distill_from_outputs(self, student_output, teacher_output, settings):
         self.distill_calls += 1

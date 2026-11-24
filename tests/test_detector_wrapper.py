@@ -51,7 +51,7 @@ class TinyAdapter(DetectorAdapter):
 
 class TinyCriterion(DetectorCriterion):
     def supervised(self, batch):
-        return {'classification': sum(p.class_logits.square().mean() for p in batch.predictions)}
+        return CriterionResult({'classification': sum(p.class_logits.square().mean() for p in batch.predictions)})
 
     def distillation(self, pair, settings=None):
         return CriterionResult(
@@ -68,7 +68,7 @@ class WrapperTests(unittest.TestCase):
 
     def test_supervised_keeps_native_loss_and_gradient(self):
         model = DetectorWrapper(TinyAdapter(), TinyCriterion())
-        losses = model(self.images, self.targets)
+        losses = model(self.images, self.targets).losses
         self.assertEqual(set(losses), {'classification', 'rpn'})
         sum(losses.values()).backward()
         self.assertEqual(model.adapter.weight.grad.item(), 4.0)
@@ -90,7 +90,7 @@ class WrapperTests(unittest.TestCase):
             self.images, teacher, self.images,
             sample_ids=('frame-1',), teacher_sample_ids=('frame-1',),
         )
-        sum(losses.values()).backward()
+        sum(losses.losses.values()).backward()
         self.assertEqual(student.adapter.weight.grad.item(), -2.0)
         self.assertIsNone(teacher.adapter.weight.grad)
         self.assertFalse(teacher.training)
@@ -123,7 +123,7 @@ class WrapperTests(unittest.TestCase):
     def test_native_loss_collision_is_not_silent(self):
         class ConflictingCriterion(TinyCriterion):
             def supervised(self, batch):
-                return {'rpn': batch.predictions[0].class_logits.mean()}
+                return CriterionResult({'rpn': batch.predictions[0].class_logits.mean()})
         with self.assertRaisesRegex(ValueError, 'Duplicate'):
             DetectorWrapper(TinyAdapter(), ConflictingCriterion())(self.images, self.targets)
 
@@ -131,7 +131,7 @@ class WrapperTests(unittest.TestCase):
         adapter = TinyAdapter()
         model = DetectorWrapper(adapter, TinyCriterion())
         output = model.raw(self.images, self.targets, sample_ids=('frame-1',))
-        losses = model.supervised_from_output(output, self.targets)
+        losses = model.supervised_from_output(output, self.targets).losses
         self.assertEqual(adapter.forward_calls, 1)
         self.assertIn('classification', losses)
 
@@ -163,7 +163,7 @@ class ContractTests(unittest.TestCase):
         loss = model.distill(
             [torch.zeros(3, 8, 8)], teacher, [torch.zeros(3, 8, 8)],
             sample_ids=('frame-1',), teacher_sample_ids=('frame-1',),
-        )['kd']
+        ).losses['kd']
         loss.backward()
         self.assertEqual(loss.item(), 0.0)
         self.assertEqual(model.adapter.weight.grad.item(), 0.0)

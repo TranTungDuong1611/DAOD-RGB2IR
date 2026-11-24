@@ -102,7 +102,7 @@ class TorchvisionFCOSAdapterTests(unittest.TestCase):
             )
 
         select_resize.assert_called_once_with()
-        self.assertIn("loss_kd_cls", losses)
+        self.assertIn("loss_kd_cls", losses.losses)
 
     def test_raw_forward_supports_variable_list_and_decodes_with_box_coder(self):
         adapter = build_adapter()

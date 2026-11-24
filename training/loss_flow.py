@@ -2,8 +2,6 @@
 
 import torch
 
-from models.detector_adapter import CriterionResult
-
 
 def component_weight(name: str, *, uhl: float, quality: float, deltas: float, logits: float):
     """Apply the original name matching order to explicitly supplied weights."""
@@ -39,7 +37,7 @@ class LossFlow:
     def supervised(self, student, student_output, targets, *, phase_weight: float):
         # Reuse the existing student forward to compute GT losses; apply the
         # supplied phase/component weights through the shared accumulator.
-        for name, value in student.supervised_from_output(student_output, targets).items():
+        for name, value in student.supervised_from_output(student_output, targets).losses.items():
             self._add(name, value, phase_weight, f"sup_{name}")
 
     def distill(
@@ -49,12 +47,6 @@ class LossFlow:
         # The caller has already selected and forwarded this teacher. Delegate
         # prediction matching and loss formulas to the existing wrapper/criterion.
         result = student.distill_from_outputs(student_output, teacher_output, settings)
-        # Normalize the supported result contracts before recording losses and
-        # diagnostics, preserving compatibility with wrappers that return a dict.
-        if isinstance(result, dict):
-            result = CriterionResult(result, {})
-        if not isinstance(result, CriterionResult):
-            raise TypeError("wrapper distillation must return CriterionResult")
         # Teacher-specific names keep contributions distinct when aggregating
         # multiple distillation results into the same iteration total.
         for name, value in result.losses.items():

@@ -12,7 +12,6 @@ from models.detector_adapter import (
     DetectorCriterion,
     DistillationPair,
     DistillationSettings,
-    Losses,
     SupervisedBatch,
 )
 
@@ -195,7 +194,7 @@ class DetectionLossCriterion(DetectorCriterion):
             foreground,
         )
 
-    def supervised(self, batch: SupervisedBatch) -> Losses:
+    def supervised(self, batch: SupervisedBatch) -> CriterionResult:
         (
             class_logits,
             boxes,
@@ -207,7 +206,7 @@ class DetectionLossCriterion(DetectorCriterion):
         ) = self._supervised_tensors(batch)
         if class_logits is None:
             zero = _zero_with_grad()
-            return {"loss_cls": zero, "loss_box": zero, "loss_quality": zero}
+            return CriterionResult({"loss_cls": zero, "loss_box": zero, "loss_quality": zero})
 
         num_foreground = int(foreground.sum().item())
         denominator = max(1, num_foreground)
@@ -231,18 +230,16 @@ class DetectionLossCriterion(DetectorCriterion):
         else:
             loss_box = _zero_with_grad(boxes)
             loss_quality = _zero_with_grad(quality_logits)
-        return {
+        return CriterionResult({
             "loss_cls": loss_cls,
             "loss_box": loss_box,
             "loss_quality": loss_quality,
-        }
+        })
 
     @staticmethod
     def _pair_tensors(pair: DistillationPair):
         student = pair.student
         teacher = pair.teacher
-        if len(student) != len(teacher):
-            raise ValueError("distillation pair image counts must match")
         s_cls = _cat_or_none([p.class_logits for p in student])
         t_cls = _cat_or_none([p.class_logits for p in teacher])
         s_boxes = _cat_or_none([p.boxes for p in student])

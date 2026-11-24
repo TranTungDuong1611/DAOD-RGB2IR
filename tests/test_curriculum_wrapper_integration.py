@@ -84,12 +84,12 @@ class TinyCriterion(DetectorCriterion):
         self.distill_calls = 0
 
     def supervised(self, batch):
-        return {
+        return CriterionResult({
             "loss_cls": sum(
                 prediction.class_logits.square().mean()
                 for prediction in batch.predictions
             )
-        }
+        })
 
     def distillation(self, pair, settings):
         self.distill_calls += 1

@@ -61,16 +61,6 @@ class DetectorWrapper(nn.Module):
         return ids
 
     @staticmethod
-    def _criterion_result(result) -> CriterionResult:
-        if isinstance(result, CriterionResult):
-            return result
-        if isinstance(result, dict):
-            return CriterionResult(losses=result, metrics={})
-        raise TypeError(
-            "criterion must return CriterionResult (or a loss dict for compatibility)"
-        )
-
-    @staticmethod
     def _merge_losses(*loss_maps: Losses) -> Losses:
         merged: Losses = {}
         for losses in loss_maps:
@@ -109,12 +99,12 @@ class DetectorWrapper(nn.Module):
 
     def supervised_from_output(
         self, output: AdapterOutput, targets: Targets
-    ) -> Losses:
+    ) -> CriterionResult:
         if len(output.predictions) != len(targets):
             raise ValueError("targets must match the output batch length")
         batch = self.adapter.prepare_supervised(output, targets)
-        result = self._criterion_result(self.criterion.supervised(batch))
-        return self._merge_losses(result.losses, batch.native_losses)
+        result = self.criterion.supervised(batch)
+        return replace(result, losses=self._merge_losses(result.losses, batch.native_losses))
 
     def distill_from_outputs(
         self,
@@ -123,13 +113,9 @@ class DetectorWrapper(nn.Module):
         settings: Optional[DistillationSettings] = None,
     ) -> CriterionResult:
         pair = self.adapter.prepare_distillation(student_output, teacher_output)
-        result = self._criterion_result(
-            self.criterion.distillation(
-                pair.detached_teacher(),
-                settings or _DEFAULT_DISTILLATION_SETTINGS,
-            )
+        return self.criterion.distillation(
+            pair.detached_teacher(), settings or _DEFAULT_DISTILLATION_SETTINGS,
         )
-        return result
 
     def forward(
         self,
@@ -152,7 +138,7 @@ class DetectorWrapper(nn.Module):
         settings: Optional[DistillationSettings] = None,
         sample_ids: Optional[Sequence[str]] = None,
         teacher_sample_ids: Optional[Sequence[str]] = None,
-    ) -> Losses:
+    ) -> CriterionResult:
         """Convenience one-teacher call; the trainer owns routing and EMA."""
 
         if teacher.training or any(
@@ -175,4 +161,4 @@ class DetectorWrapper(nn.Module):
             student_output,
             teacher_output,
             settings or _DEFAULT_DISTILLATION_SETTINGS,
-        ).losses
+        )
