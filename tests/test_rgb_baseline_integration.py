@@ -1,3 +1,7 @@
+from data.augmentations import StudentAugmentor
+from training.data_flow import RouteDataFlow
+from scheduler import CurriculumScheduler
+
 import inspect
 import unittest
 
@@ -115,8 +119,8 @@ class RGBBaselineIntegrationTests(unittest.TestCase):
             ir_teacher=ir_teacher,
             optimizer=optimizer,
             config=config,
-            rgb_loader=loader,
-            ir_loader=ir_loader,
+            data_flow=RouteDataFlow(loader, ir_loader, device=config.device, augmentor=StudentAugmentor(config)),
+            scheduler=CurriculumScheduler(config),
         )
         logs = trainer.train_one_iteration()
         self.assertEqual(student.raw_calls, 1)

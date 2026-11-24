@@ -1,5 +1,9 @@
 """Exercise four-domain training, initialization, CLI and durable resume."""
 
+from data.augmentations import StudentAugmentor
+from training.data_flow import RouteDataFlow
+from scheduler import BridgeDomainScheduler
+
 import copy
 from collections import Counter
 import logging
@@ -43,9 +47,12 @@ def make_trainer(config, translator=None, *, pseudo_label_evaluator=None):
         student, rgb_teacher, ir_teacher = build_fcos_trio(config)
     return CurriculumDomainAdaptationTrainer(
         student, rgb_teacher, ir_teacher, torch.optim.SGD(student.parameters(), lr=0.01, momentum=0.9), config,
-        DataLoader(RGBDataset(), batch_size=1, collate_fn=collate_rgb),
-        DataLoader(IRDataset(), batch_size=1, collate_fn=collate_ir),
-        gan_translator=translator,
+        RouteDataFlow(
+            DataLoader(RGBDataset(), batch_size=1, collate_fn=collate_rgb),
+            DataLoader(IRDataset(), batch_size=1, collate_fn=collate_ir),
+            device=config.device, augmentor=StudentAugmentor(config), gan_translator=translator,
+        ),
+        BridgeDomainScheduler(config.bridge_schedule, config.max_iter),
         pseudo_label_evaluator=pseudo_label_evaluator,
     )
 
@@ -217,9 +224,9 @@ class BridgeTrainingTests(unittest.TestCase):
             torch.save(checkpoint, path)
             different = make_trainer(bridge_config(directory))
             with torch.no_grad():
-                different.gan_translator.generator.scale.fill_(0.5)
+                different.data_flow.gan_translator.generator.scale.fill_(0.5)
             different.load_checkpoint(str(path))
-            self.assertEqual(different.gan_translator.generator.scale.item(), 0.5)
+            self.assertEqual(different.data_flow.gan_translator.generator.scale.item(), 0.5)
             self.assertEqual(different.global_step, 23)
             self.assertTrue(different.ema_initialized)
             self.assertEqual(different.scheduler.state_dict(), trainer.scheduler.state_dict())
@@ -277,10 +284,10 @@ class BridgeTrainingTests(unittest.TestCase):
         for stage in range(5):
             counts = Counter(item["domain"] for item in logs[stage * 20:(stage + 1) * 20])
             self.assertEqual(tuple(counts[d] for d in ("rgb", "saga", "ir_gan", "ir_real")), expected[stage])
-        self.assertEqual(len(trainer.gan_translator.generator.inputs), 22)
-        self.assertTrue(all(parameter.grad is None for parameter in trainer.gan_translator.parameters()))
+        self.assertEqual(len(trainer.data_flow.gan_translator.generator.inputs), 22)
+        self.assertTrue(all(parameter.grad is None for parameter in trainer.data_flow.gan_translator.parameters()))
         optimized = {id(p) for group in trainer.optimizer.param_groups for p in group["params"]}
-        self.assertTrue(optimized.isdisjoint(id(p) for p in trainer.gan_translator.parameters()))
+        self.assertTrue(optimized.isdisjoint(id(p) for p in trainer.data_flow.gan_translator.parameters()))
 
     def test_phase_mapping_and_ema_start_follow_bridge_durations(self):
         config = bridge_config(bridge_schedule=configs.BridgeScheduleConfig(phase_fractions=(0.1, 0.3, 0.5, 0.7, 1.0)))
@@ -360,7 +367,7 @@ class BridgeTrainingTests(unittest.TestCase):
             "training.bootstrap.load_gan_translator", return_value=translator
         ):
             trainer = build_training(config, logger=logging.getLogger(__name__))
-        self.assertIs(trainer.gan_translator, translator)
+        self.assertIs(trainer.data_flow.gan_translator, translator)
         optimized = {id(p) for group in trainer.optimizer.param_groups for p in group["params"]}
         self.assertTrue(optimized.isdisjoint(id(p) for p in translator.parameters()))
         self.assertEqual(trainer.train_one_iteration()["global_step"], 1)

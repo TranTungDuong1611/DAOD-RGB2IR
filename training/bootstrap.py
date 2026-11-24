@@ -8,12 +8,15 @@ from torch.utils.data import DataLoader, Subset
 
 from config import TrainingConfig
 from data import FLIR_CLASSES, NUM_CLASSES, build_dataloaders
+from data.augmentations import StudentAugmentor
 from data.datasets import FLIRIRDataset
 from data.dataloaders import ir_collate
 from data.ir_annotations import IRAnnotationReader
 from evaluator import DetectionEvaluator, PhaseEvaluator
 from models.fcos_models import build_fcos_trio
 from optimization import build_lr_scheduler, build_optimizer
+from scheduler import BridgeDomainScheduler, CurriculumScheduler
+from training.data_flow import RouteDataFlow
 from trainer import CurriculumDomainAdaptationTrainer
 from training.gan_bridge import load_gan_translator
 from training.pseudo_label_eval import FixedIRPseudoLabelEvaluator, select_fixed_ir_subset
@@ -112,17 +115,24 @@ def build_training(
     )
     # Wire the assembled dependencies into the orchestrator. Run lifecycle
     # decisions such as resume, initial evaluation, and final save stay outside.
+    data_flow = RouteDataFlow(
+        rgb_train_loader, ir_train_loader, device=device,
+        augmentor=StudentAugmentor(config), gan_translator=gan_translator,
+    )
+    scheduler = (
+        BridgeDomainScheduler(config.bridge_schedule, config.max_iter)
+        if config.workflow == "gan_bridge" else CurriculumScheduler(config)
+    )
     trainer = CurriculumDomainAdaptationTrainer(
         student=student,
         rgb_teacher=rgb_teacher,
         ir_teacher=ir_teacher,
         optimizer=optimizer,
         config=config,
-        rgb_loader=rgb_train_loader,
-        ir_loader=ir_train_loader,
+        data_flow=data_flow,
+        scheduler=scheduler,
         phase_evaluator=phase_evaluator,
         lr_scheduler=lr_scheduler,
-        gan_translator=gan_translator,
         pseudo_label_evaluator=build_pseudo_label_evaluator(config, logger=logger),
     )
 

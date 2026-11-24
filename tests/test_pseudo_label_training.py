@@ -1,5 +1,9 @@
 """Real FCOS training must be identical with audit labels enabled or changed."""
 
+from data.augmentations import StudentAugmentor
+from training.data_flow import RouteDataFlow
+from scheduler import CurriculumScheduler
+
 import copy
 import json
 import logging
@@ -47,7 +51,9 @@ def make_trainer(base, directory, *, enabled, interval=2):
               "labels": torch.tensor([0]), "stem": "rgb-a"}
     return CurriculumDomainAdaptationTrainer(
         student, rgb, ir, optimizer, config,
-        [(images, [target], ("rgb-a",))], [(images, ("a",))], lr_scheduler=lr_scheduler,
+        RouteDataFlow([(images, [target], ("rgb-a",))], [(images, ("a",))],
+                      device=config.device, augmentor=StudentAugmentor(config)),
+        CurriculumScheduler(config), lr_scheduler=lr_scheduler,
         pseudo_label_evaluator=build_pseudo_label_evaluator(config, logger=logging.getLogger(__name__)),
     )
 

@@ -29,6 +29,8 @@ from models.detector_adapter import (
     SupervisedBatch,
 )
 from models.detector_wrapper import DetectorWrapper
+from data.augmentations import StudentAugmentor
+from training.data_flow import RouteDataFlow
 from scheduler import CurriculumScheduler
 from trainer import CurriculumDomainAdaptationTrainer
 from models.fcos_models import build_fcos_trio, copy_student_to_teacher, ema_update
@@ -220,8 +222,8 @@ def build_trainer(config):
         ir_teacher=ir_teacher,
         optimizer=optimizer,
         config=config,
-        rgb_loader=rgb_loader,
-        ir_loader=ir_loader,
+        data_flow=RouteDataFlow(rgb_loader, ir_loader, device="cpu", augmentor=StudentAugmentor(config)),
+        scheduler=CurriculumScheduler(config),
     )
     return trainer, student, rgb_teacher, ir_teacher
 

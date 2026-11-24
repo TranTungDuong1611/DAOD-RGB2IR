@@ -8,13 +8,11 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
-from torch.utils.data import DataLoader
 
 from config import TrainingConfig
 from models import fcos_models
 from models.detector_wrapper import DetectorWrapper as DetectorWrapper
-from scheduler import BridgeDomainScheduler, CurriculumScheduler, should_evaluate_pseudo_labels
-from data.augmentations import StudentAugmentor
+from scheduler import should_evaluate_pseudo_labels
 from training import checkpointing
 from training.data_flow import RouteDataFlow
 from training.loss_flow import LossFlow
@@ -34,11 +32,10 @@ class CurriculumDomainAdaptationTrainer:
         ir_teacher: Optional[nn.Module],
         optimizer: Optimizer,
         config: TrainingConfig,
-        rgb_loader: DataLoader,
-        ir_loader: Optional[DataLoader] = None,
+        data_flow: RouteDataFlow,
+        scheduler: Any,
         phase_evaluator: Any = None,
         lr_scheduler: Any = None,
-        gan_translator: Optional[nn.Module] = None,
         pseudo_label_evaluator: Any = None,
     ) -> None:
         """Receive prepared models and an optimizer bound after device placement."""
@@ -50,21 +47,8 @@ class CurriculumDomainAdaptationTrainer:
         self.device = torch.device(config.device)
         self.phase_evaluator = phase_evaluator
         self.lr_scheduler = lr_scheduler
-        self.augmentor = StudentAugmentor(config)
-        self.gan_translator = gan_translator
-        if config.workflow == "gan_bridge":
-            if gan_translator is None:
-                raise ValueError("gan_bridge requires a frozen GAN translator")
-            if rgb_teacher is None or ir_teacher is None:
-                raise ValueError("gan_bridge requires both RGB and IR teachers")
-
-        self.data_flow = RouteDataFlow(
-            rgb_loader, ir_loader, device=self.device, augmentor=self.augmentor,
-            gan_translator=gan_translator,
-        )
-        # Own the progress and lifecycle state that must survive checkpoint
-        # save/resume; execution modules do not maintain competing copies.
-        self.scheduler = self._new_scheduler()
+        self.data_flow = data_flow
+        self.scheduler = scheduler
         self.global_step = 0
         # A negative sentinel preserves the first-evaluation behavior, including
         # a first measured mAP of zero. Best metrics belong only to this trainer.
@@ -79,11 +63,6 @@ class CurriculumDomainAdaptationTrainer:
         self.pseudo_label_evaluator = pseudo_label_evaluator
         if config.pseudo_label_eval.enabled and config.workflow != "rgb_baseline" and pseudo_label_evaluator is None:
             raise ValueError("enabled pseudo-label evaluation requires an IR validation evaluator")
-
-    def _new_scheduler(self):
-        if self.config.workflow == "gan_bridge":
-            return BridgeDomainScheduler(self.config.bridge_schedule, self.config.max_iter)
-        return CurriculumScheduler(self.config)
 
     def _teacher_models(self):
         # References stay on the trainer so checkpoint keys and ownership are unchanged.
