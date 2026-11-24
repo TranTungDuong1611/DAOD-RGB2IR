@@ -1,5 +1,10 @@
 """Real FCOS training must be identical with audit labels enabled or changed."""
 
+from data.augmentations import StudentAugmentor
+from training.data_flow import RouteDataFlow
+from evaluator import TrainingEvaluator
+from scheduler import CurriculumScheduler
+
 import copy
 import json
 import logging
@@ -12,12 +17,13 @@ import torch
 from PIL import Image
 
 from config import CurriculumConfig, EMAConfig, PseudoLabelEvalConfig, TeacherSchedule
-from loss.d3t_criterion import D3TLossCriterion
-from models.d3t_wrapper import D3TWrapper
+from loss.detection_criterion import DetectionLossCriterion
+from models.detector_wrapper import DetectorWrapper
+from models.fcos_models import build_fcos_trio
 from trainer import CurriculumDomainAdaptationTrainer
 from training.bootstrap import build_pseudo_label_evaluator
 from test_curriculum_wrapper_integration import build_config
-from test_torchvision_fcos_adapter import build_adapter
+from test_fcos_adapter import build_adapter
 
 
 def make_trainer(base, directory, *, enabled, interval=2):
@@ -37,7 +43,8 @@ def make_trainer(base, directory, *, enabled, interval=2):
     config.distill.rgb_teacher = config.distill.ir_teacher = schedule
     # Exercise both teachers' existing KD paths as well as their audit passes.
     config.mid_routing.p3_ir_flow.teacher_names = ("rgb", "ir")
-    student, rgb, ir = (copy.deepcopy(base) for _ in range(3))
+    with mock.patch("models.fcos_models.build_fcos_model", return_value=copy.deepcopy(base)):
+        student, rgb, ir = build_fcos_trio(config)
     optimizer = torch.optim.SGD(student.parameters(), lr=.001, momentum=.9)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=.8)
     images = torch.full((1, 3, 32, 48), .3)
@@ -45,8 +52,11 @@ def make_trainer(base, directory, *, enabled, interval=2):
               "labels": torch.tensor([0]), "stem": "rgb-a"}
     return CurriculumDomainAdaptationTrainer(
         student, rgb, ir, optimizer, config,
-        [(images, [target], ("rgb-a",))], [(images, ("a",))], lr_scheduler=lr_scheduler,
-        pseudo_label_evaluator=build_pseudo_label_evaluator(config, logger=logging.getLogger(__name__)),
+        RouteDataFlow([(images, [target], ("rgb-a",))], [(images, ("a",))],
+                      device=config.device, augmentor=StudentAugmentor(config)),
+        CurriculumScheduler(config), lr_scheduler=lr_scheduler,
+        evaluator=TrainingEvaluator(config, teachers={"rgb": rgb, "ir": ir},
+                                    pseudo_label_evaluator=build_pseudo_label_evaluator(config, logger=logging.getLogger(__name__))),
     )
 
 
@@ -66,7 +76,7 @@ def write_annotation(directory, label="person"):
 
 
 def test_trainer_audits_fixed_ir_validation_and_resumes_without_duplicate_window():
-    base = D3TWrapper(build_adapter(), D3TLossCriterion())
+    base = DetectorWrapper(build_adapter(), DetectionLossCriterion())
     with tempfile.TemporaryDirectory() as directory:
         write_annotation(directory)
         trainer = make_trainer(base, directory, enabled=True)
@@ -95,14 +105,14 @@ def test_trainer_audits_fixed_ir_validation_and_resumes_without_duplicate_window
                 assert call.args[1] is None
         assert all(not k.startswith("sup_") for log in logs if "ir" in log["step_type"]
                    and log["phase"] != "PHASE2_TRANSITION" for k in log)
-        assert trainer.best_map == 0.
+        assert trainer.best_map == -1.  # Teacher audits do not establish student validation best.
         trainer.save_checkpoint("resume.pth")
         restored = make_trainer(base, directory, enabled=True)
         restored.load_checkpoint(str(Path(directory) / "resume.pth"))
-        assert restored.last_pseudo_label_eval_step == 8
+        assert restored.evaluator.last_pseudo_label_eval_step == 8
         assert restored.global_step == 9
         restored.train_one_iteration()  # Step 10 enters the next global window.
-        assert restored.last_pseudo_label_eval_step == 10
+        assert restored.evaluator.last_pseudo_label_eval_step == 10
         restored.save_checkpoint("resume.pth")
         resumed_again = make_trainer(base, directory, enabled=True)
         resumed_again.load_checkpoint(str(Path(directory) / "resume.pth"))
@@ -113,7 +123,7 @@ def test_trainer_audits_fixed_ir_validation_and_resumes_without_duplicate_window
 
 def test_audit_enabled_changed_or_missing_gt_preserves_losses_updates_and_rng():
     torch.manual_seed(31)
-    base = D3TWrapper(build_adapter(min_size=(64, 96)), D3TLossCriterion())
+    base = DetectorWrapper(build_adapter(min_size=(64, 96)), DetectionLossCriterion())
     runs = []
     with tempfile.TemporaryDirectory() as directory:
         for name, enabled, label in [("off", False, "person"), ("on", True, "person"),
@@ -160,7 +170,7 @@ def test_audit_enabled_changed_or_missing_gt_preserves_losses_updates_and_rng():
 
 
 def test_empty_kd_mask_is_reported_and_legacy_checkpoint_remains_loadable():
-    base = D3TWrapper(build_adapter(), D3TLossCriterion())
+    base = DetectorWrapper(build_adapter(), DetectionLossCriterion())
     with tempfile.TemporaryDirectory() as directory:
         write_annotation(directory)
         trainer = make_trainer(base, directory, enabled=True)
@@ -177,22 +187,20 @@ def test_empty_kd_mask_is_reported_and_legacy_checkpoint_remains_loadable():
         trainer.save_checkpoint("legacy.pth")
         checkpoint_path = Path(directory) / "legacy.pth"
         payload = torch.load(checkpoint_path, weights_only=False)
-        payload.pop("last_pseudo_label_eval_step")
-        payload.pop("pseudo_label_evaluator")
-        payload.pop("last_full_pseudo_label_eval_step")
-        # An older baseline config had no observer section either.
-        payload["metadata"]["config"].pop("pseudo_label_eval")
+        payload.pop("evaluation")
+        # Training resume does not require metadata from older checkpoints.
+        payload.pop("metadata")
         torch.save(payload, checkpoint_path)
         restored = make_trainer(base, directory, enabled=True)
         restored.load_checkpoint(str(checkpoint_path))
         assert restored.global_step == 8
-        assert restored.last_pseudo_label_eval_step == 0
+        assert restored.evaluator.last_pseudo_label_eval_step == 0
         restored.train_one_iteration()
-        assert restored.last_pseudo_label_eval_step == 9
+        assert restored.evaluator.last_pseudo_label_eval_step == 9
 
 
 def test_training_completion_evaluates_full_ir_validation_once_and_saves_progress():
-    base = D3TWrapper(build_adapter(), D3TLossCriterion())
+    base = DetectorWrapper(build_adapter(), DetectionLossCriterion())
     with tempfile.TemporaryDirectory() as directory:
         write_annotation(directory)
         trainer = make_trainer(base, directory, enabled=True)
@@ -214,7 +222,7 @@ def test_cli_smoke_runs_all_phases_and_persists_final_full_audit():
     import sys
     from example_flir import main, parse_args
 
-    base = D3TWrapper(build_adapter(), D3TLossCriterion())
+    base = DetectorWrapper(build_adapter(), DetectionLossCriterion())
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         write_annotation(root)
@@ -230,13 +238,13 @@ def test_cli_smoke_runs_all_phases_and_persists_final_full_audit():
         # Keep real CLI/config/data/optimizer/evaluation/checkpoint execution;
         # replace only heavyweight model assembly with actual tiny-backbone FCOS.
         with mock.patch.object(sys, "argv", args), \
-             mock.patch("training.bootstrap.build_fcos_d3t_trio",
-                        side_effect=lambda config: tuple(copy.deepcopy(base) for _ in range(3))), \
+             mock.patch("models.fcos_models.build_fcos_model",
+                        side_effect=lambda *args, **kwargs: copy.deepcopy(base)), \
              mock.patch("example_flir.configure_training_logging", return_value=root / "train.log"):
             main(parse_args())
         final = torch.load(root / "out" / "final_model.pth", weights_only=False)
         assert final["global_step"] == 4
-        assert final["last_full_pseudo_label_eval_step"] == 4
+        assert final["evaluation"]["last_full_pseudo_label_eval_step"] == 4
         records = [json.loads(line) for line in (root / "out" / "logs" / "pseudo_label_eval.jsonl").read_text().splitlines()]
         assert len(records) == 8
         assert [r["images"] for r in records if r["scope"] == "full_ir_validation"] == [5, 5]

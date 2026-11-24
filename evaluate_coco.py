@@ -6,20 +6,19 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Sequence
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
-from config import FCOSModelConfig, TrainingConfig
+from config import EvalLoaderConfig, FCOSModelConfig, TrainingConfig
 from data import (
     FLIRIRValDataset,
     FLIRRGBDataset,
-    ir_val_collate,
-    rgb_collate,
+    detection_collate,
 )
-from models.fcos_factory import CHECKPOINT_SCHEMA_VERSION, build_fcos_d3t_model
+from data.dataloaders import build_loader
+from models.fcos_models import build_fcos_model
 
 
 logger = logging.getLogger(__name__)
@@ -121,60 +120,35 @@ def summarize_coco_eval(coco_eval, class_names: Sequence[str]) -> dict[str, floa
 
 def _load_checkpoint_model(checkpoint_path: str, device: torch.device, score_thresh: float):
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    metadata = checkpoint.get("metadata")
-    if not isinstance(metadata, Mapping):
-        raise ValueError("checkpoint has no D3T metadata")
-    if metadata.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
-        raise ValueError("checkpoint schema is not supported")
-    saved_model = metadata.get("config", {}).get("model", {})
-    class_names = tuple(metadata.get("class_names", ()))
-    if not class_names or int(metadata.get("num_classes", 0)) != len(class_names):
-        raise ValueError("checkpoint class metadata is invalid")
-
-    model_config = FCOSModelConfig(
-        num_classes=len(class_names),
-        class_names=class_names,
-        weights=None,
-        classification_init_mode=metadata["classification_init_mode"],
-        pretrained_backbone=False,
-        trainable_backbone_layers=int(saved_model.get("trainable_backbone_layers", 3)),
-        min_sizes=tuple(saved_model.get("min_sizes", (640, 672, 704, 736, 768, 800))),
-        max_size=int(saved_model.get("max_size", 1333)),
-        center_sampling_radius=float(saved_model.get("center_sampling_radius", 0.0)),
-        score_thresh=score_thresh,
-        nms_thresh=float(saved_model.get("nms_thresh", 0.6)),
-        topk_candidates=int(saved_model.get("topk_candidates", 1000)),
-        detections_per_img=100,
-        vfl_alpha=float(saved_model.get("vfl_alpha", 0.75)),
-        vfl_gamma=float(saved_model.get("vfl_gamma", 2.0)),
-        vfl_weight_type=str(saved_model.get("vfl_weight_type", "iou")),
-    )
+    metadata = checkpoint["metadata"]
+    # Keep existing checkpoints readable alongside the compact model-only format.
+    saved_model = metadata.get("model", metadata.get("config", {}).get("model", {}))
+    model_config = FCOSModelConfig(**{
+        **saved_model,
+        "weights": None,
+        "pretrained_backbone": False,
+        "score_thresh": score_thresh,
+        "detections_per_img": 100,
+    })
     config = TrainingConfig(
         model=model_config,
-        teacher_mode=str(metadata.get("teacher_mode", "two_teacher")),
         device=str(device),
     )
-    model = build_fcos_d3t_model(config)
+    model = build_fcos_model(config)
     model.load_state_dict(checkpoint["student"])
     model.to(device).eval()
-    return model, class_names
+    return model, model_config.class_names
 
 
-def _build_loader(data_root: str, domain: str, batch_size: int, workers: int):
+def _build_loader(data_root: str, domain: str, batch_size: int, workers: int, device):
     if domain == "ir":
         dataset = FLIRIRValDataset(data_root, split="validation")
-        collate_fn = ir_val_collate
     else:
         dataset = FLIRRGBDataset(data_root, split="validation")
-        collate_fn = rgb_collate
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=workers,
-        pin_memory=True,
-        collate_fn=collate_fn,
-    )
+    settings = EvalLoaderConfig(batch_size=batch_size, num_workers=workers)
+    return build_loader(dataset, settings, collate_fn=detection_collate, device=device,
+                        shuffle=False, drop_last=False,
+                        generator=torch.Generator().manual_seed(settings.seed))
 
 
 def _collect(model, loader, device: torch.device):
@@ -216,7 +190,7 @@ def evaluate(args) -> dict[str, float]:
         args.checkpoint, device, args.score_thresh
     )
     loader = _build_loader(
-        args.data_root, args.domain, args.batch_size, args.workers
+        args.data_root, args.domain, args.batch_size, args.workers, device
     )
     logger.info(
         "COCO evaluation: checkpoint=%s domain=%s images=%d device=%s",

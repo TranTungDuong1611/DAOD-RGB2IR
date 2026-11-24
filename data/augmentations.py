@@ -4,6 +4,8 @@ import random
 import torchvision.transforms.functional as TF
 from typing import List, Dict, Optional, Tuple
 
+from saga import SoftSAGA
+
 def default_rgb_transform() -> T.Compose:
     """ToTensor only — FCOS GeneralizedRCNNTransform handles ImageNet normalisation."""
     return T.Compose([T.ToTensor()])
@@ -27,6 +29,7 @@ class StudentAugmentor:
             config: The TrainingConfig object containing 'aug' settings.
         """
         self.cfg = config.aug
+        self.saga = SoftSAGA()
 
     def apply_weak_aug(
         self, 
@@ -87,17 +90,3 @@ class StudentAugmentor:
             images = torch.clamp((images - mean) * factor + mean, 0.0, 1.0)
 
         return images
-
-    def apply_strong_aug(
-        self, 
-        images: torch.Tensor, 
-        targets: Optional[List[Dict]] = None
-    ) -> Tuple[torch.Tensor, Optional[List[Dict]]]:
-        """
-        Strong Augmentation: Combined Geometric (Weak) + Photometric transformations.
-        Used for the Student model.
-        """
-        images, targets, _ = self.apply_weak_aug(images, targets)
-        images = self.apply_photometric_aug(images)
-        
-        return images, targets

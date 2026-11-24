@@ -11,8 +11,7 @@ from .dataloaders import (
     build_ir_train_dataloader,
     build_ir_val_dataloader,
     ir_collate,
-    ir_val_collate,
-    rgb_collate,
+    detection_collate,
 )
 
 from .preprocessing import (
@@ -25,9 +24,8 @@ __all__ = [
     "FLIRIRDataset",
     "FLIRIRValDataset",
 
-    "rgb_collate",
+    "detection_collate",
     "ir_collate",
-    "ir_val_collate",
 
     "build_dataloaders",
     "build_rgb_train_dataloader",

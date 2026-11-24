@@ -1,4 +1,4 @@
-"""Detector-independent D3T orchestration."""
+"""Detector-independent detection and distillation orchestration."""
 
 from dataclasses import replace
 from typing import Optional, Sequence, Tuple
@@ -6,10 +6,10 @@ from typing import Optional, Sequence, Tuple
 import torch
 from torch import Tensor, nn
 
-from .d3t_adapter import (
+from .detector_adapter import (
     AdapterOutput,
     CriterionResult,
-    D3TCriterion,
+    DetectorCriterion,
     DetectorAdapter,
     DistillationSettings,
     Losses,
@@ -17,16 +17,10 @@ from .d3t_adapter import (
 )
 
 
-_DEFAULT_DISTILLATION_SETTINGS = DistillationSettings(
-    top_ratio=1.0,
-    min_hm=0.0,
-)
-
-
-class D3TWrapper(nn.Module):
+class DetectorWrapper(nn.Module):
     """Combine one detector adapter with one detector-neutral criterion."""
 
-    def __init__(self, adapter: DetectorAdapter, criterion: D3TCriterion):
+    def __init__(self, adapter: DetectorAdapter, criterion: DetectorCriterion):
         super().__init__()
         self.adapter = adapter
         self.criterion = criterion
@@ -52,25 +46,13 @@ class D3TWrapper(nn.Module):
         return image_list
 
     @staticmethod
-    def _ids_from_targets(
-        targets: Optional[Targets], batch_size: int
-    ) -> Optional[Tuple[str, ...]]:
-        if targets is None or not all("stem" in target for target in targets):
+    def _normalize_sample_ids(sample_ids, batch_size):
+        if sample_ids is None:
             return None
-        stems = tuple(target["stem"] for target in targets)
-        if all(isinstance(stem, str) and stem.strip() for stem in stems):
-            return stems
-        return None
-
-    @staticmethod
-    def _criterion_result(result) -> CriterionResult:
-        if isinstance(result, CriterionResult):
-            return result
-        if isinstance(result, dict):
-            return CriterionResult(losses=result, metrics={})
-        raise TypeError(
-            "criterion must return CriterionResult (or a loss dict for compatibility)"
-        )
+        ids = tuple(sample_ids)
+        if len(ids) != batch_size or any(not isinstance(value, str) or not value for value in ids):
+            raise ValueError("sample_ids must contain one non-empty string per image")
+        return ids
 
     @staticmethod
     def _merge_losses(*loss_maps: Losses) -> Losses:
@@ -79,7 +61,7 @@ class D3TWrapper(nn.Module):
             duplicates = merged.keys() & losses.keys()
             if duplicates:
                 raise ValueError(
-                    f"Duplicate native/D3T loss names: {sorted(duplicates)}"
+                    f"Duplicate native/criterion loss names: {sorted(duplicates)}"
                 )
             merged.update(losses)
         return merged
@@ -95,10 +77,7 @@ class D3TWrapper(nn.Module):
         if targets is not None and len(targets) != len(image_list):
             raise ValueError("targets must match the image batch length")
 
-        resolved_ids = sample_ids
-        if resolved_ids is None:
-            resolved_ids = self._ids_from_targets(targets, len(image_list))
-        resolved_ids = self.adapter.validate_sample_ids(resolved_ids, len(image_list))
+        resolved_ids = self._normalize_sample_ids(sample_ids, len(image_list))
 
         if resize_short_edge is not None and resize_short_edge <= 0:
             raise ValueError("resize_short_edge must be positive")
@@ -108,39 +87,29 @@ class D3TWrapper(nn.Module):
                 targets,
                 sample_ids=resolved_ids,
             )
-        if len(output.predictions) != len(image_list):
-            raise ValueError("Adapter output must match the image batch length")
         if output.sample_ids is None and resolved_ids is not None:
             output = replace(output, sample_ids=resolved_ids)
-        elif output.sample_ids is not None:
-            self.adapter.validate_sample_ids(output.sample_ids, len(image_list))
-            if resolved_ids is not None and tuple(output.sample_ids) != tuple(resolved_ids):
-                raise ValueError("adapter output sample IDs differ from the input batch")
         return output
 
     def supervised_from_output(
         self, output: AdapterOutput, targets: Targets
-    ) -> Losses:
+    ) -> CriterionResult:
         if len(output.predictions) != len(targets):
             raise ValueError("targets must match the output batch length")
         batch = self.adapter.prepare_supervised(output, targets)
-        result = self._criterion_result(self.criterion.supervised(batch))
-        return self._merge_losses(result.losses, batch.native_losses)
+        result = self.criterion.supervised(batch)
+        return replace(result, losses=self._merge_losses(result.losses, batch.native_losses))
 
     def distill_from_outputs(
         self,
         student_output: AdapterOutput,
         teacher_output: AdapterOutput,
-        settings: Optional[DistillationSettings] = None,
+        settings: DistillationSettings,
     ) -> CriterionResult:
         pair = self.adapter.prepare_distillation(student_output, teacher_output)
-        result = self._criterion_result(
-            self.criterion.distillation(
-                pair.detached_teacher(),
-                settings or _DEFAULT_DISTILLATION_SETTINGS,
-            )
+        return self.criterion.distillation(
+            pair.detached_teacher(), settings,
         )
-        return result
 
     def forward(
         self,
@@ -158,37 +127,32 @@ class D3TWrapper(nn.Module):
     def distill(
         self,
         student_images: Sequence[Tensor] | Tensor,
-        teacher: "D3TWrapper",
+        teacher: "DetectorWrapper",
         teacher_images: Sequence[Tensor] | Tensor,
-        settings: Optional[DistillationSettings] = None,
+        settings: DistillationSettings,
         sample_ids: Optional[Sequence[str]] = None,
         teacher_sample_ids: Optional[Sequence[str]] = None,
-    ) -> Losses:
+    ) -> CriterionResult:
         """Convenience one-teacher call; the trainer owns routing and EMA."""
 
         if teacher.training or any(
             module.training for module in teacher.adapter.modules()
         ):
             raise ValueError("Teacher and its adapter must be in eval mode")
-        student_list = self._normalize_images(student_images)
-        teacher_list = self._normalize_images(teacher_images)
-        if len(student_list) != len(teacher_list):
-            raise ValueError("Distillation requires matching image batch lengths")
-
         resize_short_edge = self.select_training_resize_short_edge()
         student_output = self.raw(
-            student_list,
+            student_images,
             sample_ids=sample_ids,
             resize_short_edge=resize_short_edge,
         )
         with torch.no_grad():
             teacher_output = teacher.raw(
-                teacher_list,
+                teacher_images,
                 sample_ids=teacher_sample_ids,
                 resize_short_edge=resize_short_edge,
             )
         return self.distill_from_outputs(
             student_output,
             teacher_output,
-            settings or _DEFAULT_DISTILLATION_SETTINGS,
-        ).losses
+            settings,
+        )

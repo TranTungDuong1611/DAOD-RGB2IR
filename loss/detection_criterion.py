@@ -1,4 +1,4 @@
-"""Detector-neutral supervised and distillation losses for D3T."""
+"""Detector-neutral supervised and distillation losses."""
 
 import math
 from typing import Optional, Sequence
@@ -7,12 +7,13 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 
-from models.d3t_adapter import (
+from configs.distillation import DistillConfig
+from configs.model import FCOSModelConfig
+from models.detector_adapter import (
     CriterionResult,
-    D3TCriterion,
+    DetectorCriterion,
     DistillationPair,
     DistillationSettings,
-    Losses,
     SupervisedBatch,
 )
 
@@ -22,7 +23,7 @@ def _hm_focal_elementwise(
     targets: Tensor,
     alpha: float,
     gamma: float,
-    weight_type: str = "iou",
+    weight_type: str = FCOSModelConfig.vfl_weight_type,
 ) -> Tensor:
     """Return unreduced HM/varifocal-style BCE terms."""
 
@@ -154,15 +155,15 @@ def select_distillation_masks(predictions, settings):
     return tuple(selected.split([len(p.boxes) for p in predictions]))
 
 
-class D3TLossCriterion(D3TCriterion):
-    """HM-Focal supervised loss and position-wise D3T distillation."""
+class DetectionLossCriterion(DetectorCriterion):
+    """HM-Focal supervised loss and position-wise distillation."""
 
     def __init__(
         self,
-        alpha: float = 0.75,
-        gamma: float = 2.0,
-        weight_type: str = "iou",
-        kd_gamma: float = 2.0,
+        alpha: float = FCOSModelConfig.vfl_alpha,
+        gamma: float = FCOSModelConfig.vfl_gamma,
+        weight_type: str = FCOSModelConfig.vfl_weight_type,
+        kd_gamma: float = DistillConfig.kd_gamma,
     ) -> None:
         super().__init__()
         if alpha < 0 or gamma < 0 or kd_gamma < 0:
@@ -176,8 +177,6 @@ class D3TLossCriterion(D3TCriterion):
     def _supervised_tensors(batch: SupervisedBatch):
         predictions = batch.predictions
         targets = batch.targets
-        if len(predictions) != len(targets):
-            raise ValueError("supervised predictions and targets must be aligned")
         class_logits = _cat_or_none([p.class_logits for p in predictions])
         boxes = _cat_or_none([p.boxes for p in predictions])
         quality_logits = _cat_or_none([p.quality_logits for p in predictions])
@@ -195,7 +194,7 @@ class D3TLossCriterion(D3TCriterion):
             foreground,
         )
 
-    def supervised(self, batch: SupervisedBatch) -> Losses:
+    def supervised(self, batch: SupervisedBatch) -> CriterionResult:
         (
             class_logits,
             boxes,
@@ -207,7 +206,7 @@ class D3TLossCriterion(D3TCriterion):
         ) = self._supervised_tensors(batch)
         if class_logits is None:
             zero = _zero_with_grad()
-            return {"loss_cls": zero, "loss_box": zero, "loss_quality": zero}
+            return CriterionResult({"loss_cls": zero, "loss_box": zero, "loss_quality": zero})
 
         num_foreground = int(foreground.sum().item())
         denominator = max(1, num_foreground)
@@ -231,18 +230,16 @@ class D3TLossCriterion(D3TCriterion):
         else:
             loss_box = _zero_with_grad(boxes)
             loss_quality = _zero_with_grad(quality_logits)
-        return {
+        return CriterionResult({
             "loss_cls": loss_cls,
             "loss_box": loss_box,
             "loss_quality": loss_quality,
-        }
+        })
 
     @staticmethod
     def _pair_tensors(pair: DistillationPair):
         student = pair.student
         teacher = pair.teacher
-        if len(student) != len(teacher):
-            raise ValueError("distillation pair image counts must match")
         s_cls = _cat_or_none([p.class_logits for p in student])
         t_cls = _cat_or_none([p.class_logits for p in teacher])
         s_boxes = _cat_or_none([p.boxes for p in student])
@@ -252,7 +249,7 @@ class D3TLossCriterion(D3TCriterion):
         return s_cls, t_cls, s_boxes, t_boxes, s_quality, t_quality
 
     def _uhl_loss(self, pair: DistillationPair, selected: Tensor) -> Tensor:
-        """Build D3T overlap targets per image and supervise student logits."""
+        """Build overlap targets per image and supervise student logits."""
 
         logits = []
         targets = []
@@ -308,14 +305,6 @@ class D3TLossCriterion(D3TCriterion):
             "kd_hm_sum": torch.tensor(hm_sum, device=device),
             "kd_empty_mask": torch.tensor(empty, device=device),
         }
-        # Short aliases make the metric contract convenient for standalone
-        # callers while the prefixed names remain stable for trainer logging.
-        values.update({
-            "selected_count": values["kd_selected_count"],
-            "selected_ratio": values["kd_selected_ratio"],
-            "hm_sum": values["kd_hm_sum"],
-            "empty_mask": values["kd_empty_mask"],
-        })
         return values
 
     def distillation(
@@ -412,7 +401,7 @@ class D3TLossCriterion(D3TCriterion):
 
 
 __all__ = [
-    "D3TLossCriterion",
+    "DetectionLossCriterion",
     "select_distillation_masks",
     "_hm_focal_elementwise",
     "_iou_loss_xyxy",

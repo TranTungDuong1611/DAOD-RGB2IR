@@ -6,9 +6,9 @@ import pytest
 import torch
 
 from data.ir_annotations import IRAnnotation
-from models.d3t_adapter import AdapterOutput, Predictions
-from models.torchvision_fcos_adapter import FCOSAdapterContext
-from test_torchvision_fcos_adapter import build_adapter
+from models.detector_adapter import AdapterOutput, Predictions
+from models.fcos_adapter import FCOSAdapterContext
+from test_fcos_adapter import build_adapter
 
 
 def fixture_output():
@@ -20,7 +20,7 @@ def fixture_output():
     anchors = torch.tensor([[2., 2., 4., 4.], [3., 3., 5., 5.], [20., 10., 22., 12.]])
     context = FCOSAdapterContext(
         transformed_images=SimpleNamespace(image_sizes=[(20, 40)]),
-        transformed_targets=None, original_image_sizes=((10, 20),), features=(),
+        transformed_targets=None, original_image_sizes=((10, 20),),
         anchors_per_image=(anchors,), anchors_per_level=((anchors,),),
         num_anchors_per_level=(3,), raw_head_outputs={}, sample_ids=("a",)
     )
@@ -28,7 +28,7 @@ def fixture_output():
 
 
 def test_dense_audit_uses_fcos_assignment_and_actual_resize_without_mutation():
-    from training.pseudo_label_eval import evaluate_pseudo_labels
+    from evaluator import evaluate_pseudo_labels
 
     output = fixture_output()
     target = {"boxes": torch.tensor([[1., 1., 3., 3.]]), "labels": torch.tensor([0])}
@@ -51,7 +51,7 @@ def test_dense_audit_uses_fcos_assignment_and_actual_resize_without_mutation():
 
 
 def test_missing_labels_are_excluded_but_annotated_empty_is_background():
-    from training.pseudo_label_eval import evaluate_pseudo_labels
+    from evaluator import evaluate_pseudo_labels
 
     output = fixture_output()
     empty = {"boxes": torch.empty(0, 4), "labels": torch.empty(0, dtype=torch.long)}
@@ -72,7 +72,7 @@ def test_missing_labels_are_excluded_but_annotated_empty_is_background():
 
 
 def test_no_selected_rows_has_coverage_zero_without_fake_quality_score():
-    from training.pseudo_label_eval import evaluate_pseudo_labels
+    from evaluator import evaluate_pseudo_labels
 
     target = {"boxes": torch.tensor([[1., 1., 3., 3.]]), "labels": torch.tensor([0])}
     metrics = evaluate_pseudo_labels(
@@ -85,14 +85,14 @@ def test_no_selected_rows_has_coverage_zero_without_fake_quality_score():
 
 
 def test_audit_rejects_misaligned_masks_instead_of_truncating_batch():
-    from training.pseudo_label_eval import evaluate_pseudo_labels
+    from evaluator import evaluate_pseudo_labels
 
     with pytest.raises(ValueError, match="align"):
         evaluate_pseudo_labels(build_adapter(), fixture_output(), (), (), iou_threshold=.5)
 
 
 def test_correct_dense_duplicates_cover_one_object_and_nonfinite_rows_stay_invalid():
-    from training.pseudo_label_eval import evaluate_pseudo_labels
+    from evaluator import evaluate_pseudo_labels
 
     output = fixture_output()
     prediction, = output.predictions

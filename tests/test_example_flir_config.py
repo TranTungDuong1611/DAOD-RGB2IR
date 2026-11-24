@@ -5,12 +5,41 @@ from unittest import mock
 import torch
 from torch import nn
 
-from example_flir import _move_model_trio_to_device, make_training_config, parse_args
+from example_flir import build_training_config, parse_args
+from training.bootstrap import move_model_trio_to_device
 from config import CurriculumConfig, FCOSModelConfig, Phase
-from models.torchvision_fcos_adapter import ClassificationInitMode
+from models.fcos_adapter import ClassificationInitMode
 
 
 class EntrypointConfigTests(unittest.TestCase):
+    def test_cli_and_direct_config_share_defaults_for_each_run_budget(self):
+        from dataclasses import asdict
+        from config import DataConfig, TrainingConfig
+
+        for budget, boundaries in [(1, (1, 1, 1)), (4, (1, 2, 3)),
+                                    (100, (20, 50, 80)), (10000, (2000, 5000, 8000))]:
+            with self.subTest(budget=budget), mock.patch.object(sys, "argv", [
+                "example_flir.py", "--data_root", "synthetic", "--total_iters", str(budget),
+            ]):
+                cli = build_training_config(parse_args())
+                direct = TrainingConfig(total_iters=budget, data=DataConfig(root="synthetic"))
+                self.assertEqual((direct.curriculum.phase1_end, direct.curriculum.phase2_end,
+                                  direct.curriculum.phase3_end), boundaries)
+                self.assertEqual(asdict(cli), asdict(direct))
+
+    def test_cli_interleaved_mode_changes_the_effective_route_sequence(self):
+        from scheduler import CurriculumScheduler
+
+        with mock.patch.object(sys, "argv", [
+            "example_flir.py", "--data_root", "synthetic", "--total_iters", "10",
+            "--phase1-end", "0", "--phase2-end", "10", "--phase3-end", "10",
+            "--domain-sampling", "interleaved",
+        ]):
+            config = build_training_config(parse_args())
+        schedule = CurriculumScheduler(config)
+        self.assertEqual(schedule.get_next_step(0), "p2_rgb_flow")
+        self.assertEqual(schedule.get_next_step(1), "p2_ir_flow")
+
     def test_phase4_rgb_sampling_rejects_invalid_fractions(self):
         for ratio in (-0.1, 1.1, float("nan"), float("inf")):
             with self.subTest(ratio=ratio):
@@ -21,7 +50,7 @@ class EntrypointConfigTests(unittest.TestCase):
         with mock.patch.object(
             sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
         ):
-            config = make_training_config(parse_args())
+            config = build_training_config(parse_args())
         self.assertEqual(getattr(config.curriculum, "phase4_rgb_sampling_ratio", None), 0.2)
 
     def test_cli_can_disable_phase4_rgb_sampling(self):
@@ -33,14 +62,14 @@ class EntrypointConfigTests(unittest.TestCase):
                 args = parse_args()
             except SystemExit:
                 self.fail("The phase-4 RGB ratio option must be accepted by the CLI")
-        config = make_training_config(args)
+        config = build_training_config(args)
         self.assertEqual(config.curriculum.phase4_rgb_sampling_ratio, 0.0)
 
     def test_phase4_rgb_route_provides_supervision_without_teacher_updates(self):
         with mock.patch.object(
             sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
         ):
-            config = make_training_config(parse_args())
+            config = build_training_config(parse_args())
 
         route = config.mid_routing.get_routing("p4_rgb_supervised")
         self.assertTrue(route.use_gt)
@@ -54,7 +83,7 @@ class EntrypointConfigTests(unittest.TestCase):
         with mock.patch.object(
             sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
         ):
-            config = make_training_config(parse_args())
+            config = build_training_config(parse_args())
 
         self.assertEqual(
             config.model.min_sizes,
@@ -66,7 +95,7 @@ class EntrypointConfigTests(unittest.TestCase):
         with mock.patch.object(
             sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
         ):
-            config = make_training_config(parse_args())
+            config = build_training_config(parse_args())
 
         self.assertEqual(config.model.center_sampling_radius, 0.0)
 
@@ -74,7 +103,7 @@ class EntrypointConfigTests(unittest.TestCase):
         with mock.patch.object(
             sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
         ):
-            config = make_training_config(parse_args())
+            config = build_training_config(parse_args())
 
         self.assertEqual(config.distill.hm_alpha, 0.5)
         self.assertEqual(config.distill.hm_beta, 0.5)
@@ -96,7 +125,7 @@ class EntrypointConfigTests(unittest.TestCase):
                 "2.5",
             ],
         ):
-            config = make_training_config(parse_args())
+            config = build_training_config(parse_args())
 
         self.assertEqual(config.distill.hm_alpha, 0.25)
         self.assertEqual(config.distill.hm_beta, 0.75)
@@ -114,7 +143,7 @@ class EntrypointConfigTests(unittest.TestCase):
                 "100",
             ],
         ):
-            config = make_training_config(parse_args())
+            config = build_training_config(parse_args())
 
         self.assertEqual(config.curriculum.phase1_end, 20)
         self.assertEqual(config.ema.start_steps, config.curriculum.phase1_end)
@@ -133,7 +162,7 @@ class EntrypointConfigTests(unittest.TestCase):
                 "35",
             ],
         ):
-            config = make_training_config(parse_args())
+            config = build_training_config(parse_args())
 
         self.assertEqual(config.ema.start_steps, 35)
 
@@ -155,7 +184,7 @@ class EntrypointConfigTests(unittest.TestCase):
                 "25000",
             ],
         ):
-            config = make_training_config(parse_args())
+            config = build_training_config(parse_args())
 
         self.assertEqual(config.curriculum.phase1_end, 2000)
         self.assertEqual(config.curriculum.phase2_end, 10000)
@@ -166,7 +195,7 @@ class EntrypointConfigTests(unittest.TestCase):
         with mock.patch.object(
             sys, "argv", ["example_flir.py", "--data_root", "synthetic"]
         ):
-            config = make_training_config(parse_args())
+            config = build_training_config(parse_args())
 
         self.assertEqual(config.model.score_thresh, 0.05)
         self.assertEqual(FCOSModelConfig().score_thresh, 0.05)
@@ -175,7 +204,7 @@ class EntrypointConfigTests(unittest.TestCase):
         student = nn.Linear(1, 1)
         rgb_teacher = nn.Linear(1, 1)
 
-        moved = _move_model_trio_to_device(
+        moved = move_model_trio_to_device(
             student, rgb_teacher, None, torch.device("cpu")
         )
 
@@ -210,10 +239,9 @@ class EntrypointConfigTests(unittest.TestCase):
         ]
         with mock.patch.object(sys, "argv", argv):
             args = parse_args()
-        config = make_training_config(args)
+        config = build_training_config(args)
 
         self.assertEqual(config.total_iters, 17)
-        self.assertEqual(config.max_iter, 17)
         self.assertEqual(config.loader.train.batch_size, 2)
         self.assertEqual(config.loader.eval.batch_size, 3)
         self.assertEqual(config.loader.train.num_workers, 0)

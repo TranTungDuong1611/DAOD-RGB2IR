@@ -19,19 +19,24 @@ from config import (
     TrainingConfig,
     TeacherSchedule,
 )
-from models.d3t_adapter import (
+from models.detector_adapter import (
     AdapterOutput,
     CriterionResult,
-    D3TCriterion,
+    DetectorCriterion,
     DetectorAdapter,
     DistillationPair,
+    DistillationSettings,
     Predictions,
     SupervisedBatch,
 )
-from models.d3t_wrapper import D3TWrapper
+from models.detector_wrapper import DetectorWrapper
+from data.augmentations import StudentAugmentor
+from training.data_flow import RouteDataFlow
+from evaluator import TrainingEvaluator
 from scheduler import CurriculumScheduler
 from trainer import CurriculumDomainAdaptationTrainer
-from ema import copy_student_to_teacher, ema_update
+from models.fcos_models import build_fcos_trio, copy_student_to_teacher, ema_update
+from training.loss_flow import LossFlow
 
 
 class TinyAdapter(DetectorAdapter):
@@ -75,18 +80,18 @@ class TinyAdapter(DetectorAdapter):
         return []
 
 
-class TinyCriterion(D3TCriterion):
+class TinyCriterion(DetectorCriterion):
     def __init__(self):
         super().__init__()
         self.distill_calls = 0
 
     def supervised(self, batch):
-        return {
+        return CriterionResult({
             "loss_cls": sum(
                 prediction.class_logits.square().mean()
                 for prediction in batch.predictions
             )
-        }
+        })
 
     def distillation(self, pair, settings):
         self.distill_calls += 1
@@ -137,17 +142,6 @@ def collate_rgb(batch):
 
 def collate_ir(batch):
     return torch.stack([item[0] for item in batch]), tuple(item[1] for item in batch)
-
-
-class StatefulPhaseEvaluator:
-    def __init__(self, state=None):
-        self.state = state or {}
-
-    def state_dict(self):
-        return dict(self.state)
-
-    def load_state_dict(self, state):
-        self.state = dict(state)
 
 
 class StatefulLRScheduler:
@@ -207,9 +201,9 @@ def build_config(**kwargs):
 
 
 def build_trainer(config):
-    student = D3TWrapper(TinyAdapter(), TinyCriterion())
-    rgb_teacher = D3TWrapper(TinyAdapter(), TinyCriterion())
-    ir_teacher = D3TWrapper(TinyAdapter(), TinyCriterion())
+    student = DetectorWrapper(TinyAdapter(), TinyCriterion())
+    with mock.patch("models.fcos_models.build_fcos_model", return_value=student):
+        student, rgb_teacher, ir_teacher = build_fcos_trio(config)
     rgb_loader = DataLoader(RGBDataset(), batch_size=1, collate_fn=collate_rgb)
     ir_loader = DataLoader(IRDataset(), batch_size=1, collate_fn=collate_ir)
     optimizer = torch.optim.SGD(student.parameters(), lr=0.1)
@@ -219,13 +213,42 @@ def build_trainer(config):
         ir_teacher=ir_teacher,
         optimizer=optimizer,
         config=config,
-        rgb_loader=rgb_loader,
-        ir_loader=ir_loader,
+        data_flow=RouteDataFlow(rgb_loader, ir_loader, device="cpu", augmentor=StudentAugmentor(config)),
+        scheduler=CurriculumScheduler(config),
+        evaluator=TrainingEvaluator(config, teachers={"rgb": rgb_teacher, "ir": ir_teacher}),
     )
     return trainer, student, rgb_teacher, ir_teacher
 
 
 class CurriculumIntegrationTests(unittest.TestCase):
+    def test_interleaved_routes_train_and_resume_through_the_existing_trainer(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            config = build_config(
+                output_dir=output_dir, total_iters=10,
+                ema=EMAConfig(alpha=0.0, start_steps=0),
+                curriculum=CurriculumConfig(
+                    phase1_end=0, phase2_end=10, phase3_end=10,
+                    phase2_rgb_sampling_ratio=0.7, sampling_mode="interleaved",
+                ),
+            )
+            trainer, student, rgb_teacher, ir_teacher = build_trainer(config)
+            initial_weight = student.adapter.weight.detach().clone()
+            logs = [trainer.train_one_iteration() for _ in range(4)]
+            self.assertEqual(
+                [log["step_type"] for log in logs],
+                ["p2_rgb_flow", "p2_ir_flow", "p2_rgb_flow", "p2_rgb_flow"],
+            )
+            self.assertFalse(torch.equal(student.adapter.weight, initial_weight))
+            self.assertEqual(rgb_teacher.adapter.forward_calls, 3)
+            self.assertEqual(ir_teacher.adapter.forward_calls, 1)
+            trainer.save_checkpoint("interleaved.pth")
+            resumed, _, _, _ = build_trainer(config)
+            resumed.load_checkpoint(f"{output_dir}/interleaved.pth")
+            self.assertEqual(
+                [resumed.train_one_iteration()["step_type"] for _ in range(6)],
+                ["p2_rgb_flow", "p2_ir_flow", "p2_rgb_flow", "p2_rgb_flow", "p2_ir_flow", "p2_rgb_flow"],
+            )
+
     def _phase4_config(self, *, ratio=0.2, output_dir="outputs"):
         config = build_config(
             curriculum=CurriculumConfig(
@@ -355,6 +378,11 @@ class CurriculumIntegrationTests(unittest.TestCase):
             self.assertEqual(resumed.lr_scheduler.steps, 1)
 
     def test_uhl_uses_its_dedicated_component_weight(self):
+        class UHLCriterion(TinyCriterion):
+            def distillation(self, pair, settings):
+                result = super().distillation(pair, settings)
+                return CriterionResult({"loss_kd_uhl": result.losses["loss_kd_cls"]}, {})
+
         loss_config = LossConfig(
             weight_logits=4.0,
             weight_deltas=3.0,
@@ -362,11 +390,27 @@ class CurriculumIntegrationTests(unittest.TestCase):
             weight_uhl=0.25,
         )
 
-        weight = CurriculumDomainAdaptationTrainer._component_weight(
-            "loss_kd_uhl", loss_config
+        flow = LossFlow(
+            uhl=loss_config.weight_uhl, quality=loss_config.weight_quality,
+            deltas=loss_config.weight_deltas, logits=loss_config.weight_logits,
+        )
+        student = DetectorWrapper(TinyAdapter(), UHLCriterion())
+        teacher = DetectorWrapper(TinyAdapter(), TinyCriterion()).requires_grad_(False)
+        with torch.no_grad():
+            teacher.adapter.weight.fill_(3.0)
+        images = torch.zeros(1, 3, 16, 16)
+        flow.distill(
+            student, student.raw(images, sample_ids=("sample",)),
+            teacher.raw(images, sample_ids=("sample",)), None,
+            teacher_name="ir", phase_weight=0.5,
         )
 
-        self.assertEqual(weight, 0.25)
+        # Raw squared error is 4, scaled by UHL weight .25 and phase weight .5.
+        self.assertEqual(flow.total_loss.item(), 0.5)
+        self.assertEqual(flow.logs["loss_kd_uhl_ir"], 0.5)
+        flow.total_loss.backward()
+        self.assertEqual(student.adapter.weight.grad.item(), -0.5)
+        self.assertIsNone(teacher.adapter.weight.grad)
 
     def test_ema_copies_integral_buffers_and_interpolates_float_buffers(self):
         student = nn.BatchNorm1d(2)
@@ -417,32 +461,30 @@ class CurriculumIntegrationTests(unittest.TestCase):
             )
 
             trainer.save_checkpoint("resume.pth")
-            with mock.patch("training.teachers.copy_student_to_teacher") as hard_copy:
+            with mock.patch("models.fcos_models.copy_student_to_teacher") as hard_copy:
                 trainer.load_checkpoint(
                     f"{output_dir}/resume.pth"
                 )
-                trainer._ensure_ema_initialized()
+                trainer.train_one_iteration()
                 hard_copy.assert_not_called()
 
     def test_checkpoint_restores_phase_evaluator_state(self):
         with tempfile.TemporaryDirectory() as output_dir:
             config = build_config(output_dir=output_dir)
             trainer, _, _, _ = build_trainer(config)
-            trainer.phase_evaluator = StatefulPhaseEvaluator(
-                {"best_ir_map": 0.61, "history": [{"global_step": 3}]}
-            )
+            trainer.evaluator.history = [{"global_step": 3}]
+            trainer.best_map = 0.61
             trainer.save_checkpoint("evaluator-state.pth")
 
             resumed, _, _, _ = build_trainer(config)
-            resumed.phase_evaluator = StatefulPhaseEvaluator()
             resumed.load_checkpoint(f"{output_dir}/evaluator-state.pth")
 
-            self.assertEqual(resumed.phase_evaluator.state["best_ir_map"], 0.61)
+            self.assertEqual(resumed.best_map, 0.61)
             self.assertEqual(
-                resumed.phase_evaluator.state["history"], [{"global_step": 3}]
+                resumed.evaluator.history, [{"global_step": 3}]
             )
 
-    def test_checkpoint_rejects_missing_enabled_teacher_state(self):
+    def test_missing_teacher_state_raises_from_pytorch_load_state_dict(self):
         with tempfile.TemporaryDirectory() as output_dir:
             config = build_config(output_dir=output_dir)
             trainer, _, _, _ = build_trainer(config)
@@ -455,7 +497,7 @@ class CurriculumIntegrationTests(unittest.TestCase):
             torch.save(checkpoint, checkpoint_path)
 
             resumed, _, _, _ = build_trainer(config)
-            with self.assertRaisesRegex(ValueError, "ir_teacher"):
+            with self.assertRaises(TypeError):
                 resumed.load_checkpoint(checkpoint_path)
 
     def test_trainer_can_run_with_only_the_selected_teacher(self):
@@ -470,26 +512,44 @@ class CurriculumIntegrationTests(unittest.TestCase):
         self.assertIn("loss_kd_cls_rgb", logs)
 
     def test_p2_ir_route_keeps_rgb_ground_truth(self):
-        config = build_config()
+        config = build_config(curriculum=CurriculumConfig(
+            phase1_end=0, phase2_end=10, phase3_end=20,
+            phase2_rgb_sampling_ratio=0.0,
+        ))
         trainer, _, _, _ = build_trainer(config)
-        route = config.mid_routing.p2_ir_flow
-        data = trainer._prepare_data_by_route("p2_ir_flow", route)
-        self.assertIsNotNone(data["targets"])
-        self.assertEqual(data["sample_ids"], ("rgb-0",))
-        self.assertEqual(data["targets"][0]["stem"], "rgb-0")
+        with mock.patch.object(trainer.student, "raw", wraps=trainer.student.raw) as raw:
+            logs = trainer.train_one_iteration()
+        self.assertEqual(logs["step_type"], "p2_ir_flow")
+        targets = raw.call_args.args[1]
+        self.assertIsNotNone(targets)
+        self.assertEqual(raw.call_args.kwargs["sample_ids"], ("rgb-0",))
+        self.assertEqual(targets[0]["stem"], "rgb-0")
+        self.assertGreater(logs["sup_loss_cls"], 0)
 
     def test_ir_route_uses_one_sample_for_both_views(self):
-        config = build_config()
+        config = build_config(
+            curriculum=CurriculumConfig(
+                phase1_end=0, phase2_end=0, phase3_end=20,
+                phase3_rgb_sampling_ratio=0.0,
+            ),
+            ema=EMAConfig(alpha=0.0, start_steps=0),
+        )
         trainer, _, _, _ = build_trainer(config)
-        route = config.mid_routing.p3_ir_flow
-        data = trainer._prepare_data_by_route("p3_ir_flow", route)
-        self.assertEqual(data["sample_ids"], ("ir-0",))
-        self.assertTrue(torch.equal(data["student_images"], data["teacher_images"]))
-        self.assertIsNone(data["targets"])
+        with (
+            mock.patch.object(trainer.student, "raw", wraps=trainer.student.raw) as student_raw,
+            mock.patch.object(trainer.ir_teacher, "raw", wraps=trainer.ir_teacher.raw) as teacher_raw,
+        ):
+            logs = trainer.train_one_iteration()
+        self.assertEqual(logs["step_type"], "p3_ir_flow")
+        self.assertEqual(student_raw.call_args.kwargs["sample_ids"], ("ir-0",))
+        self.assertEqual(teacher_raw.call_args.kwargs["sample_ids"], ("ir-0",))
+        self.assertTrue(torch.equal(student_raw.call_args.args[0], teacher_raw.call_args.args[0]))
+        self.assertIsNone(student_raw.call_args.args[1])
+        self.assertFalse(any(name.startswith("sup_") for name in logs))
 
     def test_positionwise_wrapper_rejects_different_sample_ids(self):
-        student = D3TWrapper(TinyAdapter(), TinyCriterion())
-        teacher = D3TWrapper(TinyAdapter(), TinyCriterion()).eval()
+        student = DetectorWrapper(TinyAdapter(), TinyCriterion())
+        teacher = DetectorWrapper(TinyAdapter(), TinyCriterion()).eval()
         student_output = student.raw(
             [torch.zeros(3, 8, 8)], sample_ids=("sample-a",)
         )
@@ -497,7 +557,7 @@ class CurriculumIntegrationTests(unittest.TestCase):
             [torch.zeros(3, 8, 8)], sample_ids=("sample-b",)
         )
         with self.assertRaisesRegex(ValueError, "sample"):
-            student.distill_from_outputs(student_output, teacher_output)
+            student.distill_from_outputs(student_output, teacher_output, DistillationSettings(1.0, 0.0))
 
     def test_every_scheduler_route_is_exactly_named(self):
         config = build_config(
