@@ -54,6 +54,26 @@ def build_evaluation_trainer(directory):
 
 
 class TrainingEvaluationTests(unittest.TestCase):
+    def test_internal_forward_type_error_is_not_retried(self):
+        from evaluator import DetectionEvaluator, PhaseEvaluator
+
+        class BrokenModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def forward(self, images, sample_ids=None):
+                self.calls += 1
+                raise TypeError("broken forward implementation")
+
+        model = BrokenModel()
+        loader = DataLoader(RGBDataset(), batch_size=1, collate_fn=collate_rgb)
+        evaluator = PhaseEvaluator(DetectionEvaluator(3), loader, torch.device("cpu"))
+        with self.assertRaisesRegex(TypeError, "broken forward implementation"):
+            evaluator.evaluate(model, 1, Phase.PHASE1_RGB_WARMUP)
+        self.assertEqual(model.calls, 1)
+        self.assertEqual(evaluator.history, [])
+
     def test_scheduled_best_checkpoint_contains_completed_evaluation_and_current_best(self):
         with tempfile.TemporaryDirectory() as directory:
             trainer = build_evaluation_trainer(directory)

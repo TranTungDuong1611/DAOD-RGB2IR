@@ -219,33 +219,19 @@ class PhaseEvaluator:
         finally:
             model.train(was_training)
 
-    @staticmethod
-    def _split_batch(batch):
-        if len(batch) == 3:
-            return batch[0], batch[1], tuple(batch[2])
-        if len(batch) == 2:
-            return batch[0], batch[1], tuple(
-                target.get("stem", str(index))
-                for index, target in enumerate(batch[1])
-            )
-        raise ValueError("evaluation batch must contain images and targets")
-
     def _run_eval_on_loader(self, model, loader, domain_name) -> Dict:
         self.evaluator.reset()
         started = time.time()
         with torch.no_grad():
             for batch in loader:
-                images, targets, sample_ids = self._split_batch(batch)
+                images, targets, sample_ids = batch
                 images = images.to(self.device) if isinstance(images, torch.Tensor) else images
                 targets = [
                     {key: value.to(self.device) if isinstance(value, torch.Tensor) else value
                      for key, value in target.items()}
                     for target in targets
                 ]
-                try:
-                    predictions = model(images, sample_ids=sample_ids)
-                except TypeError:
-                    predictions = model(images)
+                predictions = model(images, sample_ids=sample_ids)
                 self.evaluator.update(predictions, targets)
         metrics = self.evaluator.compute()
         logger.info(

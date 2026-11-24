@@ -52,15 +52,13 @@ class DetectorWrapper(nn.Module):
         return image_list
 
     @staticmethod
-    def _ids_from_targets(
-        targets: Optional[Targets], batch_size: int
-    ) -> Optional[Tuple[str, ...]]:
-        if targets is None or not all("stem" in target for target in targets):
+    def _normalize_sample_ids(sample_ids, batch_size):
+        if sample_ids is None:
             return None
-        stems = tuple(target["stem"] for target in targets)
-        if all(isinstance(stem, str) and stem.strip() for stem in stems):
-            return stems
-        return None
+        ids = tuple(sample_ids)
+        if len(ids) != batch_size or any(not isinstance(value, str) or not value for value in ids):
+            raise ValueError("sample_ids must contain one non-empty string per image")
+        return ids
 
     @staticmethod
     def _criterion_result(result) -> CriterionResult:
@@ -95,10 +93,7 @@ class DetectorWrapper(nn.Module):
         if targets is not None and len(targets) != len(image_list):
             raise ValueError("targets must match the image batch length")
 
-        resolved_ids = sample_ids
-        if resolved_ids is None:
-            resolved_ids = self._ids_from_targets(targets, len(image_list))
-        resolved_ids = self.adapter.validate_sample_ids(resolved_ids, len(image_list))
+        resolved_ids = self._normalize_sample_ids(sample_ids, len(image_list))
 
         if resize_short_edge is not None and resize_short_edge <= 0:
             raise ValueError("resize_short_edge must be positive")
@@ -108,14 +103,8 @@ class DetectorWrapper(nn.Module):
                 targets,
                 sample_ids=resolved_ids,
             )
-        if len(output.predictions) != len(image_list):
-            raise ValueError("Adapter output must match the image batch length")
         if output.sample_ids is None and resolved_ids is not None:
             output = replace(output, sample_ids=resolved_ids)
-        elif output.sample_ids is not None:
-            self.adapter.validate_sample_ids(output.sample_ids, len(image_list))
-            if resolved_ids is not None and tuple(output.sample_ids) != tuple(resolved_ids):
-                raise ValueError("adapter output sample IDs differ from the input batch")
         return output
 
     def supervised_from_output(
@@ -170,20 +159,15 @@ class DetectorWrapper(nn.Module):
             module.training for module in teacher.adapter.modules()
         ):
             raise ValueError("Teacher and its adapter must be in eval mode")
-        student_list = self._normalize_images(student_images)
-        teacher_list = self._normalize_images(teacher_images)
-        if len(student_list) != len(teacher_list):
-            raise ValueError("Distillation requires matching image batch lengths")
-
         resize_short_edge = self.select_training_resize_short_edge()
         student_output = self.raw(
-            student_list,
+            student_images,
             sample_ids=sample_ids,
             resize_short_edge=resize_short_edge,
         )
         with torch.no_grad():
             teacher_output = teacher.raw(
-                teacher_list,
+                teacher_images,
                 sample_ids=teacher_sample_ids,
                 resize_short_edge=resize_short_edge,
             )

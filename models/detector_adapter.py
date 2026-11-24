@@ -174,26 +174,6 @@ class DetectorAdapter(nn.Module, ABC):
 
         yield
 
-    @staticmethod
-    def validate_sample_ids(
-        sample_ids: Optional[Sequence[str]], batch_size: int
-    ) -> Optional[SampleIds]:
-        """Validate stable IDs when a caller supplies them.
-
-        The optional form keeps the original small adapter contract usable for
-        inference and legacy unit fixtures.  The FCOS adapter records IDs in
-        its context and rejects an ambiguous pair before position-wise KD.
-        """
-
-        if sample_ids is None:
-            return None
-        ids = tuple(sample_ids)
-        if len(ids) != batch_size:
-            raise ValueError("sample_ids must contain one ID per image")
-        if any(not isinstance(value, str) or not value.strip() for value in ids):
-            raise ValueError("sample_ids must contain non-empty stable strings")
-        return ids
-
     @abstractmethod
     def forward(
         self,

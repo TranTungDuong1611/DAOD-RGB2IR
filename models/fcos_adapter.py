@@ -279,45 +279,15 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
         finally:
             self.detector.transform.min_size = previous
 
-    @staticmethod
-    def _normalize_images(images: Sequence[Tensor] | Tensor) -> Tuple[Tensor, ...]:
-        if isinstance(images, Tensor):
-            if images.ndim != 4:
-                raise ValueError("batched images must have shape [B, C, H, W]")
-            images = tuple(images.unbind(dim=0))
-        else:
-            images = tuple(images)
-        if not images:
-            raise ValueError("images must contain at least one image")
-        if any(not isinstance(image, Tensor) or image.ndim != 3 for image in images):
-            raise ValueError("each image must have shape [C, H, W]")
-        return images
-
-    def _resolve_sample_ids(
-        self,
-        sample_ids: Optional[Sequence[str]],
-        targets: Optional[Targets],
-        batch_size: int,
-    ) -> Optional[Tuple[str, ...]]:
-        if sample_ids is None and targets is not None:
-            stems = tuple(target.get("stem") for target in targets)
-            if all(isinstance(stem, str) and stem.strip() for stem in stems):
-                sample_ids = stems
-        return self.validate_sample_ids(sample_ids, batch_size)
-
     def forward(
         self,
         images: Sequence[Tensor] | Tensor,
         targets: Optional[Targets] = None,
         sample_ids: Optional[Tuple[str, ...]] = None,
     ) -> AdapterOutput:
-        image_list = self._normalize_images(images)
+        image_list = images
         target_list = None if targets is None else list(targets)
-        if target_list is not None and len(target_list) != len(image_list):
-            raise ValueError("targets must match the image batch length")
-        resolved_ids = self._resolve_sample_ids(
-            sample_ids, target_list, len(image_list)
-        )
+        resolved_ids = sample_ids
 
         original_sizes = tuple(
             (int(image.shape[-2]), int(image.shape[-1])) for image in image_list
@@ -600,15 +570,6 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
                 s_anchors, t_anchors
             ):
                 raise ValueError("student and teacher anchor geometry differs")
-        if len(student.predictions) != len(teacher.predictions):
-            raise ValueError("student and teacher image counts differ")
-        for s_prediction, t_prediction in zip(
-            student.predictions, teacher.predictions
-        ):
-            if s_prediction.class_logits.shape != t_prediction.class_logits.shape:
-                raise ValueError("student and teacher class layouts differ")
-            if s_prediction.boxes.shape != t_prediction.boxes.shape:
-                raise ValueError("student and teacher decoded layouts differ")
         return DistillationPair(
             tuple(student.predictions), tuple(teacher.predictions)
         )
