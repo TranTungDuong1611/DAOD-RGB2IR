@@ -6,6 +6,7 @@ from typing import Optional, Sequence
 import torch
 from torch import Tensor
 import torch.nn.functional as F
+from torchvision.ops import roi_align
 
 from configs.distillation import DistillConfig
 from configs.model import FCOSModelConfig
@@ -15,6 +16,7 @@ from models.detector_adapter import (
     DistillationPair,
     DistillationSettings,
     SupervisedBatch,
+    ObjectFeaturePair,
 )
 
 
@@ -172,6 +174,53 @@ class DetectionLossCriterion(DetectorCriterion):
         self.gamma = float(gamma)
         self.weight_type = weight_type
         self.kd_gamma = float(kd_gamma)
+
+    def color_consistency(self, pair: ObjectFeaturePair, *, level_weights) -> CriterionResult:
+        """Mean normalized object-feature L1 across the requested FPN levels.
+
+        ROIAlign uses GT in resized-image coordinates. Teacher features are
+        detached before pooling; only student features receive this gradient.
+        Level weights are normalized so adding levels does not scale the loss.
+        """
+        count = len(pair.student)
+        if not count or any(len(items) != count for items in (pair.teacher, pair.spatial_scales, pair.levels, level_weights)):
+            raise ValueError("color consistency levels, features and weights must match")
+        if (any(not math.isfinite(w) or w < 0 for w in level_weights)
+                or not math.isfinite(sum(level_weights)) or sum(level_weights) <= 0):
+            raise ValueError("color consistency weights must have a finite positive sum")
+        reference = pair.student[0]
+        for student, teacher, scale in zip(pair.student, pair.teacher, pair.spatial_scales):
+            if (student.ndim != 4 or student.shape != teacher.shape or student.shape[0] != len(pair.targets)
+                    or student.device != teacher.device or student.dtype != teacher.dtype
+                    or student.device != reference.device or student.dtype != reference.dtype
+                    or not student.is_floating_point() or not math.isfinite(scale) or scale <= 0):
+                raise ValueError("color consistency requires matched floating point feature maps and targets")
+        rois = []
+        for index, target in enumerate(pair.targets):
+            boxes = target["boxes"].detach().to(device=reference.device, dtype=reference.dtype)
+            if boxes.ndim != 2 or boxes.shape[1] != 4:
+                raise ValueError("object boxes must have shape [N, 4]")
+            valid = torch.isfinite(boxes).all(dim=1) & (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+            boxes = boxes[valid]
+            if boxes.numel():
+                rois.append(torch.cat((boxes.new_full((len(boxes), 1), index), boxes), dim=1))
+        losses = []
+        metrics = {"color_objects": sum(len(roi) for roi in rois)}
+        boxes = torch.cat(rois) if rois else None
+        for level, student, teacher, scale in zip(pair.levels, pair.student, pair.teacher, pair.spatial_scales):
+            if boxes is None:
+                loss = _zero_with_grad(student)
+            else:
+                student_rois = roi_align(student, boxes, output_size=7, spatial_scale=scale, sampling_ratio=-1, aligned=True)
+                with torch.no_grad():
+                    teacher_rois = roi_align(teacher.detach(), boxes, output_size=7, spatial_scale=scale, sampling_ratio=-1, aligned=True)
+                    teacher_vectors = F.normalize(teacher_rois.mean(dim=(-2, -1)), dim=1, eps=1e-6)
+                student_vectors = F.normalize(student_rois.mean(dim=(-2, -1)), dim=1, eps=1e-6)
+                loss = F.l1_loss(student_vectors, teacher_vectors)
+            losses.append(loss)
+            metrics[f"color_loss_{level}"] = loss.detach()
+        total = sum(loss * (weight / sum(level_weights)) for loss, weight in zip(losses, level_weights))
+        return CriterionResult({"loss_color_consistency": total}, metrics)
 
     @staticmethod
     def _supervised_tensors(batch: SupervisedBatch):

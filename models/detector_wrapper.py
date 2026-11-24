@@ -111,6 +111,11 @@ class DetectorWrapper(nn.Module):
             pair.detached_teacher(), settings,
         )
 
+    def color_consistency_from_outputs(self, student_output, teacher_output, *, levels, level_weights):
+        """Prepare feature correspondence; the criterion owns every loss operation."""
+        pair = self.adapter.prepare_color_consistency(student_output, teacher_output, levels=levels)
+        return self.criterion.color_consistency(pair, level_weights=level_weights)
+
     def forward(
         self,
         images: Sequence[Tensor] | Tensor,

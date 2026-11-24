@@ -162,6 +162,17 @@ class DistillationPair:
         )
 
 
+@dataclass(frozen=True)
+class ObjectFeaturePair:
+    """Aligned spatial features and resized GT, prepared by a detector adapter."""
+
+    student: Tuple[Tensor, ...]
+    teacher: Tuple[Tensor, ...]
+    targets: Targets
+    spatial_scales: Tuple[float, ...]
+    levels: Tuple[str, ...]
+
+
 class DetectorAdapter(nn.Module, ABC):
     """Adapter seam shared by detector families."""
 

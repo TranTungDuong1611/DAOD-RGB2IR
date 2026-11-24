@@ -101,7 +101,7 @@ def test_trainer_audits_fixed_ir_validation_and_resumes_without_duplicate_window
         assert all(r["scope"] == "fixed_ir_validation" for r in records)
         assert all(r["sample_ids"] == records[0]["sample_ids"] for r in records)
         assert student_raw.call_count == 9
-        assert rgb_raw.call_count == 13  # 5 training + 4 audits of 2 batches.
+        assert rgb_raw.call_count == 16  # 5 KD + 3 pure-RGB consistency references + 8 audit forwards.
         assert ir_raw.call_count == 12  # Phase-4 RGB supervision has no teacher forward.
         assert logs[7]["step_type"] == "p4_rgb_supervised"
         assert any(k.startswith("sup_") for k in logs[7])

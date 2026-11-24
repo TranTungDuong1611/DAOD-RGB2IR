@@ -17,6 +17,7 @@ from config import (
     FCOSModelConfig,
     GANBridgeConfig,
     IntermediateDomainConfig,
+    LossConfig,
     OptimizerConfig,
     Phase,
     PseudoLabelEvalConfig,
@@ -99,6 +100,11 @@ def build_training_config(args) -> TrainingConfig:
             gamma=args.lr_gamma,
         ),
         ema=EMAConfig(alpha=args.ema_alpha, start_steps=args.ema_start),
+        loss=LossConfig(
+            color_consistency_weight=args.color_consistency_weight,
+            color_consistency_levels=tuple(args.color_consistency_levels),
+            color_consistency_level_weights=tuple(args.color_consistency_level_weights),
+        ),
         intermediate_domain=IntermediateDomainConfig(
             mode=args.intermediate_domain,
             texture_strength=args.texture_strength,
@@ -323,6 +329,12 @@ def parse_args(argv=None):
         help="Fraction of phase-4 steps using supervised RGB; use 0 for IR-only",
     )
     parser.add_argument("--hm-alpha", type=float, default=defaults.distill.hm_alpha)
+    parser.add_argument("--color-consistency-weight", type=float, default=defaults.loss.color_consistency_weight,
+                        help="Object feature consistency weight; 0 disables the auxiliary loss")
+    parser.add_argument("--color-consistency-levels", choices=("p3", "p4", "p5"), nargs="+",
+                        default=defaults.loss.color_consistency_levels)
+    parser.add_argument("--color-consistency-level-weights", type=float, nargs="+",
+                        default=defaults.loss.color_consistency_level_weights)
     parser.add_argument("--hm-beta", type=float, default=defaults.distill.hm_beta)
     parser.add_argument("--un-regular-alpha", type=float, default=defaults.distill.un_regular_alpha)
     parser.add_argument("--ema-alpha", type=float, default=defaults.ema.alpha)

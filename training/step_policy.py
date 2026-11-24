@@ -26,6 +26,7 @@ class StepPlan:
     appearance_domain: str | None = None
     bridge_stage: int | None = None
     domain_ratio: tuple[float, ...] | None = None
+    color_consistency: bool = False
 
     def log_metadata(self, *, did_step: bool, ema_initialized: bool) -> dict:
         """Keep bridge diagnostics aligned with the decisions actually executed."""
@@ -157,4 +158,10 @@ def resolve_step(
         appearance_domain=domain,
         bridge_stage=stage,
         domain_ratio=domain_ratio,
+        color_consistency=(
+            config.loss.color_consistency_weight > 0
+            and config.workflow != "rgb_baseline" and teachers_ready
+            and "rgb" in configured_names and source == "rgb" and route.use_gt
+            and student_alpha is not None and student_alpha < 1.0
+        ),
     )

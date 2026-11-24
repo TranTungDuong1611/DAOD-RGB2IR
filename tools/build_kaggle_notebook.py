@@ -146,6 +146,9 @@ SETTINGS = {
     "texture_strength": 0.25,
     "btf_radius": 2,
     "btf_iterations": 1,
+    "color_consistency_weight": 0.1,
+    "color_consistency_levels": ("p3", "p4", "p5"),
+    "color_consistency_level_weights": (1.0, 1.0, 1.0),
     "eval_every": 500,
     "log_interval": 50,
     "eval_pseudo_labels": False,
@@ -237,10 +240,11 @@ def build_notebook(project_root, output_path=None):
         uncached dependencies/pretrained FCOS weights, then **Run All** in a fresh
         kernel. Only this notebook is needed; project source is embedded below.
 
-        Base: freshly fetched `origin/feat/fcos-distillation` at `1cb91c5`.
-        The experiment changes source intermediate views only. Existing losses,
+        Base: `origin/feat/randommono-btf-kaggle` at `feff39f`.
+        The experiment uses RandomMono/BTF source views. Existing detection/KD losses,
         teacher EMA, phase-four RGB supervision and optional pseudo-label audits
-        are retained. There is no new L1/contrastive loss.
+        are retained. Object consistency adds normalized feature L1 on P3-P5
+        against the pure RGB EMA reference, averaged across the three levels.
 
         Edit the **Experiment settings** cell for batch size, paths, resume, or
         ablations. Default training is 10,000 iterations. Checkpoints, training
@@ -277,6 +281,10 @@ def build_notebook(project_root, output_path=None):
         avoids multiprocessing import issues with in-memory notebook modules.
         Set `intermediate_domain="saga"` for legacy SAGA, or
         `texture_strength=0.0` for a RandomMono-only ablation.
+        `color_consistency_weight=0.0` disables object feature consistency.
+        Default levels are P3, P4, P5 with equal weights. Loss activates after
+        teacher initialization on labeled appearance-shifted source views;
+        pure RGB, GAN-IR, real IR and RGB baseline steps do not activate it.
         `resume` resumes training; `eval_checkpoint` selects a checkpoint for the
         final eval cell and otherwise defaults to best, falling back to final.
         ''', "settings_intro", markdown=True),
@@ -333,8 +341,8 @@ def build_notebook(project_root, output_path=None):
             "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
             "language_info": {"name": "python"},
             "flir_source_manifest": manifest,
-            "flir_base_ref": "origin/feat/fcos-distillation",
-            "flir_base_commit": "1cb91c50a8b596759699d097745bbb79a3a4b945",
+            "flir_base_ref": "origin/feat/randommono-btf-kaggle",
+            "flir_base_commit": "feff39f6d2019be0903a9a36834a80b3f4ce117a",
         },
         "cells": cells,
     }

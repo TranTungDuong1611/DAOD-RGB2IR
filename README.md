@@ -5,7 +5,7 @@ training with five stages, per-iteration interleaving and checkpoint/resume usag
 
 ## RandomMono + BTF experiment
 
-Base: freshly fetched `origin/feat/fcos-distillation` at `1cb91c5`.
+Base: `origin/feat/randommono-btf-kaggle` at `feff39f`.
 This branch replaces source-image SAGA views with a shared RandomMono + Bilateral
 Texture Filtering (BTF) endpoint. Detection/KD losses, teacher EMA, routing,
 phase-four RGB supervision, dataset roles and existing evaluation remain intact.
@@ -25,6 +25,36 @@ alpha levels are retained. `alpha=1` bypasses bridge processing and random draws
 Raw IR follows the existing path. This is an appearance bridge: it removes color
 and suppresses texture without claiming to synthesize physically correct heat.
 The defaults are starting values for experiments, not validated FLIR settings.
+
+### Object color consistency on P3-P5
+
+The student and pure RGB EMA teacher expose FPN levels P3, P4 and P5. For
+each level, `DetectionLossCriterion.color_consistency` uses source GT boxes
+after the shared flip/resize, ROIAlign (7x7, strides 8/16/32), spatial averaging,
+L2 normalization and mean L1. The level losses are averaged, then multiplied by
+`color_consistency_weight` (default 0.1). No projection head is added; gradients
+flow into the student FPN/backbone, while the teacher reference is detached.
+
+The loss runs after RGB teacher initialization on labeled source views with
+student alpha below 1. Pure RGB, RGB baseline, GAN-IR and real IR steps skip it.
+The GAN workflow's appearance-bridge domain also supports it, including its final
+stage. A matching pure RGB teacher forward is reused when available; otherwise
+one extra RGB teacher forward supplies the reference. Per-level `color_loss_p3`,
+`color_loss_p4`, `color_loss_p5` and weighted `loss_color_consistency` are logged.
+
+Settings live in `LossConfig` in `configs/distillation.py`. CLI and notebook
+settings expose the same options:
+
+```python
+color_consistency_weight = 0.1       # Set 0.0 to disable, including extra forward.
+color_consistency_levels = ("p3", "p4", "p5")
+color_consistency_level_weights = (1.0, 1.0, 1.0)
+```
+
+CLI flags: `--color-consistency-weight`, `--color-consistency-levels` and
+`--color-consistency-level-weights`. Level weights must match the selected levels;
+their sum is normalized by the criterion. The default formula is
+`L_total = L_existing + 0.1 * (L_p3 + L_p4 + L_p5) / 3`.
 
 ### Kaggle: upload one notebook and Run All
 

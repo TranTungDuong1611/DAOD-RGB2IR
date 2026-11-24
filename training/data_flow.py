@@ -96,6 +96,7 @@ class RouteDataFlow:
             return {
                 "student_images": student_images,
                 "teacher_images": teacher_images,
+                "rgb_reference_images": geometric_images,
                 "targets": geometric_targets if use_gt else None,
                 "sample_ids": sample_ids,
             }

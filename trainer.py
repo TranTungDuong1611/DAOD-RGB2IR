@@ -115,6 +115,10 @@ class CurriculumDomainAdaptationTrainer:
 
         # Distillation contribution: use only enabled, initialized references.
         # Each teacher consumes the paired view with the student's resize.
+        use_color = plan.color_consistency and callable(
+            getattr(self.student.adapter, "prepare_color_consistency", None)
+        )
+        rgb_reference_output = None
         for teacher_name, settings in plan.distillation:
             teacher = self._teacher_for_name(teacher_name)
             teacher_output = fcos_models.forward_teacher(
@@ -123,6 +127,8 @@ class CurriculumDomainAdaptationTrainer:
                 sample_ids=sample_ids,
                 resize_short_edge=resize_short_edge,
             )
+            if use_color and teacher_name == "rgb" and plan.teacher_alpha == 1.0:
+                rgb_reference_output = teacher_output
             losses.distill(
                 self.student,
                 student_output,
@@ -131,6 +137,22 @@ class CurriculumDomainAdaptationTrainer:
                 teacher_name=teacher_name,
                 phase_weight=plan.distill_weight,
             )
+
+        # The reference is pure RGB from the same source geometry. A KD teacher
+        # on another appearance cannot substitute for this reference forward.
+        if use_color:
+            if rgb_reference_output is None:
+                rgb_reference_output = fcos_models.forward_teacher(
+                    self._teacher_for_name("rgb"), data["rgb_reference_images"],
+                    sample_ids=sample_ids, resize_short_edge=resize_short_edge,
+                )
+            losses.color_consistency(
+                self.student, student_output, rgb_reference_output,
+                weight=self.config.loss.color_consistency_weight,
+                levels=self.config.loss.color_consistency_levels,
+                level_weights=self.config.loss.color_consistency_level_weights,
+            )
+        rgb_reference_output = None
 
         # Preserve the existing optimizer eligibility rule, including a scalar
         # fallback when this route produced no differentiable contributions.

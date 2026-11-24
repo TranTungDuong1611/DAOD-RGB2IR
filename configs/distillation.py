@@ -87,6 +87,9 @@ class LossConfig:
     weight_deltas: float = 1.0
     weight_quality: float = 1.0
     weight_uhl: float = 1.0
+    color_consistency_weight: float = 0.1
+    color_consistency_levels: Tuple[str, ...] = ("p3", "p4", "p5")
+    color_consistency_level_weights: Tuple[float, ...] = (1.0, 1.0, 1.0)
 
     # Phase 1: Pure Supervised Warmup (RGB + GT)
     p1_sup_weight: float = 1.0
@@ -103,6 +106,20 @@ class LossConfig:
     # Phase 4: GT applies only to RGB steps; unlabeled IR still uses KD only.
     p4_sup_weight: float = 1.0
     p4_distill_weight: float = 1.0
+
+    def __post_init__(self):
+        self.color_consistency_levels = tuple(self.color_consistency_levels)
+        self.color_consistency_level_weights = tuple(self.color_consistency_level_weights)
+        if not math.isfinite(self.color_consistency_weight) or self.color_consistency_weight < 0:
+            raise ValueError("color_consistency_weight must be finite and non-negative")
+        levels = self.color_consistency_levels
+        weights = self.color_consistency_level_weights
+        if not levels or len(set(levels)) != len(levels) or any(level not in {"p3", "p4", "p5"} for level in levels):
+            raise ValueError("color_consistency_levels must be unique P3-P5 names")
+        if len(weights) != len(levels) or any(not math.isfinite(w) or w < 0 for w in weights) or not any(w > 0 for w in weights):
+            raise ValueError("color consistency level weights must match levels and have a finite positive sum")
+        if not math.isfinite(sum(weights)):
+            raise ValueError("color consistency level weight sum must be finite")
 
     def get_phase_weights(self, phase: Phase) -> Tuple[float, float]:
         """Helper to retrieve (supervised_weight, distillation_weight) for a given phase."""

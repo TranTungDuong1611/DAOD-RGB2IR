@@ -40,6 +40,17 @@ class LossFlow:
         for name, value in student.supervised_from_output(student_output, targets).losses.items():
             self._add(name, value, phase_weight, f"sup_{name}")
 
+    def color_consistency(self, student, student_output, teacher_output, *, weight, levels, level_weights):
+        """Accumulate the criterion's multi-level loss with one explicit weight."""
+        result = student.color_consistency_from_outputs(
+            student_output, teacher_output, levels=levels, level_weights=level_weights,
+        )
+        for name, value in result.losses.items():
+            self._add(name, value, weight, name)
+        for name, value in result.metrics.items():
+            self.logs[name] = float(value.detach().item()) if isinstance(value, torch.Tensor) else value
+        return result
+
     def distill(
         self, student, student_output, teacher_output, settings,
         *, teacher_name: str, phase_weight: float,

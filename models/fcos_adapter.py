@@ -25,6 +25,7 @@ from .detector_adapter import (
     AdapterOutput,
     DetectorAdapter,
     DistillationPair,
+    ObjectFeaturePair,
     Predictions,
     SupervisedBatch,
     Targets,
@@ -190,6 +191,7 @@ class FCOSAdapterContext:
     raw_head_outputs: Mapping[str, Tensor]
     sample_ids: Optional[Tuple[str, ...]] = None
     class_names: Tuple[str, ...] = FCOSModelConfig.class_names
+    features: Tuple[Tensor, ...] = ()
 
     @property
     def transformed_image_sizes(self) -> Tuple[Tuple[int, int], ...]:
@@ -314,9 +316,36 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
             raw_head_outputs=head_outputs,
             sample_ids=resolved_ids,
             class_names=self.class_names,
+            features=feature_list[:3],
         )
         return AdapterOutput(
             tuple(predictions), context=context, sample_ids=resolved_ids
+        )
+
+    def prepare_color_consistency(self, student, teacher, *, levels):
+        """Expose corresponding P3-P5 features and GT without computing loss."""
+        s_context, t_context = student.context, teacher.context
+        if not isinstance(s_context, FCOSAdapterContext) or not isinstance(t_context, FCOSAdapterContext):
+            raise ValueError("color consistency requires FCOS contexts")
+        if student.sample_ids is None or teacher.sample_ids is None or student.sample_ids != teacher.sample_ids:
+            raise ValueError("color consistency requires corresponding sample IDs")
+        if (s_context.original_image_sizes != t_context.original_image_sizes
+                or s_context.transformed_image_sizes != t_context.transformed_image_sizes
+                or s_context.transformed_images.tensors.shape != t_context.transformed_images.tensors.shape):
+            raise ValueError("color consistency requires the same image sizes and resize")
+        if s_context.transformed_targets is None:
+            raise ValueError("color consistency requires source GT")
+        indices = {"p3": 0, "p4": 1, "p5": 2}
+        if not levels or any(level not in indices for level in levels):
+            raise ValueError("color consistency supports P3-P5")
+        if any(indices[level] >= len(context.features) for context in (s_context, t_context) for level in levels):
+            raise ValueError("missing FPN features for color consistency")
+        return ObjectFeaturePair(
+            tuple(s_context.features[indices[level]] for level in levels),
+            tuple(t_context.features[indices[level]].detach() for level in levels),
+            s_context.transformed_targets,
+            tuple(1.0 / (8 * 2 ** indices[level]) for level in levels),
+            tuple(levels),
         )
 
     def _match_anchors_to_targets(
