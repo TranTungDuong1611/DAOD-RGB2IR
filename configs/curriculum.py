@@ -1,7 +1,7 @@
 """Routing and iteration policies for the original curriculum workflow."""
 
-from dataclasses import dataclass, field
-from typing import Tuple
+from dataclasses import dataclass, field, replace
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -62,15 +62,15 @@ class MidRoutingConfig:
 
     def get_routing(self, step_name: str) -> StepRouting:
         """Helper to fetch routing params using the step name string."""
-        return getattr(self, step_name, self.p4_ir_focus)
+        return getattr(self, step_name)
 
 
 @dataclass
 class CurriculumConfig:
     """Phase boundaries and step ratios for alternating domain training."""
-    phase1_end: int = 2000
-    phase2_end: int = 5000
-    phase3_end: int = 8000
+    phase1_end: Optional[int] = None
+    phase2_end: Optional[int] = None
+    phase3_end: Optional[int] = None
 
     phase2_rgb_sampling_ratio: float = 0.7
     phase3_rgb_sampling_ratio: float = 0.3
@@ -80,7 +80,8 @@ class CurriculumConfig:
     def __post_init__(self):
         if self.sampling_mode not in {"grouped", "interleaved"}:
             raise ValueError("sampling_mode must be 'grouped' or 'interleaved'")
-        boundaries = (self.phase1_end, self.phase2_end, self.phase3_end)
+        boundaries = tuple(value for value in (self.phase1_end, self.phase2_end, self.phase3_end)
+                           if value is not None)
         if any(not isinstance(value, int) or value < 0 for value in boundaries):
             raise ValueError("phase boundaries must be non-negative integers")
         if tuple(boundaries) != tuple(sorted(boundaries)):
@@ -92,6 +93,17 @@ class CurriculumConfig:
             value = getattr(self, name)
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be in [0, 1]")
+
+    def resolved(self, total_iters):
+        """Derive omitted boundaries from the run budget; retain explicit overrides."""
+        defaults = []
+        for fraction in (0.20, 0.50, 0.80):
+            previous = defaults[-1] if defaults else 1
+            defaults.append(min(total_iters, max(previous, round(total_iters * fraction))))
+        return replace(self, **{
+            name: default if getattr(self, name) is None else getattr(self, name)
+            for name, default in zip(("phase1_end", "phase2_end", "phase3_end"), defaults)
+        })
 
 
 __all__ = ['StepRouting', 'MidRoutingConfig', 'CurriculumConfig']

@@ -235,7 +235,7 @@ class CurriculumDomainAdaptationTrainer:
             self.evaluate(trigger_reason="scheduled")
             # Preserve the current periodic snapshot cadence alongside the
             # separately triggered best-model and final-model saves.
-            if self.global_step > 0 and self.global_step % 5000 == 0:
+            if self.global_step > 0 and self.global_step % self.config.checkpoint_period == 0:
                 self.save_checkpoint(f"checkpoint_{self.global_step:06d}.pth")
 
         if self.evaluator is not None:

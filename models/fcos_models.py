@@ -11,7 +11,7 @@ from torchvision.models.detection import (
     fcos_resnet50_fpn,
 )
 
-from config import FCOSModelConfig, TrainingConfig
+from config import EMAConfig, FCOSModelConfig, TrainingConfig
 from loss.detection_criterion import DetectionLossCriterion
 from .detector_wrapper import DetectorWrapper
 from .fcos_adapter import (
@@ -189,7 +189,7 @@ def copy_student_to_teacher(teacher: nn.Module, student: nn.Module) -> None:
 def ema_update(
     teacher: nn.Module,
     student: nn.Module,
-    alpha: float = 0.9996,
+    alpha: float = EMAConfig.alpha,
     global_step: Optional[int] = None,
 ) -> None:
     """Update teacher parameters and buffers with the existing warmup decay."""

@@ -22,6 +22,7 @@ class OptimizerConfig:
     momentum: float = 0.9
     weight_decay: float = 1e-4
     warmup_iters: Optional[int] = None
+    warmup_max_iters: int = 1000
     warmup_factor: float = 1.0 / 1000.0
     milestones: Tuple[int, ...] = (70000,)
     gamma: float = 0.1
@@ -94,16 +95,20 @@ class TrainingConfig:
     grad_clip: float = 10.0
     device: str = "cuda"
     log_interval: int = 50
-    output_dir: str = "outputs"
+    output_dir: str = "./output_flir"
     workflow: str = "curriculum"
     teacher_mode: str = "two_teacher"
     wandb: bool = False
     eval_period: int = 500
+    eval_iou_thresholds: Tuple[float, ...] = (0.5,)
+    eval_interp: str = "voc11"
+    checkpoint_period: int = 5000
 
     def __post_init__(self):
         if self.total_iters <= 0:
             raise ValueError("total_iters must be positive")
-        if self.grad_clip < 0 or self.log_interval <= 0 or self.eval_period <= 0:
+        self.curriculum = self.curriculum.resolved(self.total_iters)
+        if self.grad_clip < 0 or min(self.log_interval, self.eval_period, self.checkpoint_period) <= 0:
             raise ValueError("training intervals and grad_clip are invalid")
         if self.workflow not in {"curriculum", "rgb_baseline", "gan_bridge"}:
             raise ValueError("workflow must be 'curriculum', 'rgb_baseline' or 'gan_bridge'")
@@ -125,7 +130,7 @@ class TrainingConfig:
             if self.ema.start_steps is not None and self.ema.start_steps != warmup_end:
                 raise ValueError("gan_bridge EMA start must match the end of RGB warmup")
         if self.optimizer.warmup_iters is None:
-            self.optimizer.warmup_iters = min(1000, warmup_end)
+            self.optimizer.warmup_iters = min(self.optimizer.warmup_max_iters, warmup_end)
         if self.ema.start_steps is None:
             self.ema.start_steps = warmup_end
 

@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from torchvision.models.detection.fcos import FCOSClassificationHead, FCOSHead
 from torchvision.models.detection.transform import resize_boxes
 
+from configs.model import FCOSModelConfig
 from configs.types import ClassificationInitMode
 
 from .detector_adapter import (
@@ -201,7 +202,7 @@ class FCOSAdapterContext:
     num_anchors_per_level: Tuple[int, ...]
     raw_head_outputs: Mapping[str, Tensor]
     sample_ids: Optional[Tuple[str, ...]] = None
-    class_names: Tuple[str, ...] = ("person", "car", "bicycle")
+    class_names: Tuple[str, ...] = FCOSModelConfig.class_names
 
     @property
     def transformed_image_sizes(self) -> Tuple[Tuple[int, int], ...]:
@@ -231,7 +232,7 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
     def __init__(
         self,
         detector: nn.Module,
-        class_names: Sequence[str] = ("person", "car", "bicycle"),
+        class_names: Sequence[str] = FCOSModelConfig.class_names,
     ) -> None:
         super().__init__()
         required = (

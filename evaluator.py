@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 import torch
 from torchvision.ops import box_iou
 
+from config import TrainingConfig
 from contextlib import contextmanager
 import random
 
@@ -43,8 +44,8 @@ def _compute_ap_auc(recalls: torch.Tensor, precisions: torch.Tensor) -> float:
 def _compute_class_ap(
     pred_list: List[Dict],
     gt_list: List[Dict],
-    iou_thresh: float = 0.5,
-    interp: str = "voc11",
+    iou_thresh: float = TrainingConfig.eval_iou_thresholds[0],
+    interp: str = TrainingConfig.eval_interp,
 ) -> float:
     num_gt = sum(len(item["boxes"]) for item in gt_list)
     if num_gt == 0:
@@ -89,11 +90,11 @@ class DetectionEvaluator:
         num_classes: int,
         class_names: Optional[List[str]] = None,
         iou_thresholds: Optional[List[float]] = None,
-        interp: str = "voc11",
+        interp: str = TrainingConfig.eval_interp,
     ) -> None:
         self.num_classes = num_classes
         self.class_names = class_names or [f"cls_{i}" for i in range(num_classes)]
-        self.iou_thresholds = iou_thresholds or [0.5]
+        self.iou_thresholds = list(TrainingConfig.eval_iou_thresholds if iou_thresholds is None else iou_thresholds)
         self.interp = interp
         self.reset()
 

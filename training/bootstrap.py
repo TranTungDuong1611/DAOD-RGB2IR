@@ -101,7 +101,7 @@ def build_training(
     evaluator = DetectionEvaluator(
         num_classes=NUM_CLASSES,
         class_names=list(FLIR_CLASSES),
-        iou_thresholds=[0.5],
+        iou_thresholds=config.eval_iou_thresholds, interp=config.eval_interp,
     )
     training_evaluator = TrainingEvaluator(
         config, evaluator=evaluator,

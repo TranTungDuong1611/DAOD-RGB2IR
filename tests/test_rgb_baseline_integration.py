@@ -17,6 +17,7 @@ from config import (
     EMAConfig,
     EvalLoaderConfig,
     FCOSModelConfig,
+    LossConfig,
     TrainLoaderConfig,
     TrainingConfig,
 )
@@ -105,6 +106,7 @@ class RGBBaselineIntegrationTests(unittest.TestCase):
             aug=AugConfig(hflip_prob=0.0, blur_prob=0.0,
                           brightness_prob=0.0, contrast_prob=0.0),
             workflow='rgb_baseline',
+            loss=LossConfig(weight_logits=2.0),
             total_iters=1,
             device='cpu',
         )

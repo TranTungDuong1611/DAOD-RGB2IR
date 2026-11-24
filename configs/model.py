@@ -13,7 +13,7 @@ class FCOSModelConfig:
     class_names: Tuple[str, ...] = ("person", "car", "bicycle")
     weights: Optional[str] = "DEFAULT"
     classification_init_mode: ClassificationInitMode = ClassificationInitMode.COCO_TOWER
-    pretrained_backbone: bool = True
+    pretrained_backbone: Optional[bool] = None
     trainable_backbone_layers: int = 3
     min_sizes: Tuple[int, ...] = (640, 672, 704, 736, 768, 800)
     max_size: int = 1333
@@ -29,6 +29,8 @@ class FCOSModelConfig:
     vfl_weight_type: str = "iou"
 
     def __post_init__(self):
+        if self.pretrained_backbone is None:
+            self.pretrained_backbone = self.weights is not None
         self.class_names = tuple(self.class_names)
         self.min_sizes = tuple(self.min_sizes)
         self.classification_init_mode = ClassificationInitMode(

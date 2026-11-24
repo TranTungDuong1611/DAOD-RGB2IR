@@ -13,6 +13,7 @@ from models.fcos_adapter import (
 )
 from loss.detection_criterion import DetectionLossCriterion
 from models.detector_wrapper import DetectorWrapper
+from models.detector_adapter import DistillationSettings
 from torchvision.models.detection import FCOS
 
 
@@ -97,6 +98,7 @@ class TorchvisionFCOSAdapterTests(unittest.TestCase):
                 [image],
                 teacher,
                 [image],
+                settings=DistillationSettings(1.0, 0.0),
                 sample_ids=("a",),
                 teacher_sample_ids=("a",),
             )

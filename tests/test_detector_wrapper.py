@@ -88,6 +88,7 @@ class WrapperTests(unittest.TestCase):
             teacher.adapter.weight.fill_(2)
         losses = student.distill(
             self.images, teacher, self.images,
+            settings=DistillationSettings(1.0, 0.0),
             sample_ids=('frame-1',), teacher_sample_ids=('frame-1',),
         )
         sum(losses.losses.values()).backward()
@@ -98,7 +99,8 @@ class WrapperTests(unittest.TestCase):
     def test_teacher_must_be_in_eval_mode(self):
         student = DetectorWrapper(TinyAdapter(), TinyCriterion())
         with self.assertRaisesRegex(ValueError, 'eval'):
-            student.distill(self.images, DetectorWrapper(TinyAdapter(), TinyCriterion()), self.images)
+            student.distill(self.images, DetectorWrapper(TinyAdapter(), TinyCriterion()), self.images,
+                            DistillationSettings(1.0, 0.0))
 
     def test_different_prediction_counts_need_explicit_matching(self):
         student = DetectorWrapper(TinyAdapter(2), TinyCriterion())
@@ -106,7 +108,8 @@ class WrapperTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'matched'):
             student.distill(
                 self.images, teacher, self.images,
-                sample_ids=('frame-1',), teacher_sample_ids=('frame-1',),
+                settings=DistillationSettings(1.0, 0.0),
+            sample_ids=('frame-1',), teacher_sample_ids=('frame-1',),
             )
 
     def test_registered_parameters_and_checkpoint(self):
@@ -162,6 +165,7 @@ class ContractTests(unittest.TestCase):
         model.criterion = SumCriterion()
         loss = model.distill(
             [torch.zeros(3, 8, 8)], teacher, [torch.zeros(3, 8, 8)],
+            settings=DistillationSettings(1.0, 0.0),
             sample_ids=('frame-1',), teacher_sample_ids=('frame-1',),
         ).losses['kd']
         loss.backward()

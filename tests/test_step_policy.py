@@ -5,7 +5,7 @@ import torch
 
 from config import (
     BridgeScheduleConfig, CurriculumConfig, EMAConfig, GANBridgeConfig,
-    Phase, TrainingConfig,
+    Phase, TrainingConfig, LossConfig, SoftSAGAConfig,
 )
 from scheduler import BridgeDomainScheduler, CurriculumScheduler
 from training import step_policy as policy
@@ -26,7 +26,8 @@ from training import step_policy as policy
 def test_curriculum_resolves_physical_source_and_teacher_policy(
     step, ratio, route, phase, source, use_gt, alphas, teacher, weights,
 ):
-    config = TrainingConfig(curriculum=CurriculumConfig(
+    config = TrainingConfig(loss=LossConfig(p2_distill_weight=.3, p3_sup_weight=.8),
+                            soft_saga=SoftSAGAConfig(alpha_near_rgb=.7), curriculum=CurriculumConfig(
         phase1_end=2, phase2_end=4, phase3_end=6,
         phase2_rgb_sampling_ratio=ratio, phase3_rgb_sampling_ratio=ratio,
         phase4_rgb_sampling_ratio=ratio,
@@ -63,6 +64,7 @@ def test_bridge_resolves_each_domain_at_each_adaptation_stage(stage, domain):
     ratio = tuple(int(name == domain) for name in ("rgb", "saga", "ir_gan", "ir_real"))
     config = TrainingConfig(
         workflow="gan_bridge", total_iters=10,
+        loss=LossConfig(p2_distill_weight=.3, p3_sup_weight=.8),
         gan_bridge=GANBridgeConfig(checkpoint="fixture.pth", source_sup_weight=.65),
         bridge_schedule=BridgeScheduleConfig(phase_ratios=((1, 0, 0, 0),) + (ratio,) * 4),
     )

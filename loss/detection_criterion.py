@@ -7,6 +7,7 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 
+from configs.model import FCOSModelConfig
 from models.detector_adapter import (
     CriterionResult,
     DetectorCriterion,
@@ -21,7 +22,7 @@ def _hm_focal_elementwise(
     targets: Tensor,
     alpha: float,
     gamma: float,
-    weight_type: str = "iou",
+    weight_type: str = FCOSModelConfig.vfl_weight_type,
 ) -> Tensor:
     """Return unreduced HM/varifocal-style BCE terms."""
 
@@ -158,10 +159,10 @@ class DetectionLossCriterion(DetectorCriterion):
 
     def __init__(
         self,
-        alpha: float = 0.75,
-        gamma: float = 2.0,
-        weight_type: str = "iou",
-        kd_gamma: float = 2.0,
+        alpha: float = FCOSModelConfig.vfl_alpha,
+        gamma: float = FCOSModelConfig.vfl_gamma,
+        weight_type: str = FCOSModelConfig.vfl_weight_type,
+        kd_gamma: float = FCOSModelConfig.vfl_gamma,
     ) -> None:
         super().__init__()
         if alpha < 0 or gamma < 0 or kd_gamma < 0:

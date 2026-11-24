@@ -17,12 +17,6 @@ from .detector_adapter import (
 )
 
 
-_DEFAULT_DISTILLATION_SETTINGS = DistillationSettings(
-    top_ratio=1.0,
-    min_hm=0.0,
-)
-
-
 class DetectorWrapper(nn.Module):
     """Combine one detector adapter with one detector-neutral criterion."""
 
@@ -110,11 +104,11 @@ class DetectorWrapper(nn.Module):
         self,
         student_output: AdapterOutput,
         teacher_output: AdapterOutput,
-        settings: Optional[DistillationSettings] = None,
+        settings: DistillationSettings,
     ) -> CriterionResult:
         pair = self.adapter.prepare_distillation(student_output, teacher_output)
         return self.criterion.distillation(
-            pair.detached_teacher(), settings or _DEFAULT_DISTILLATION_SETTINGS,
+            pair.detached_teacher(), settings,
         )
 
     def forward(
@@ -135,7 +129,7 @@ class DetectorWrapper(nn.Module):
         student_images: Sequence[Tensor] | Tensor,
         teacher: "DetectorWrapper",
         teacher_images: Sequence[Tensor] | Tensor,
-        settings: Optional[DistillationSettings] = None,
+        settings: DistillationSettings,
         sample_ids: Optional[Sequence[str]] = None,
         teacher_sample_ids: Optional[Sequence[str]] = None,
     ) -> CriterionResult:
@@ -160,5 +154,5 @@ class DetectorWrapper(nn.Module):
         return self.distill_from_outputs(
             student_output,
             teacher_output,
-            settings or _DEFAULT_DISTILLATION_SETTINGS,
+            settings,
         )

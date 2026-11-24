@@ -31,7 +31,7 @@ class TeacherSchedule:
             Phase.PHASE3_ADAPTATION:     self.phase3,
             Phase.PHASE4_IR_FOCUS:   self.phase4,
         }
-        return mapping.get(phase, self.phase2)
+        return mapping[phase]
 
 
 @dataclass
@@ -64,7 +64,7 @@ class DistillConfig:
 @dataclass
 class EMAConfig:
     """Exponential Moving Average settings for teacher update."""
-    alpha: float = 0.996          # EMA decay factor (higher = slower teacher update)
+    alpha: float = 0.9996          # EMA decay factor (higher = slower teacher update)
     start_steps: Optional[int] = None
 
     def __post_init__(self):
@@ -82,7 +82,7 @@ class LossConfig:
     Phase-based loss weights to control the balance between
     Supervised (Ground Truth) and Unsupervised (Knowledge Distillation) learning.
     """
-    weight_logits: float = 2.0
+    weight_logits: float = 4.0
     weight_deltas: float = 1.0
     weight_quality: float = 1.0
     weight_uhl: float = 1.0
@@ -93,10 +93,10 @@ class LossConfig:
 
     # Phase 2: Transition (RGB/IR flows with GT + Distill)
     p2_sup_weight: float = 1.0
-    p2_distill_weight: float = 0.3  # Start trusting teachers slightly less than GT
+    p2_distill_weight: float = 0.7
 
     # Phase 3: Adaptation (Shift weight towards Distill)
-    p3_sup_weight: float = 0.8      # Reduce GT reliance (only used in RGB flow)
+    p3_sup_weight: float = 0.5
     p3_distill_weight: float = 1.0
 
     # Phase 4: GT applies only to RGB steps; unlabeled IR still uses KD only.
@@ -111,7 +111,7 @@ class LossConfig:
             Phase.PHASE3_ADAPTATION: (self.p3_sup_weight, self.p3_distill_weight),
             Phase.PHASE4_IR_FOCUS:   (self.p4_sup_weight, self.p4_distill_weight),
         }
-        return mapping.get(phase, (1.0, 1.0))
+        return mapping[phase]
 
 
 __all__ = ['TeacherSchedule', 'DistillConfig', 'EMAConfig', 'LossConfig']

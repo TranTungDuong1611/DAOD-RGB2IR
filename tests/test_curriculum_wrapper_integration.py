@@ -25,6 +25,7 @@ from models.detector_adapter import (
     DetectorCriterion,
     DetectorAdapter,
     DistillationPair,
+    DistillationSettings,
     Predictions,
     SupervisedBatch,
 )
@@ -556,7 +557,7 @@ class CurriculumIntegrationTests(unittest.TestCase):
             [torch.zeros(3, 8, 8)], sample_ids=("sample-b",)
         )
         with self.assertRaisesRegex(ValueError, "sample"):
-            student.distill_from_outputs(student_output, teacher_output)
+            student.distill_from_outputs(student_output, teacher_output, DistillationSettings(1.0, 0.0))
 
     def test_every_scheduler_route_is_exactly_named(self):
         config = build_config(

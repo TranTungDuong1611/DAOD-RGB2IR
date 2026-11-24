@@ -14,6 +14,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 import torch
 from torch import Tensor, nn
 
+from configs.distillation import DistillConfig
+
 Targets = Sequence[Mapping[str, Any]]
 Losses = Dict[str, Tensor]
 SampleIds = Tuple[str, ...]
@@ -25,9 +27,9 @@ class DistillationSettings:
 
     top_ratio: float
     min_hm: float
-    hm_alpha: float = 0.5
-    hm_beta: float = 0.5
-    uncertainty_alpha: float = 1.0
+    hm_alpha: float = DistillConfig.hm_alpha
+    hm_beta: float = DistillConfig.hm_beta
+    uncertainty_alpha: float = DistillConfig.un_regular_alpha
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.top_ratio) or not 0.0 < self.top_ratio <= 1.0:

@@ -10,16 +10,16 @@ class DataConfig:
 
 @dataclass
 class TrainLoaderConfig:
-    batch_size: int = 8
-    num_workers: int = 2
+    batch_size: int = 4
+    num_workers: int = 4
     shuffle: bool = True
     drop_last: bool = True
 
 
 @dataclass
 class EvalLoaderConfig:
-    batch_size: int = 8
-    num_workers: int = 2
+    batch_size: int = 4
+    num_workers: int = 4
     shuffle: bool = False
 
 
@@ -46,7 +46,7 @@ class AugConfig:
 @dataclass
 class SoftSAGAConfig:
     """SoftSAGA alpha per MID level (1.0=pure RGB, 0.0=pure gray)."""
-    alpha_near_rgb:     float = 0.70   # objects mostly RGB
+    alpha_near_rgb:     float = 0.75   # objects mostly RGB
     alpha_intermediate: float = 0.50   # half RGB, half gray
     alpha_near_ir:      float = 0.25   # objects mostly gray
 

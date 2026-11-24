@@ -16,12 +16,9 @@ from config import (
     EvalLoaderConfig,
     FCOSModelConfig,
     GANBridgeConfig,
-    LossConfig,
     OptimizerConfig,
     Phase,
     PseudoLabelEvalConfig,
-    SoftSAGAConfig,
-    TeacherSchedule,
     TrainLoaderConfig,
     TrainingConfig,
 )
@@ -32,15 +29,6 @@ from training.observability import configure_training_logging
 
 
 logger = logging.getLogger(__name__)
-
-
-def _phase_boundaries(total_iters: int) -> tuple[int, int, int]:
-    """Create monotonic shortened boundaries for both normal and smoke runs."""
-
-    first = min(total_iters, max(1, round(total_iters * 0.20)))
-    second = min(total_iters, max(first, round(total_iters * 0.50)))
-    third = min(total_iters, max(second, round(total_iters * 0.80)))
-    return first, second, third
 
 
 def _weight_identifier(value: str):
@@ -57,31 +45,14 @@ def build_training_config(args) -> TrainingConfig:
         value is not None for value in (args.phase1_end, args.phase2_end, args.phase3_end)
     ):
         raise ValueError("gan_bridge uses --bridge-phase-fractions, not legacy --phaseN-end flags")
-    default_boundaries = _phase_boundaries(total_iters)
-    phase1_end = (
-        default_boundaries[0] if args.phase1_end is None else args.phase1_end
-    )
-    phase2_end = (
-        default_boundaries[1] if args.phase2_end is None else args.phase2_end
-    )
-    phase3_end = (
-        default_boundaries[2] if args.phase3_end is None else args.phase3_end
-    )
-    if phase3_end > total_iters:
+    if args.phase3_end is not None and args.phase3_end > total_iters:
         raise ValueError("phase3_end must not exceed total_iters")
     weights = _weight_identifier(args.weights)
-    pretrained_backbone = (
-        bool(args.pretrained_backbone)
-        if args.pretrained_backbone is not None
-        else weights is not None
-    )
-
-
     # Collect phase boundaries and route proportions for the curriculum scheduler.
     curriculum = CurriculumConfig(
-        phase1_end=phase1_end,
-        phase2_end=phase2_end,
-        phase3_end=phase3_end,
+        phase1_end=args.phase1_end,
+        phase2_end=args.phase2_end,
+        phase3_end=args.phase3_end,
         phase2_rgb_sampling_ratio=args.phase2_rgb_ratio,
         phase3_rgb_sampling_ratio=args.phase3_rgb_ratio,
         sampling_mode=args.domain_sampling,
@@ -97,7 +68,7 @@ def build_training_config(args) -> TrainingConfig:
             classification_init_mode=ClassificationInitMode(
                 args.classification_init
             ),
-            pretrained_backbone=pretrained_backbone,
+            pretrained_backbone=args.pretrained_backbone,
             trainable_backbone_layers=args.trainable_backbone_layers,
             min_sizes=tuple(args.min_sizes),
             max_size=args.max_size,
@@ -106,26 +77,12 @@ def build_training_config(args) -> TrainingConfig:
             nms_thresh=args.nms_thresh,
             topk_candidates=args.topk_candidates,
             detections_per_img=args.detections_per_img,
-            vfl_alpha=0.75,
-            vfl_gamma=2.0,
         ),
         # Teacher-specific KD selection schedules and shared distillation settings.
         distill=DistillConfig(
             hm_alpha=args.hm_alpha,
             hm_beta=args.hm_beta,
             un_regular_alpha=args.un_regular_alpha,
-            rgb_teacher=TeacherSchedule(
-                phase1=(0.010, 0.45),
-                phase2=(0.020, 0.35),
-                phase3=(0.040, 0.25),
-                phase4=(0.060, 0.20),
-            ),
-            ir_teacher=TeacherSchedule(
-                phase1=(0.002, 0.60),
-                phase2=(0.005, 0.50),
-                phase3=(0.015, 0.35),
-                phase4=(0.030, 0.25),
-            ),
         ),
         curriculum=curriculum,
         bridge_schedule=BridgeScheduleConfig(
@@ -138,25 +95,6 @@ def build_training_config(args) -> TrainingConfig:
             saga_teacher_alphas=tuple(args.bridge_saga_teacher_alphas),
             saga_teachers=tuple(args.bridge_saga_teachers),
         ),
-        # Phase and component weights are resolved upstream of loss execution.
-        loss=LossConfig(
-            p1_sup_weight=1.0,
-            p1_distill_weight=0.0,
-            p2_sup_weight=1.0,
-            p2_distill_weight=0.7,
-            p3_sup_weight=0.5,
-            p3_distill_weight=1.0,
-            # GAN source GT uses gan_bridge.source_sup_weight in its final
-            # stage. Keep its pre-merge metadata compatible with saved runs.
-            p4_sup_weight=0.0 if args.workflow == "gan_bridge" else 1.0,
-            p4_distill_weight=1.0,
-            weight_logits=4.0,
-            weight_deltas=1.0,
-            weight_quality=1.0,
-            weight_uhl=1.0,
-        ),
-        # Keep update schedules and view-generation parameters in configuration;
-        # executors receive the values selected by the trainer for each step.
         optimizer=OptimizerConfig(
             base_lr=args.lr,
             warmup_iters=args.warmup_iters,
@@ -165,11 +103,6 @@ def build_training_config(args) -> TrainingConfig:
             gamma=args.lr_gamma,
         ),
         ema=EMAConfig(alpha=args.ema_alpha, start_steps=args.ema_start),
-        soft_saga=SoftSAGAConfig(
-            alpha_near_rgb=0.75,
-            alpha_intermediate=0.5,
-            alpha_near_ir=0.25,
-        ),
         aug=AugConfig(
             hflip_prob=args.hflip_prob,
             blur_prob=args.blur_prob,
@@ -267,14 +200,15 @@ def _bridge_ratios(value):
 
 
 def parse_args():
+    defaults = TrainingConfig()
     # Declare launch options here; build_training_config translates them into
     # one effective configuration before any training dependency is assembled.
     parser = argparse.ArgumentParser(
         description="Curriculum D3T training for aligned FLIR RGB/IR data"
     )
     parser.add_argument("--data_root", required=True)
-    parser.add_argument("--output_dir", default="./output_flir")
-    parser.add_argument("--total_iters", type=int, default=10000)
+    parser.add_argument("--output_dir", default=defaults.output_dir)
+    parser.add_argument("--total_iters", type=int, default=defaults.total_iters)
     parser.add_argument(
         "--phase1-end", "--phase1_end", dest="phase1_end", type=int, default=None
     )
@@ -284,37 +218,37 @@ def parse_args():
     parser.add_argument(
         "--phase3-end", "--phase3_end", dest="phase3_end", type=int, default=None
     )
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--eval_batch_size", type=int, default=4)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=defaults.loader.train.batch_size)
+    parser.add_argument("--eval_batch_size", type=int, default=defaults.loader.eval.batch_size)
+    parser.add_argument("--workers", type=int, default=defaults.loader.train.num_workers)
     parser.add_argument(
         "--lr",
         type=float,
-        default=None,
+        default=OptimizerConfig.base_lr,
         help="Actual LR; defaults to D3T's 0.016 scaled from batch 16",
     )
-    parser.add_argument("--warmup-iters", type=int, default=None)
-    parser.add_argument("--warmup-factor", type=float, default=1.0 / 1000.0)
-    parser.add_argument("--lr-steps", type=int, nargs="*", default=(70000,))
-    parser.add_argument("--lr-gamma", type=float, default=0.1)
+    parser.add_argument("--warmup-iters", type=int, default=OptimizerConfig.warmup_iters)
+    parser.add_argument("--warmup-factor", type=float, default=defaults.optimizer.warmup_factor)
+    parser.add_argument("--lr-steps", type=int, nargs="*", default=defaults.optimizer.milestones)
+    parser.add_argument("--lr-gamma", type=float, default=defaults.optimizer.gamma)
     parser.add_argument(
         "--min-sizes",
         type=int,
         nargs="+",
-        default=(640, 672, 704, 736, 768, 800),
+        default=defaults.model.min_sizes,
         help="Training short-edge choices; evaluation uses the final value",
     )
-    parser.add_argument("--max_size", type=int, default=1333)
-    parser.add_argument("--center_sampling_radius", type=float, default=0.0)
-    parser.add_argument("--score_thresh", type=float, default=0.05)
-    parser.add_argument("--nms_thresh", type=float, default=0.6)
-    parser.add_argument("--topk_candidates", type=int, default=1000)
-    parser.add_argument("--detections_per_img", type=int, default=100)
-    parser.add_argument("--trainable_backbone_layers", type=int, default=3)
+    parser.add_argument("--max_size", type=int, default=defaults.model.max_size)
+    parser.add_argument("--center_sampling_radius", type=float, default=defaults.model.center_sampling_radius)
+    parser.add_argument("--score_thresh", type=float, default=defaults.model.score_thresh)
+    parser.add_argument("--nms_thresh", type=float, default=defaults.model.nms_thresh)
+    parser.add_argument("--topk_candidates", type=int, default=defaults.model.topk_candidates)
+    parser.add_argument("--detections_per_img", type=int, default=defaults.model.detections_per_img)
+    parser.add_argument("--trainable_backbone_layers", type=int, default=defaults.model.trainable_backbone_layers)
     parser.add_argument(
         "--weights",
         choices=("DEFAULT", "none"),
-        default="DEFAULT",
+        default=defaults.model.weights,
         help="Torchvision FCOS COCO weights or none",
     )
     parser.add_argument(
@@ -332,65 +266,65 @@ def parse_args():
         "--classification-init",
         dest="classification_init",
         choices=[mode.value for mode in ClassificationInitMode],
-        default=ClassificationInitMode.COCO_TOWER.value,
+        default=defaults.model.classification_init_mode.value,
     )
     parser.add_argument(
         "--workflow",
         choices=("curriculum", "rgb_baseline", "gan_bridge"),
-        default="curriculum",
+        default=defaults.workflow,
     )
     parser.add_argument(
         "--teacher-mode",
         choices=("rgb", "ir", "two_teacher"),
-        default="two_teacher",
+        default=defaults.teacher_mode,
         help="Enable one teacher for staged smoke/ablation or both for curriculum",
     )
-    parser.add_argument("--phase2-rgb-ratio", type=float, default=0.7)
-    parser.add_argument("--phase3-rgb-ratio", type=float, default=0.3)
+    parser.add_argument("--phase2-rgb-ratio", type=float, default=defaults.curriculum.phase2_rgb_sampling_ratio)
+    parser.add_argument("--phase3-rgb-ratio", type=float, default=defaults.curriculum.phase3_rgb_sampling_ratio)
     parser.add_argument(
-        "--domain-sampling", choices=("grouped", "interleaved"), default="grouped",
+        "--domain-sampling", choices=("grouped", "interleaved"), default=defaults.curriculum.sampling_mode,
         help="Group existing curriculum routes in short cycles or spread them per iteration",
     )
-    parser.add_argument("--gan-weights", default=None, help="Pretrained RGB(3)->IR(1) CycleGAN G_A checkpoint")
-    parser.add_argument("--bridge-ratios", type=_bridge_ratios, default=BridgeScheduleConfig().phase_ratios)
-    parser.add_argument("--bridge-phase-fractions", type=float, nargs=5, default=(0.2, 0.4, 0.6, 0.8, 1.0))
-    parser.add_argument("--bridge-source-sup-weight", type=float, default=1.0)
-    parser.add_argument("--bridge-saga-student-alphas", type=float, nargs=5, default=(1, 0.75, 0.5, 0.25, 0.25))
-    parser.add_argument("--bridge-saga-teacher-alphas", type=float, nargs=5, default=(1, 0.75, 0.5, 0.5, 0.25))
+    parser.add_argument("--gan-weights", default=defaults.gan_bridge.checkpoint, help="Pretrained RGB(3)->IR(1) CycleGAN G_A checkpoint")
+    parser.add_argument("--bridge-ratios", type=_bridge_ratios, default=defaults.bridge_schedule.phase_ratios)
+    parser.add_argument("--bridge-phase-fractions", type=float, nargs=5, default=defaults.bridge_schedule.phase_fractions)
+    parser.add_argument("--bridge-source-sup-weight", type=float, default=defaults.gan_bridge.source_sup_weight)
+    parser.add_argument("--bridge-saga-student-alphas", type=float, nargs=5, default=defaults.gan_bridge.saga_student_alphas)
+    parser.add_argument("--bridge-saga-teacher-alphas", type=float, nargs=5, default=defaults.gan_bridge.saga_teacher_alphas)
     parser.add_argument("--bridge-saga-teachers", choices=("none", "rgb", "ir"), nargs=5,
-                        default=("none", "rgb", "ir", "ir", "ir"))
+                        default=defaults.gan_bridge.saga_teachers)
     parser.add_argument(
-        "--phase4-rgb-ratio", type=float, default=0.2,
+        "--phase4-rgb-ratio", type=float, default=defaults.curriculum.phase4_rgb_sampling_ratio,
         help="Fraction of phase-4 steps using supervised RGB; use 0 for IR-only",
     )
-    parser.add_argument("--hm-alpha", type=float, default=0.5)
-    parser.add_argument("--hm-beta", type=float, default=0.5)
-    parser.add_argument("--un-regular-alpha", type=float, default=1.0)
-    parser.add_argument("--ema-alpha", type=float, default=0.9996)
+    parser.add_argument("--hm-alpha", type=float, default=defaults.distill.hm_alpha)
+    parser.add_argument("--hm-beta", type=float, default=defaults.distill.hm_beta)
+    parser.add_argument("--un-regular-alpha", type=float, default=defaults.distill.un_regular_alpha)
+    parser.add_argument("--ema-alpha", type=float, default=defaults.ema.alpha)
     parser.add_argument(
         "--ema-start",
         type=int,
-        default=None,
+        default=EMAConfig.start_steps,
         help="EMA initialization step; defaults to the start of phase 2",
     )
-    parser.add_argument("--hflip-prob", type=float, default=0.5)
-    parser.add_argument("--blur-prob", type=float, default=0.5)
-    parser.add_argument("--brightness-prob", type=float, default=0.3)
-    parser.add_argument("--contrast-prob", type=float, default=0.3)
-    parser.add_argument("--eval_every", type=int, default=500)
+    parser.add_argument("--hflip-prob", type=float, default=defaults.aug.hflip_prob)
+    parser.add_argument("--blur-prob", type=float, default=defaults.aug.blur_prob)
+    parser.add_argument("--brightness-prob", type=float, default=defaults.aug.brightness_prob)
+    parser.add_argument("--contrast-prob", type=float, default=defaults.aug.contrast_prob)
+    parser.add_argument("--eval_every", type=int, default=defaults.eval_period)
     # Audit labels are independent of supervised targets and student validation.
-    parser.add_argument("--eval-pseudo-labels", action="store_true",
+    parser.add_argument("--eval-pseudo-labels", action="store_true", default=defaults.pseudo_label_eval.enabled,
                         help="Compare selected KD rows with IR GT; never train on IR GT")
-    parser.add_argument("--pseudo-label-eval-interval", type=int, default=500,
+    parser.add_argument("--pseudo-label-eval-interval", type=int, default=defaults.pseudo_label_eval.interval,
                         help="Global iteration interval after EMA teachers are initialized")
-    parser.add_argument("--pseudo-label-iou-threshold", type=float, default=0.5)
-    parser.add_argument("--pseudo-label-eval-samples", type=int, default=256,
+    parser.add_argument("--pseudo-label-iou-threshold", type=float, default=defaults.pseudo_label_eval.iou_threshold)
+    parser.add_argument("--pseudo-label-eval-samples", type=int, default=defaults.pseudo_label_eval.sample_size,
                         help="Maximum labeled IR validation images in each periodic teacher audit")
-    parser.add_argument("--pseudo-label-eval-seed", type=int, default=0,
+    parser.add_argument("--pseudo-label-eval-seed", type=int, default=defaults.pseudo_label_eval.subset_seed,
                         help="Local seed for reproducible fixed IR validation image selection")
-    parser.add_argument("--log_interval", type=int, default=50)
+    parser.add_argument("--log_interval", type=int, default=defaults.log_interval)
     parser.add_argument("--resume", default=None)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default=defaults.device)
     return parser.parse_args()
 
 

@@ -11,6 +11,21 @@ from models.fcos_adapter import ClassificationInitMode
 
 
 class EntrypointConfigTests(unittest.TestCase):
+    def test_cli_and_direct_config_share_defaults_for_each_run_budget(self):
+        from dataclasses import asdict
+        from config import DataConfig, TrainingConfig
+
+        for budget, boundaries in [(1, (1, 1, 1)), (4, (1, 2, 3)),
+                                    (100, (20, 50, 80)), (10000, (2000, 5000, 8000))]:
+            with self.subTest(budget=budget), mock.patch.object(sys, "argv", [
+                "example_flir.py", "--data_root", "synthetic", "--total_iters", str(budget),
+            ]):
+                cli = make_training_config(parse_args())
+                direct = TrainingConfig(total_iters=budget, data=DataConfig(root="synthetic"))
+                self.assertEqual((direct.curriculum.phase1_end, direct.curriculum.phase2_end,
+                                  direct.curriculum.phase3_end), boundaries)
+                self.assertEqual(asdict(cli), asdict(direct))
+
     def test_cli_interleaved_mode_changes_the_effective_route_sequence(self):
         from scheduler import CurriculumScheduler
 
