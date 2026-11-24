@@ -54,7 +54,7 @@ def test_shared_teacher_selection_matches_batch_global_training_mask():
 
 
 def test_aggregate_uses_row_and_object_denominators_instead_of_batch_means():
-    from training.pseudo_label_eval import aggregate_pseudo_label_metrics
+    from evaluator import aggregate_pseudo_label_metrics
 
     metrics = aggregate_pseudo_label_metrics([
         {"selected_rows": 3, "valid_rows": 1, "gt_count": 10, "covered_gt": 1,
@@ -72,7 +72,7 @@ def test_aggregate_uses_row_and_object_denominators_instead_of_batch_means():
 
 
 def test_fixed_subset_is_seeded_and_includes_rare_classes(validation_root):
-    from training.pseudo_label_eval import select_fixed_ir_subset
+    from evaluator import select_fixed_ir_subset
 
     dataset = FLIRIRDataset(validation_root, split="validation")
     reader = IRAnnotationReader(validation_root)
@@ -86,14 +86,14 @@ def test_fixed_subset_is_seeded_and_includes_rare_classes(validation_root):
 
 
 def make_evaluator(root):
-    from training.pseudo_label_eval import FixedIRPseudoLabelEvaluator
+    from evaluator import PseudoLabelEvaluator
 
     dataset = FLIRIRDataset(root, split="validation")
     fixed_indices = [0, 3, 4]
     def loader(data):
         return DataLoader(data, batch_size=2, shuffle=False, collate_fn=ir_collate,
                           generator=torch.Generator().manual_seed(42))
-    return FixedIRPseudoLabelEvaluator(
+    return PseudoLabelEvaluator(
         fixed_loader=loader(Subset(dataset, fixed_indices)), full_loader=loader(dataset),
         reader=IRAnnotationReader(root), device="cpu",
         fixed_sample_ids=tuple(dataset.ir_paths[i].stem for i in fixed_indices),
@@ -175,7 +175,7 @@ def test_bootstrap_builds_isolated_fixed_and_full_validation_loaders(validation_
 
 
 def test_fixed_subset_fails_clearly_when_no_validation_labels_are_available(validation_root):
-    from training.pseudo_label_eval import select_fixed_ir_subset
+    from evaluator import select_fixed_ir_subset
 
     for path in (validation_root / "Annotations").glob("*.xml"):
         path.unlink()

@@ -10,7 +10,7 @@ from unittest import mock
 import pytest
 
 from example_flir import build_training_config, parse_args
-from scheduler import CurriculumScheduler
+from evaluator import TrainingEvaluator
 
 
 def test_cli_keeps_audit_opt_in_and_allows_interval_and_iou_overrides():
@@ -40,15 +40,19 @@ def test_fixed_dataset_cadence_stays_on_global_500_iteration_boundaries():
     from config import PseudoLabelEvalConfig, TrainingConfig
 
     config = TrainingConfig(pseudo_label_eval=PseudoLabelEvalConfig(enabled=True))
-    scheduler = CurriculumScheduler(config)
-    due = scheduler.should_evaluate_pseudo_labels
-    assert not due(498, last_eval_step=0)
-    assert due(499, last_eval_step=0)
-    assert due(500, last_eval_step=0)
-    assert not due(501, last_eval_step=501)
-    assert due(999, last_eval_step=501)
+    audit = mock.Mock()
+    audit.evaluate.return_value = {}
+    evaluator = TrainingEvaluator(config, pseudo_label_evaluator=audit, teachers={"rgb": None, "ir": None})
+    def due(step):
+        with mock.patch("evaluator.log_pseudo_label_evaluation"):
+            return bool(evaluator.audit(step, config.get_phase(step), ema_initialized=True))
+    assert not due(499)
+    assert due(500)
+    assert not due(501)
+    assert due(1000)
     config.pseudo_label_eval.enabled = False
-    assert not due(999, last_eval_step=501)
+    assert not due(1500)
+
 
 
 @pytest.mark.parametrize("kwargs", [{"interval": 0}, {"interval": -2},

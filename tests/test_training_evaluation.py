@@ -55,7 +55,7 @@ def build_evaluation_trainer(directory):
 
 class TrainingEvaluationTests(unittest.TestCase):
     def test_internal_forward_type_error_is_not_retried(self):
-        from evaluator import DetectionEvaluator, PhaseEvaluator
+        from evaluator import DetectionEvaluator, TrainingEvaluator
 
         class BrokenModel(torch.nn.Module):
             def __init__(self):
@@ -68,11 +68,40 @@ class TrainingEvaluationTests(unittest.TestCase):
 
         model = BrokenModel()
         loader = DataLoader(RGBDataset(), batch_size=1, collate_fn=collate_rgb)
-        evaluator = PhaseEvaluator(DetectionEvaluator(3), loader, torch.device("cpu"))
+        evaluator = TrainingEvaluator(build_config(), evaluator=DetectionEvaluator(3), ir_val_loader=loader)
         with self.assertRaisesRegex(TypeError, "broken forward implementation"):
             evaluator.evaluate(model, 1, Phase.PHASE1_RGB_WARMUP)
         self.assertEqual(model.calls, 1)
         self.assertEqual(evaluator.history, [])
+
+    def test_failed_phase_change_evaluation_is_due_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = build_evaluation_trainer(directory)
+            evaluator = trainer.evaluator
+            evaluator.eval_every_n = 100
+            self.assertIsNone(evaluator.step(trainer.student, 1, Phase.PHASE1_RGB_WARMUP))
+            original = evaluator.ir_val_loader
+            class BrokenLoader:
+                def __iter__(self):
+                    raise RuntimeError("evaluation failed")
+            evaluator.ir_val_loader = BrokenLoader()
+            with self.assertRaisesRegex(RuntimeError, "evaluation failed"):
+                evaluator.step(trainer.student, 2, Phase.PHASE2_TRANSITION)
+            evaluator.ir_val_loader = original
+            result = evaluator.step(trainer.student, 2, Phase.PHASE2_TRANSITION)
+            self.assertIsNotNone(result)
+            self.assertEqual(len(evaluator.history), 1)
+
+    def test_validation_preserves_training_rng_and_child_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = build_evaluation_trainer(directory)
+            trainer.student.add_module("fixed_dropout", torch.nn.Dropout().eval())
+            torch.manual_seed(83)
+            before = torch.get_rng_state().clone()
+            trainer.evaluate(current_phase=Phase.PHASE1_RGB_WARMUP)
+            self.assertTrue(torch.equal(before, torch.get_rng_state()))
+            self.assertTrue(trainer.student.training)
+            self.assertFalse(trainer.student.fixed_dropout.training)
 
     def test_scheduled_best_checkpoint_contains_completed_evaluation_and_current_best(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -82,8 +111,9 @@ class TrainingEvaluationTests(unittest.TestCase):
 
             self.assertEqual(payload["best_map"], 1.)
             self.assertEqual(payload["best_rgb_map"], 1.)
-            state = payload["phase_evaluator"]
-            self.assertEqual(set(state), {"last_phase", "history"})
+            state = payload["evaluation"]
+            self.assertNotIn("best_ir_map", state)
+            self.assertNotIn("best_rgb_map", state)
             self.assertEqual(state["last_phase"], Phase.PHASE1_RGB_WARMUP)
             self.assertEqual(len(state["history"]), 1)
             result = state["history"][0]
@@ -108,7 +138,7 @@ class TrainingEvaluationTests(unittest.TestCase):
                     self.assertEqual(trainer.best_map, best)
                     self.assertEqual(trainer.best_rgb_map, best)
                     self.assertEqual(payload["best_map"], best)
-                    self.assertEqual(len(payload["phase_evaluator"]["history"]), saved_history)
+                    self.assertEqual(len(payload["evaluation"]["history"]), saved_history)
                     self.assertEqual(result.get("is_best_ir", False), step in (0, 3))
                     self.assertEqual(result.get("is_best_rgb", False), step in (0, 3))
                     self.assertTrue(trainer.student.training)
@@ -121,7 +151,7 @@ class TrainingEvaluationTests(unittest.TestCase):
             trainer.evaluate(current_phase=Phase.PHASE1_RGB_WARMUP, trigger_reason="initial")
             payload = torch.load(Path(directory) / "best_model.pth", weights_only=False)
             self.assertEqual(payload["best_map"], 0.)
-            self.assertEqual(payload["phase_evaluator"]["history"][0]["trigger"], "initial")
+            self.assertEqual(payload["evaluation"]["history"][0]["trigger"], "initial")
 
     def test_failed_rgb_evaluation_does_not_publish_partial_best(self):
         class FailingLoader:
@@ -130,12 +160,12 @@ class TrainingEvaluationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             trainer = build_evaluation_trainer(directory)
-            trainer.phase_evaluator.rgb_val_loader = FailingLoader()
+            trainer.evaluator.rgb_val_loader = FailingLoader()
             with self.assertRaisesRegex(RuntimeError, "RGB evaluation failed"):
                 trainer.evaluate(current_phase=Phase.PHASE1_RGB_WARMUP)
             self.assertEqual(trainer.best_map, -1.)
             self.assertEqual(trainer.best_rgb_map, -1.)
-            self.assertEqual(trainer.phase_evaluator.history, [])
+            self.assertEqual(trainer.evaluator.history, [])
             self.assertFalse((Path(directory) / "best_model.pth").exists())
             self.assertTrue(trainer.student.training)
 
@@ -149,7 +179,7 @@ class TrainingEvaluationTests(unittest.TestCase):
 
             resumed = build_evaluation_trainer(root / "resumed")
             resumed.load_checkpoint(str(root / "original" / "best_model.pth"))
-            self.assertEqual(resumed.phase_evaluator.history, original.phase_evaluator.history)
+            self.assertEqual(resumed.evaluator.history, original.evaluator.history)
             with torch.no_grad():
                 resumed.student.adapter.weight.zero_()
             resumed.evaluate(current_phase=Phase.PHASE1_RGB_WARMUP)
@@ -167,14 +197,18 @@ class TrainingEvaluationTests(unittest.TestCase):
                 payload = torch.load(path, weights_only=False)
                 payload["best_map"] = old_best
                 payload.pop("best_rgb_map", None)
-                payload["phase_evaluator"].update(best_ir_map=.6, best_rgb_map=.7)
+                evaluation = payload.pop("evaluation")
+                payload["phase_evaluator"] = {"last_phase": evaluation["last_phase"],
+                                              "history": evaluation["history"],
+                                              "best_ir_map": .6, "best_rgb_map": .7}
                 torch.save(payload, path)
 
                 resumed = build_evaluation_trainer(root / "resumed")
                 resumed.load_checkpoint(str(path))
                 self.assertEqual(resumed.best_map, expected)
                 self.assertEqual(resumed.best_rgb_map, .7)
-                self.assertEqual(set(resumed.phase_evaluator.state_dict()), {"last_phase", "history"})
+                self.assertNotIn("best_ir_map", resumed.evaluator.state_dict())
+                self.assertNotIn("best_rgb_map", resumed.evaluator.state_dict())
                 with torch.no_grad():
                     resumed.student.adapter.weight.fill_(1.)
                 result = resumed.evaluate(current_phase=Phase.PHASE1_RGB_WARMUP)

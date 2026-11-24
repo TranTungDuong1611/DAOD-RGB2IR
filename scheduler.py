@@ -6,15 +6,6 @@ from typing import Literal
 from config import BridgeScheduleConfig, Phase
 
 
-def should_evaluate_pseudo_labels(config, global_step, *, last_eval_step):
-    """Keep fixed IR audits on global windows independently of domain routing."""
-    completed_step = global_step + 1
-    return (
-        config.enabled
-        and completed_step // config.interval > last_eval_step // config.interval
-    )
-
-
 class DomainRatioSampler:
     """Spread weighted domains deterministically, with insertion order breaking ties."""
 
@@ -224,16 +215,6 @@ class CurriculumScheduler:
         if step_name in {"p3_ir_flow", "p4_ir_focus"}:
             return "ir"
         raise ValueError(f"Unsupported curriculum step: {step_name}")
-
-    def should_evaluate_pseudo_labels(self, global_step, *, last_eval_step):
-        """Check global windows; fixed IR evaluation is independent of train routes.
-
-        The trainer separately requires initialized teachers. A delayed first
-        pass does not shift later iteration boundaries or consume loader routes.
-        """
-        return should_evaluate_pseudo_labels(
-            self.config.pseudo_label_eval, global_step, last_eval_step=last_eval_step,
-        )
 
     def _alternate(self, phase, primary: DomainStep, secondary: DomainStep, ratio: float) -> DomainStep:
         """Helper to alternate between two steps based on a ratio."""

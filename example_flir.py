@@ -233,7 +233,7 @@ def main(args) -> None:
     # Bootstrap wires dependencies; this entrypoint retains the sequence of
     # resume/initial evaluation, training, interruption handling, and final save.
     trainer = build_training(config, logger=logger)
-    phase_evaluator = trainer.phase_evaluator
+    evaluator = trainer.evaluator
 
     # Resume saved progress or evaluate the initial model using the original
     # mutually exclusive paths and initial phase label.
@@ -254,7 +254,7 @@ def main(args) -> None:
         logger.info("Training interrupted by user")
     finally:
         trainer.save_checkpoint("final_model.pth")
-        phase_evaluator.print_history()
+        evaluator.print_history()
 
 
 def _bridge_ratios(value):

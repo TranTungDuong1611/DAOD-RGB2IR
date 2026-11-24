@@ -31,6 +31,7 @@ from models.detector_adapter import (
 from models.detector_wrapper import DetectorWrapper
 from data.augmentations import StudentAugmentor
 from training.data_flow import RouteDataFlow
+from evaluator import TrainingEvaluator
 from scheduler import CurriculumScheduler
 from trainer import CurriculumDomainAdaptationTrainer
 from models.fcos_models import build_fcos_trio, copy_student_to_teacher, ema_update
@@ -142,17 +143,6 @@ def collate_ir(batch):
     return torch.stack([item[0] for item in batch]), tuple(item[1] for item in batch)
 
 
-class StatefulPhaseEvaluator:
-    def __init__(self, state=None):
-        self.state = state or {}
-
-    def state_dict(self):
-        return dict(self.state)
-
-    def load_state_dict(self, state):
-        self.state = dict(state)
-
-
 class StatefulLRScheduler:
     def __init__(self):
         self.steps = 0
@@ -224,6 +214,7 @@ def build_trainer(config):
         config=config,
         data_flow=RouteDataFlow(rgb_loader, ir_loader, device="cpu", augmentor=StudentAugmentor(config)),
         scheduler=CurriculumScheduler(config),
+        evaluator=TrainingEvaluator(config, teachers={"rgb": rgb_teacher, "ir": ir_teacher}),
     )
     return trainer, student, rgb_teacher, ir_teacher
 
@@ -480,19 +471,16 @@ class CurriculumIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as output_dir:
             config = build_config(output_dir=output_dir)
             trainer, _, _, _ = build_trainer(config)
-            trainer.phase_evaluator = StatefulPhaseEvaluator(
-                {"history": [{"global_step": 3}]}
-            )
+            trainer.evaluator.history = [{"global_step": 3}]
             trainer.best_map = 0.61
             trainer.save_checkpoint("evaluator-state.pth")
 
             resumed, _, _, _ = build_trainer(config)
-            resumed.phase_evaluator = StatefulPhaseEvaluator()
             resumed.load_checkpoint(f"{output_dir}/evaluator-state.pth")
 
             self.assertEqual(resumed.best_map, 0.61)
             self.assertEqual(
-                resumed.phase_evaluator.state["history"], [{"global_step": 3}]
+                resumed.evaluator.history, [{"global_step": 3}]
             )
 
     def test_missing_teacher_state_raises_from_pytorch_load_state_dict(self):

@@ -12,12 +12,11 @@ from torch.optim import Optimizer
 from config import TrainingConfig
 from models import fcos_models
 from models.detector_wrapper import DetectorWrapper as DetectorWrapper
-from scheduler import should_evaluate_pseudo_labels
 from training import checkpointing
 from training.data_flow import RouteDataFlow
 from training.loss_flow import LossFlow
-from training.observability import log_iteration, log_pseudo_label_evaluation
-from training.step_policy import configured_teacher_names, distillation_settings, resolve_step
+from training.observability import log_iteration
+from training.step_policy import resolve_step
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +33,8 @@ class CurriculumDomainAdaptationTrainer:
         config: TrainingConfig,
         data_flow: RouteDataFlow,
         scheduler: Any,
-        phase_evaluator: Any = None,
+        evaluator: Any = None,
         lr_scheduler: Any = None,
-        pseudo_label_evaluator: Any = None,
     ) -> None:
         """Receive prepared models and an optimizer bound after device placement."""
         self.student = student
@@ -45,7 +43,7 @@ class CurriculumDomainAdaptationTrainer:
         self.optimizer = optimizer
         self.config = config
         self.device = torch.device(config.device)
-        self.phase_evaluator = phase_evaluator
+        self.evaluator = evaluator
         self.lr_scheduler = lr_scheduler
         self.data_flow = data_flow
         self.scheduler = scheduler
@@ -56,14 +54,6 @@ class CurriculumDomainAdaptationTrainer:
         self.best_rgb_map = -1.0
         self.loss_history = defaultdict(list)
         self.ema_initialized = False
-        # Bootstrap supplies isolated IR validation loaders. Audit progress stays
-        # separate from student validation history and best-checkpoint selection.
-        self.last_pseudo_label_eval_step = 0
-        self.last_full_pseudo_label_eval_step = 0
-        self.pseudo_label_evaluator = pseudo_label_evaluator
-        if config.pseudo_label_eval.enabled and config.workflow != "rgb_baseline" and pseudo_label_evaluator is None:
-            raise ValueError("enabled pseudo-label evaluation requires an IR validation evaluator")
-
     def _teacher_models(self):
         # References stay on the trainer so checkpoint keys and ownership are unchanged.
         return {"rgb": self.rgb_teacher, "ir": self.ir_teacher}
@@ -202,56 +192,24 @@ class CurriculumDomainAdaptationTrainer:
         self.loss_history[plan.step_name].append(logs["total_loss"])
         self.global_step += 1
         logs["global_step"] = self.global_step
-        # Observe the current teachers after the iteration/EMA update using a
-        # separate fixed dataset, never the train batch or supervised targets.
-        if (
-            self.pseudo_label_evaluator is not None and self.ema_initialized
-            and should_evaluate_pseudo_labels(
-                self.config.pseudo_label_eval, self.global_step - 1,
-                last_eval_step=self.last_pseudo_label_eval_step,
+        if self.evaluator is not None:
+            records = self.evaluator.audit(
+                self.global_step, plan.phase, ema_initialized=self.ema_initialized,
             )
-        ):
-            logs["pseudo_label_evaluations"] = self._evaluate_pseudo_labels(plan.phase)
+            if records:
+                logs["pseudo_label_evaluations"] = records
         return logs
-
-    def _evaluate_pseudo_labels(self, phase, *, full_dataset=False):
-        """Execute isolated IR evaluation with the shared teacher/settings policy."""
-        names = configured_teacher_names(self.config)
-        records = []
-        for name in names:
-            settings = distillation_settings(self.config, name, phase)
-            result = self.pseudo_label_evaluator.evaluate(
-                self._teacher_for_name(name), settings,
-                iou_threshold=self.config.pseudo_label_eval.iou_threshold,
-                resize_short_edge=self.config.model.min_sizes[-1], full_dataset=full_dataset,
-            )
-            records.append({
-                **result, "global_step": self.global_step, "phase": phase.name,
-                "source_domain": "ir", "teacher": name,
-                "trigger": "final" if full_dataset else "periodic",
-                "top_ratio": settings.top_ratio, "min_hm": settings.min_hm,
-                "hm_alpha": settings.hm_alpha, "hm_beta": settings.hm_beta,
-                "resize_short_edge": self.config.model.min_sizes[-1],
-                "iou_threshold": self.config.pseudo_label_eval.iou_threshold,
-            })
-        for record in records:
-            log_pseudo_label_evaluation(record, output_dir=self.config.output_dir, logger=logger)
-        if full_dataset:
-            self.last_full_pseudo_label_eval_step = self.global_step
-        else:
-            self.last_pseudo_label_eval_step = self.global_step
-        return records
 
     def evaluate(self, *, current_phase=None, trigger_reason: str = "manual") -> Optional[Dict[str, Any]]:
         """Complete evaluation, update best metrics, then persist an IR improvement."""
-        if self.phase_evaluator is None:
+        if self.evaluator is None:
             return None
         if current_phase is None:
             current_phase = self.config.get_phase(self.global_step)
         if trigger_reason == "scheduled":
-            results = self.phase_evaluator.step(self.student, self.global_step, current_phase)
+            results = self.evaluator.step(self.student, self.global_step, current_phase)
         else:
-            results = self.phase_evaluator.evaluate(
+            results = self.evaluator.evaluate(
                 self.student, self.global_step, current_phase, trigger_reason=trigger_reason,
             )
         if results is None:
@@ -294,13 +252,10 @@ class CurriculumDomainAdaptationTrainer:
             if self.global_step > 0 and self.global_step % 5000 == 0:
                 self.save_checkpoint(f"checkpoint_{self.global_step:06d}.pth")
 
-        # A normal completed run also measures every IR validation image once.
-        # Persisting this flag makes resuming a completed final model idempotent.
-        if (self.pseudo_label_evaluator is not None and self.ema_initialized
-                and self.global_step >= self.config.max_iter
-                and self.last_full_pseudo_label_eval_step != self.global_step):
-            self._evaluate_pseudo_labels(
-                self.config.get_phase(max(0, self.global_step - 1)), full_dataset=True,
+        if self.evaluator is not None:
+            self.evaluator.audit(
+                self.global_step, self.config.get_phase(max(0, self.global_step - 1)),
+                ema_initialized=self.ema_initialized, final=True,
             )
 
     def save_checkpoint(self, filename: str) -> None:

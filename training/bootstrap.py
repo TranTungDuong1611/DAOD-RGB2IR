@@ -1,7 +1,6 @@
 """Assemble training dependencies while the entrypoint owns the run lifecycle."""
 
 import logging
-import os
 
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -12,14 +11,13 @@ from data.augmentations import StudentAugmentor
 from data.datasets import FLIRIRDataset
 from data.dataloaders import ir_collate
 from data.ir_annotations import IRAnnotationReader
-from evaluator import DetectionEvaluator, PhaseEvaluator
+from evaluator import DetectionEvaluator, TrainingEvaluator, PseudoLabelEvaluator, select_fixed_ir_subset
 from models.fcos_models import build_fcos_trio
 from optimization import build_lr_scheduler, build_optimizer
 from scheduler import BridgeDomainScheduler, CurriculumScheduler
 from training.data_flow import RouteDataFlow
 from trainer import CurriculumDomainAdaptationTrainer
 from training.gan_bridge import load_gan_translator
-from training.pseudo_label_eval import FixedIRPseudoLabelEvaluator, select_fixed_ir_subset
 
 
 def move_model_trio_to_device(student, rgb_teacher, ir_teacher, device):
@@ -54,7 +52,7 @@ def build_pseudo_label_evaluator(config, *, logger):
         )
     logger.info("Pseudo-label IR validation: fixed_images=%d full_images=%d batch_size=%d seed=%d",
                 len(indices), len(dataset), config.loader.eval.batch_size, audit.subset_seed)
-    return FixedIRPseudoLabelEvaluator(
+    return PseudoLabelEvaluator(
         fixed_loader=loader(Subset(dataset, indices)), full_loader=loader(dataset),
         reader=reader, device=torch.device(config.device),
         fixed_sample_ids=tuple(dataset.ir_paths[i].stem for i in indices),
@@ -105,13 +103,12 @@ def build_training(
         class_names=list(FLIR_CLASSES),
         iou_thresholds=[0.5],
     )
-    phase_evaluator = PhaseEvaluator(
-        evaluator=evaluator,
+    training_evaluator = TrainingEvaluator(
+        config, evaluator=evaluator,
+        teachers={"rgb": rgb_teacher, "ir": ir_teacher},
+        pseudo_label_evaluator=build_pseudo_label_evaluator(config, logger=logger),
         ir_val_loader=ir_val_loader,
         rgb_val_loader=rgb_val_loader,
-        device=device,
-        eval_every_n=config.eval_period,
-        vis_dir=os.path.join(config.output_dir, "vis"),
     )
     # Wire the assembled dependencies into the orchestrator. Run lifecycle
     # decisions such as resume, initial evaluation, and final save stay outside.
@@ -131,9 +128,8 @@ def build_training(
         config=config,
         data_flow=data_flow,
         scheduler=scheduler,
-        phase_evaluator=phase_evaluator,
+        evaluator=training_evaluator,
         lr_scheduler=lr_scheduler,
-        pseudo_label_evaluator=build_pseudo_label_evaluator(config, logger=logger),
     )
 
     # Return a ready-to-run object without starting training during assembly.

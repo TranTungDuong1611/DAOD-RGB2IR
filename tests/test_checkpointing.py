@@ -7,7 +7,7 @@ import unittest
 import torch
 
 from test_curriculum_wrapper_integration import (
-    StatefulLRScheduler, StatefulPhaseEvaluator, build_config, build_trainer,
+    StatefulLRScheduler, build_config, build_trainer,
 )
 
 
@@ -17,13 +17,13 @@ class CheckpointingTests(unittest.TestCase):
             config = build_config(output_dir=directory)
             trainer, _, _, _ = build_trainer(config)
             trainer.lr_scheduler = StatefulLRScheduler()
-            trainer.phase_evaluator = StatefulPhaseEvaluator({"history": [{"global_step": 3}]})
+            trainer.evaluator.history = [{"global_step": 3}]
             for _ in range(3):
                 trainer.train_one_iteration()
             trainer.best_map = .61
             trainer.best_rgb_map = .72
-            trainer.last_pseudo_label_eval_step = 3
-            trainer.last_full_pseudo_label_eval_step = 2
+            trainer.evaluator.last_pseudo_label_eval_step = 3
+            trainer.evaluator.last_full_pseudo_label_eval_step = 2
             trainer.save_checkpoint("run.pth")
 
             payload = torch.load(Path(directory) / "run.pth", weights_only=True)
@@ -32,17 +32,16 @@ class CheckpointingTests(unittest.TestCase):
             self.assertEqual(payload["metadata"]["model"]["classification_init_mode"], "coco_tower")
             resumed, _, _, _ = build_trainer(config)
             resumed.lr_scheduler = StatefulLRScheduler()
-            resumed.phase_evaluator = StatefulPhaseEvaluator()
             resumed.load_checkpoint(str(Path(directory) / "run.pth"))
 
             self.assertEqual(resumed.global_step, 3)
             self.assertEqual(resumed.best_map, .61)
             self.assertEqual(resumed.best_rgb_map, .72)
             self.assertTrue(resumed.ema_initialized)
-            self.assertEqual(resumed.last_pseudo_label_eval_step, 3)
-            self.assertEqual(resumed.last_full_pseudo_label_eval_step, 2)
+            self.assertEqual(resumed.evaluator.last_pseudo_label_eval_step, 3)
+            self.assertEqual(resumed.evaluator.last_full_pseudo_label_eval_step, 2)
             self.assertEqual(resumed.lr_scheduler.steps, 3)
-            self.assertEqual(resumed.phase_evaluator.state, {"history": [{"global_step": 3}]})
+            self.assertEqual(resumed.evaluator.history, [{"global_step": 3}])
             self.assertEqual(resumed.scheduler.state_dict(), trainer.scheduler.state_dict())
             for name in ("student", "rgb_teacher", "ir_teacher"):
                 for key, value in getattr(resumed, name).state_dict().items():
@@ -60,7 +59,7 @@ class CheckpointingTests(unittest.TestCase):
             trainer.save_checkpoint("old.pth")
             path = Path(directory) / "old.pth"
             payload = torch.load(path, weights_only=False)
-            for name in ("metadata", "last_pseudo_label_eval_step", "last_full_pseudo_label_eval_step", "pseudo_label_evaluator"):
+            for name in ("metadata", "evaluation"):
                 payload.pop(name)
             torch.save(payload, path)
 
@@ -68,8 +67,8 @@ class CheckpointingTests(unittest.TestCase):
             resumed.load_checkpoint(str(path))
 
             self.assertEqual(resumed.global_step, 3)
-            self.assertEqual(resumed.last_pseudo_label_eval_step, 0)
-            self.assertEqual(resumed.last_full_pseudo_label_eval_step, 0)
+            self.assertEqual(resumed.evaluator.last_pseudo_label_eval_step, 0)
+            self.assertEqual(resumed.evaluator.last_full_pseudo_label_eval_step, 0)
             self.assertEqual(resumed.train_one_iteration(), trainer.train_one_iteration())
 
 

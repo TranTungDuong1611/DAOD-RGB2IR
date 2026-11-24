@@ -2,6 +2,7 @@
 
 from data.augmentations import StudentAugmentor
 from training.data_flow import RouteDataFlow
+from evaluator import TrainingEvaluator
 from scheduler import BridgeDomainScheduler
 
 import copy
@@ -53,7 +54,8 @@ def make_trainer(config, translator=None, *, pseudo_label_evaluator=None):
             device=config.device, augmentor=StudentAugmentor(config), gan_translator=translator,
         ),
         BridgeDomainScheduler(config.bridge_schedule, config.max_iter),
-        pseudo_label_evaluator=pseudo_label_evaluator,
+        evaluator=TrainingEvaluator(config, teachers={"rgb": rgb_teacher, "ir": ir_teacher},
+                                    pseudo_label_evaluator=pseudo_label_evaluator),
     )
 
 
@@ -77,18 +79,18 @@ class BridgeTrainingTests(unittest.TestCase):
             trainer = make_trainer(config, pseudo_label_evaluator=audit)
             for _ in range(25):
                 trainer.train_one_iteration()
-            self.assertEqual(trainer.last_pseudo_label_eval_step, 21)
+            self.assertEqual(trainer.evaluator.last_pseudo_label_eval_step, 21)
             self.assertEqual(audit.evaluate.call_count, 2)
             trainer.save_checkpoint("audited.pth")
 
             resumed_audit = evaluator()
             resumed = make_trainer(config, pseudo_label_evaluator=resumed_audit)
             resumed.load_checkpoint(str(Path(directory) / "audited.pth"))
-            self.assertEqual(resumed.last_pseudo_label_eval_step, 21)
+            self.assertEqual(resumed.evaluator.last_pseudo_label_eval_step, 21)
             resumed_audit.load_state_dict.assert_called_once_with(audit.state_dict())
             for _ in range(5):
                 resumed.train_one_iteration()
-            self.assertEqual(resumed.last_pseudo_label_eval_step, 30)
+            self.assertEqual(resumed.evaluator.last_pseudo_label_eval_step, 30)
             self.assertEqual(resumed_audit.evaluate.call_count, 2)
             records = [json.loads(line) for line in (
                 Path(directory) / "logs" / "pseudo_label_eval.jsonl"

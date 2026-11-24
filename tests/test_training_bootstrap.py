@@ -68,8 +68,8 @@ class TrainingBootstrapTests(unittest.TestCase):
         )
         self.assertFalse(ir_teacher.training)
         self.assertTrue(all(not p.requires_grad for p in ir_teacher.parameters()))
-        self.assertEqual(trainer.phase_evaluator.evaluator.interp, "voc11")
-        self.assertEqual(trainer.phase_evaluator.evaluator.iou_thresholds, [0.5])
+        self.assertEqual(trainer.evaluator.evaluator.interp, "voc11")
+        self.assertEqual(trainer.evaluator.evaluator.iou_thresholds, [0.5])
 
     def test_ir_only_bootstrap_prepares_the_enabled_teacher(self):
         trainer, _, _, _ = self._build("ir")

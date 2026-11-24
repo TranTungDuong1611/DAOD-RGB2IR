@@ -2,6 +2,7 @@
 
 from data.augmentations import StudentAugmentor
 from training.data_flow import RouteDataFlow
+from evaluator import TrainingEvaluator
 from scheduler import CurriculumScheduler
 
 import copy
@@ -54,7 +55,8 @@ def make_trainer(base, directory, *, enabled, interval=2):
         RouteDataFlow([(images, [target], ("rgb-a",))], [(images, ("a",))],
                       device=config.device, augmentor=StudentAugmentor(config)),
         CurriculumScheduler(config), lr_scheduler=lr_scheduler,
-        pseudo_label_evaluator=build_pseudo_label_evaluator(config, logger=logging.getLogger(__name__)),
+        evaluator=TrainingEvaluator(config, teachers={"rgb": rgb, "ir": ir},
+                                    pseudo_label_evaluator=build_pseudo_label_evaluator(config, logger=logging.getLogger(__name__))),
     )
 
 
@@ -107,10 +109,10 @@ def test_trainer_audits_fixed_ir_validation_and_resumes_without_duplicate_window
         trainer.save_checkpoint("resume.pth")
         restored = make_trainer(base, directory, enabled=True)
         restored.load_checkpoint(str(Path(directory) / "resume.pth"))
-        assert restored.last_pseudo_label_eval_step == 8
+        assert restored.evaluator.last_pseudo_label_eval_step == 8
         assert restored.global_step == 9
         restored.train_one_iteration()  # Step 10 enters the next global window.
-        assert restored.last_pseudo_label_eval_step == 10
+        assert restored.evaluator.last_pseudo_label_eval_step == 10
         restored.save_checkpoint("resume.pth")
         resumed_again = make_trainer(base, directory, enabled=True)
         resumed_again.load_checkpoint(str(Path(directory) / "resume.pth"))
@@ -185,18 +187,16 @@ def test_empty_kd_mask_is_reported_and_legacy_checkpoint_remains_loadable():
         trainer.save_checkpoint("legacy.pth")
         checkpoint_path = Path(directory) / "legacy.pth"
         payload = torch.load(checkpoint_path, weights_only=False)
-        payload.pop("last_pseudo_label_eval_step")
-        payload.pop("pseudo_label_evaluator")
-        payload.pop("last_full_pseudo_label_eval_step")
+        payload.pop("evaluation")
         # Training resume does not require metadata from older checkpoints.
         payload.pop("metadata")
         torch.save(payload, checkpoint_path)
         restored = make_trainer(base, directory, enabled=True)
         restored.load_checkpoint(str(checkpoint_path))
         assert restored.global_step == 8
-        assert restored.last_pseudo_label_eval_step == 0
+        assert restored.evaluator.last_pseudo_label_eval_step == 0
         restored.train_one_iteration()
-        assert restored.last_pseudo_label_eval_step == 9
+        assert restored.evaluator.last_pseudo_label_eval_step == 9
 
 
 def test_training_completion_evaluates_full_ir_validation_once_and_saves_progress():
@@ -244,7 +244,7 @@ def test_cli_smoke_runs_all_phases_and_persists_final_full_audit():
             main(parse_args())
         final = torch.load(root / "out" / "final_model.pth", weights_only=False)
         assert final["global_step"] == 4
-        assert final["last_full_pseudo_label_eval_step"] == 4
+        assert final["evaluation"]["last_full_pseudo_label_eval_step"] == 4
         records = [json.loads(line) for line in (root / "out" / "logs" / "pseudo_label_eval.jsonl").read_text().splitlines()]
         assert len(records) == 8
         assert [r["images"] for r in records if r["scope"] == "full_ir_validation"] == [5, 5]
