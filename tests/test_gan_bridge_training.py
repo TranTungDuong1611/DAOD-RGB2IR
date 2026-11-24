@@ -145,23 +145,35 @@ class BridgeTrainingTests(unittest.TestCase):
             self.assertGreater(item["kd_selected_count_" + item["ema_target"]], 0)
         self.assertEqual(seen, {"rgb", "saga", "ir_gan", "ir_real"})
 
-    def test_failed_iteration_does_not_advance_the_resumable_domain_schedule(self):
+    def test_failed_training_preserves_the_last_completed_checkpoint(self):
+        from example_flir import main, parse_args
+
         for failure in (RuntimeError("forward failed"), KeyboardInterrupt()):
             with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as directory:
                 config = bridge_config(directory)
                 trainer = make_trainer(config)
                 for _ in range(23):
                     trainer.train_one_iteration()
-                before = copy.deepcopy(trainer.scheduler.state_dict())
-                with mock.patch.object(trainer.student, "raw", side_effect=failure):
-                    with self.assertRaises(type(failure)):
-                        trainer.train_one_iteration()
-                self.assertEqual(trainer.global_step, 23)
-                self.assertEqual(trainer.scheduler.state_dict(), before)
-                trainer.save_checkpoint("interrupted.pth")
+                trainer.save_checkpoint("completed.pth")
+                with (
+                    mock.patch.object(sys, "argv", ["example_flir.py", "--data_root", "fixture", "--resume", "completed.pth"]),
+                    mock.patch("example_flir.build_training_config", return_value=config),
+                    mock.patch("example_flir.build_training", return_value=trainer),
+                    mock.patch("example_flir.configure_training_logging"),
+                    mock.patch.object(trainer, "load_checkpoint"),
+                    mock.patch.object(trainer.student, "raw", side_effect=failure),
+                ):
+                    if isinstance(failure, KeyboardInterrupt):
+                        main(parse_args())
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "forward failed"):
+                            main(parse_args())
+                self.assertFalse((Path(directory) / "final_model.pth").exists())
                 resumed = make_trainer(config)
-                resumed.load_checkpoint(str(Path(directory) / "interrupted.pth"))
-                self.assertEqual(resumed.train_one_iteration()["domain"], trainer.train_one_iteration()["domain"])
+                resumed.load_checkpoint(str(Path(directory) / "completed.pth"))
+                self.assertEqual(resumed.global_step, 23)
+                self.assertEqual(resumed.scheduler.state_dict()["next_step"], 23)
+                self.assertIn(resumed.train_one_iteration()["domain"], {"rgb", "saga", "ir_gan", "ir_real"})
 
     def test_checkpoint_restores_teachers_optimizer_lr_and_next_domain_sequence(self):
         with tempfile.TemporaryDirectory() as directory:

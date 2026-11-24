@@ -62,20 +62,6 @@ class CurriculumDomainAdaptationTrainer:
         return fcos_models.get_teacher(self._teacher_models(), name)
 
     def train_one_iteration(self) -> Dict[str, Any]:
-        if self.config.workflow != "gan_bridge":
-            return self._train_one_iteration()
-        schedule_state = self.scheduler.state_dict()
-        starting_step = self.global_step
-        try:
-            return self._train_one_iteration()
-        except BaseException:
-            # Roll back routing only when the iteration did not complete.
-            # A later audit failure must retain the already committed update.
-            if self.global_step == starting_step:
-                self.scheduler.load_state_dict(schedule_state)
-            raise
-
-    def _train_one_iteration(self) -> Dict[str, Any]:
         self.student.train()
         plan = resolve_step(
             self.config, self.scheduler, self.global_step,

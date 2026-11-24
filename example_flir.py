@@ -246,14 +246,15 @@ def main(args) -> None:
             trigger_reason="initial",
         )
 
-    # Retain final persistence and history reporting on normal completion,
-    # interruption, or an exception raised inside the training loop.
+    # An interrupted iteration can leave partial runtime state. Resume the last
+    # completed checkpoint instead of publishing that state as a final model.
     try:
         trainer.train()
     except KeyboardInterrupt:
-        logger.info("Training interrupted by user")
-    finally:
+        logger.info("Training interrupted; resume from the last completed checkpoint")
+    else:
         trainer.save_checkpoint("final_model.pth")
+    finally:
         evaluator.print_history()
 
 
