@@ -30,12 +30,6 @@ class RouteDataFlow:
             if not yielded:
                 raise ValueError("training DataLoader is empty")
 
-    def _move_images(self, images):
-        # Accept both supported image batch representations at the device seam.
-        if isinstance(images, torch.Tensor):
-            return images.to(self.device)
-        return tuple(image.to(self.device) for image in images)
-
     def _move_targets(self, targets):
         # Move tensor annotations while retaining sample metadata used to align KD.
         moved = []
@@ -47,34 +41,18 @@ class RouteDataFlow:
         return moved
 
     def _unpack_rgb_batch(self, batch):
-        """Read the (images, targets, sample_ids) batch produced by detection_collate."""
-        if not isinstance(batch, (tuple, list)) or len(batch) != 3:
-            raise ValueError("RGB loader must return (images, targets, sample_ids)")
-        images, targets, ids = batch
-        targets, ids = list(targets), tuple(ids)
-        if len(ids) != len(targets):
-            raise ValueError("RGB sample_ids must match target count")
-        return self._move_images(images), self._move_targets(targets), ids
+        images, targets, sample_ids = batch
+        return images.to(self.device), self._move_targets(targets), sample_ids
 
     def _unpack_ir_batch(self, batch):
-        """Read the (images, sample_ids) batch produced by ir_collate."""
-        if not isinstance(batch, (tuple, list)) or len(batch) != 2:
-            raise ValueError("IR loader must return (images, sample_ids)")
-        images, ids = batch
-        images, ids = self._move_images(images), tuple(ids)
-        image_count = images.shape[0] if isinstance(images, torch.Tensor) else len(images)
-        if len(ids) != image_count or any(not isinstance(value, str) or not value.strip() for value in ids):
-            raise ValueError("IR sample_ids must contain one non-empty ID per image")
-        return images, ids
+        images, sample_ids = batch
+        return images.to(self.device), sample_ids
 
     def _get_saga_images(self, images, targets, alpha: float):
         # Apply the caller's appearance setting to annotated object regions.
         # Geometry and sample correspondence remain shared between both views.
-        if targets is None:
-            return images.clone()
-        from saga import SoftSAGA
         boxes_list = [target["boxes"] for target in targets]
-        return SoftSAGA().apply_to_batch(images, boxes_list, alpha)
+        return self.augmentor.saga.apply_to_batch(images, boxes_list, alpha)
 
     def prepare(
         self,
@@ -86,16 +64,6 @@ class RouteDataFlow:
         appearance_domain: str | None = None,
     ):
         """Execute the supplied source/augmentation settings on one batch."""
-        if appearance_domain is not None:
-            expected_source = {"rgb": "rgb", "saga": "rgb", "ir_gan": "rgb", "ir_real": "ir"}
-            if appearance_domain not in expected_source or expected_source[appearance_domain] != source_domain:
-                raise ValueError("bridge appearance does not match its physical source")
-            if appearance_domain == "ir_real" and use_gt:
-                raise ValueError("real IR cannot use supervised targets")
-            if appearance_domain == "saga" and (student_alpha is None or teacher_alpha is None):
-                raise ValueError("SAGA route requires student and teacher alpha")
-            if appearance_domain == "ir_gan" and self.gan_translator is None:
-                raise ValueError("GAN-IR route requires a frozen GAN translator")
         if source_domain == "rgb":
             # Labeled-source path, including RGB-backed routes named "IR flow":
             # fetch one batch and establish shared geometry for both views and GT.
@@ -131,8 +99,6 @@ class RouteDataFlow:
         if source_domain == "ir":
             # Real-target path: create paired views from one unlabeled IR batch.
             # No annotation-based SAGA is applied on this path.
-            if self._ir_iter is None:
-                raise ValueError("IR route requested without an IR DataLoader")
             images, sample_ids = self._unpack_ir_batch(next(self._ir_iter))
             geometric_images, _, _ = self.augmentor.apply_weak_aug(images)
             teacher_images = geometric_images.clone()

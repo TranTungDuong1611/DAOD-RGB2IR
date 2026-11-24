@@ -7,6 +7,7 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 
+from configs.distillation import DistillConfig
 from configs.model import FCOSModelConfig
 from models.detector_adapter import (
     CriterionResult,
@@ -162,7 +163,7 @@ class DetectionLossCriterion(DetectorCriterion):
         alpha: float = FCOSModelConfig.vfl_alpha,
         gamma: float = FCOSModelConfig.vfl_gamma,
         weight_type: str = FCOSModelConfig.vfl_weight_type,
-        kd_gamma: float = FCOSModelConfig.vfl_gamma,
+        kd_gamma: float = DistillConfig.kd_gamma,
     ) -> None:
         super().__init__()
         if alpha < 0 or gamma < 0 or kd_gamma < 0:
@@ -176,8 +177,6 @@ class DetectionLossCriterion(DetectorCriterion):
     def _supervised_tensors(batch: SupervisedBatch):
         predictions = batch.predictions
         targets = batch.targets
-        if len(predictions) != len(targets):
-            raise ValueError("supervised predictions and targets must be aligned")
         class_logits = _cat_or_none([p.class_logits for p in predictions])
         boxes = _cat_or_none([p.boxes for p in predictions])
         quality_logits = _cat_or_none([p.quality_logits for p in predictions])
@@ -306,14 +305,6 @@ class DetectionLossCriterion(DetectorCriterion):
             "kd_hm_sum": torch.tensor(hm_sum, device=device),
             "kd_empty_mask": torch.tensor(empty, device=device),
         }
-        # Short aliases make the metric contract convenient for standalone
-        # callers while the prefixed names remain stable for trainer logging.
-        values.update({
-            "selected_count": values["kd_selected_count"],
-            "selected_ratio": values["kd_selected_ratio"],
-            "hm_sum": values["kd_hm_sum"],
-            "empty_mask": values["kd_empty_mask"],
-        })
         return values
 
     def distillation(

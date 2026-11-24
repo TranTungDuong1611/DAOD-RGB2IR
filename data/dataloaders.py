@@ -52,7 +52,7 @@ def build_loader(dataset, settings, *, collate_fn, device, shuffle, drop_last, g
 def build_rgb_train_dataloader(config, *, stems=None):
     if stems is None:
         stems, _ = _disjoint_train_stems(config.data.root)
-    dataset = FLIRRGBDataset(config.data.root, split="train", stems=stems)
+    dataset = FLIRRGBDataset(config.data.root, split="train", stems=stems, min_area=config.data.rgb_min_area)
     settings = config.loader.train
     return build_loader(dataset, settings, collate_fn=detection_collate, device=config.device,
                         shuffle=settings.shuffle, drop_last=settings.drop_last)
@@ -68,7 +68,7 @@ def build_ir_train_dataloader(config, *, stems=None):
 
 
 def build_rgb_val_dataloader(config):
-    dataset = FLIRRGBDataset(config.data.root, split="validation")
+    dataset = FLIRRGBDataset(config.data.root, split="validation", min_area=config.data.rgb_min_area)
     settings = config.loader.eval
     return build_loader(dataset, settings, collate_fn=detection_collate, device=config.device,
                         shuffle=settings.shuffle, drop_last=False,
@@ -76,7 +76,7 @@ def build_rgb_val_dataloader(config):
 
 
 def build_ir_val_dataloader(config):
-    dataset = FLIRIRValDataset(config.data.root, split="validation")
+    dataset = FLIRIRValDataset(config.data.root, split="validation", min_area=config.data.ir_val_min_area)
     settings = config.loader.eval
     return build_loader(dataset, settings, collate_fn=detection_collate, device=config.device,
                         shuffle=settings.shuffle, drop_last=False,

@@ -98,7 +98,6 @@ class TrainingConfig:
     output_dir: str = "./output_flir"
     workflow: str = "curriculum"
     teacher_mode: str = "two_teacher"
-    wandb: bool = False
     eval_period: int = 500
     eval_iou_thresholds: Tuple[float, ...] = (0.5,)
     eval_interp: str = "voc11"

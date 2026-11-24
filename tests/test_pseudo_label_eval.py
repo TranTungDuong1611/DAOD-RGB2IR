@@ -20,7 +20,7 @@ def fixture_output():
     anchors = torch.tensor([[2., 2., 4., 4.], [3., 3., 5., 5.], [20., 10., 22., 12.]])
     context = FCOSAdapterContext(
         transformed_images=SimpleNamespace(image_sizes=[(20, 40)]),
-        transformed_targets=None, original_image_sizes=((10, 20),), features=(),
+        transformed_targets=None, original_image_sizes=((10, 20),),
         anchors_per_image=(anchors,), anchors_per_level=((anchors,),),
         num_anchors_per_level=(3,), raw_head_outputs={}, sample_ids=("a",)
     )

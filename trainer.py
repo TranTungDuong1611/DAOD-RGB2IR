@@ -11,7 +11,6 @@ from torch.optim import Optimizer
 
 from config import TrainingConfig
 from models import fcos_models
-from models.detector_wrapper import DetectorWrapper as DetectorWrapper
 from training import checkpointing
 from training.data_flow import RouteDataFlow
 from training.loss_flow import LossFlow
@@ -91,10 +90,7 @@ class CurriculumDomainAdaptationTrainer:
 
         # Student forward: choose resize once and reuse this raw output for
         # every applicable loss, avoiding a second student forward for KD.
-        select_resize = getattr(
-            self.student, "select_training_resize_short_edge", None
-        )
-        resize_short_edge = None if select_resize is None else select_resize()
+        resize_short_edge = self.student.select_training_resize_short_edge()
         student_raw_kwargs = {
             "sample_ids": sample_ids,
         }

@@ -152,18 +152,6 @@ class FCOSIoUHead(nn.Module):
         self.num_classes = num_classes
         self.num_anchors = num_anchors
 
-    @property
-    def quality_logits(self) -> nn.Conv2d:
-        """Alias retained for callers that name the output branch directly."""
-
-        return self.quality_predictor
-
-    @property
-    def quality_head(self) -> nn.Conv2d:
-        """Readable alias for the standalone IoU quality predictor."""
-
-        return self.quality_predictor
-
     def forward(self, features: Sequence[Tensor]) -> dict[str, Tensor]:
         if not features:
             raise ValueError("FCOSIoUHead requires at least one feature level")
@@ -196,7 +184,6 @@ class FCOSAdapterContext:
     transformed_images: Any
     transformed_targets: Optional[Tuple[Mapping[str, Any], ...]]
     original_image_sizes: Tuple[Tuple[int, int], ...]
-    features: Tuple[Tensor, ...]
     anchors_per_image: Tuple[Tensor, ...]
     anchors_per_level: Tuple[Tuple[Tensor, ...], ...]
     num_anchors_per_level: Tuple[int, ...]
@@ -235,24 +222,7 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
         class_names: Sequence[str] = FCOSModelConfig.class_names,
     ) -> None:
         super().__init__()
-        required = (
-            "transform",
-            "backbone",
-            "anchor_generator",
-            "box_coder",
-            "postprocess_detections",
-        )
-        missing = [name for name in required if not hasattr(detector, name)]
-        if missing:
-            raise TypeError(f"FCOS detector is missing required members: {missing}")
-        if not isinstance(getattr(detector, "head", None), FCOSIoUHead):
-            raise TypeError("detector.head must be an FCOSIoUHead")
         names = tuple(class_names)
-        if len(names) != detector.head.num_classes:
-            raise ValueError("class_names must match the FCOS predictor class count")
-        if len(set(names)) != len(names):
-            raise ValueError("class_names must be unique")
-
         self.detector = detector
         self.class_names = names
         self.num_classes = len(names)
@@ -301,41 +271,19 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
             features = OrderedDict([("0", features)])
         feature_list = tuple(features.values())
         head_outputs = self.detector.head(feature_list)
-        expected_keys = {"cls_logits", "bbox_regression", "quality_logits"}
-        if set(head_outputs) != expected_keys:
-            raise ValueError(
-                f"FCOSIoUHead output keys must be {sorted(expected_keys)}"
-            )
-
         anchors_list = tuple(
             self.detector.anchor_generator(transformed_images, list(feature_list))
         )
         anchors_per_location = tuple(
             self.detector.anchor_generator.num_anchors_per_location()
         )
-        if len(anchors_per_location) != len(feature_list):
-            raise ValueError("anchor generator levels do not match FPN levels")
-        if any(value != 1 for value in anchors_per_location):
-            raise ValueError("FCOS adapter requires one anchor per location")
         num_anchors_per_level = tuple(
             int(feature.shape[-2] * feature.shape[-1] * anchors_per_location[level])
             for level, feature in enumerate(feature_list)
         )
-        total_anchors = sum(num_anchors_per_level)
-        for image_anchors in anchors_list:
-            if image_anchors.shape != (total_anchors, 4):
-                raise ValueError("anchor/head layout mismatch in FCOS adapter")
-
         cls_logits = head_outputs["cls_logits"]
         bbox_regression = head_outputs["bbox_regression"]
         quality_logits = head_outputs["quality_logits"]
-        if cls_logits.shape[1] != total_anchors:
-            raise ValueError("classification/head anchor row count mismatch")
-        if bbox_regression.shape[:2] != cls_logits.shape[:2]:
-            raise ValueError("regression/head anchor row count mismatch")
-        if quality_logits.shape[:2] != cls_logits.shape[:2]:
-            raise ValueError("quality/head anchor row count mismatch")
-
         predictions = []
         anchors_per_level = []
         for image_index, anchors in enumerate(anchors_list):
@@ -360,7 +308,6 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
                 else tuple(transformed_targets)
             ),
             original_image_sizes=original_sizes,
-            features=feature_list,
             anchors_per_image=anchors_list,
             anchors_per_level=tuple(anchors_per_level),
             num_anchors_per_level=num_anchors_per_level,
@@ -380,13 +327,7 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
     ) -> Tensor:
         """Assign FCOS locations with configured center sampling."""
 
-        if anchors.ndim != 2 or anchors.shape[-1] != 4:
-            raise ValueError("anchors must have shape [N, 4]")
-        if sum(num_anchors_per_level) != anchors.shape[0]:
-            raise ValueError("anchor levels do not cover all anchors")
         gt_boxes = target["boxes"].to(device=anchors.device, dtype=anchors.dtype)
-        if gt_boxes.ndim != 2 or gt_boxes.shape[-1] != 4:
-            raise ValueError("target boxes must have shape [M, 4]")
         if gt_boxes.numel() == 0:
             return torch.full(
                 (anchors.shape[0],),
@@ -475,8 +416,6 @@ class TorchvisionFCOSAdapter(DetectorAdapter):
             raise ValueError(
                 "raw output was created without targets; run raw(images, targets)"
             )
-        if len(targets) != len(output.predictions):
-            raise ValueError("targets must match the output batch length")
 
         prepared_targets = []
         for prediction, transformed_target, anchors in zip(

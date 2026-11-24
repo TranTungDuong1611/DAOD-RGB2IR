@@ -74,25 +74,18 @@ def build_fcos_model(
 ) -> DetectorWrapper:
     """Build one student wrapper from the effective FCOS configuration."""
 
-    if not isinstance(config, TrainingConfig):
-        raise TypeError("config must be a TrainingConfig")
     if base_detector is None:
         base_detector = _make_base_detector(
             config, detector_builder or fcos_resnet50_fpn
         )
-    if not hasattr(base_detector, "head"):
-        raise TypeError("base_detector must expose a Torchvision FCOS head")
     base_detector.head = FCOSIoUHead(
         base_detector.head,
         num_classes=config.model.num_classes,
         classification_init_mode=config.model.classification_init_mode,
     )
-    # The injected sentinel path is used by tests and still receives the same
-    # effective transform/detection settings as a freshly constructed model.
-    transform = getattr(base_detector, "transform", None)
-    if transform is not None:
-        transform.min_size = config.model.min_sizes
-        transform.max_size = config.model.max_size
+    # Apply the effective settings to freshly built or supplied FCOS detectors.
+    base_detector.transform.min_size = config.model.min_sizes
+    base_detector.transform.max_size = config.model.max_size
     for name in (
         "center_sampling_radius",
         "score_thresh",
@@ -100,8 +93,7 @@ def build_fcos_model(
         "topk_candidates",
         "detections_per_img",
     ):
-        if hasattr(base_detector, name):
-            setattr(base_detector, name, getattr(config.model, name))
+        setattr(base_detector, name, getattr(config.model, name))
 
     adapter = TorchvisionFCOSAdapter(
         base_detector,
@@ -111,6 +103,7 @@ def build_fcos_model(
         alpha=config.model.vfl_alpha,
         gamma=config.model.vfl_gamma,
         weight_type=config.model.vfl_weight_type,
+        kd_gamma=config.distill.kd_gamma,
     )
     wrapper = DetectorWrapper(adapter, criterion)
     wrapper.effective_config = config

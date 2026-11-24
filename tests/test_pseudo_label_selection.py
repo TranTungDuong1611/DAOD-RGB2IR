@@ -27,7 +27,7 @@ def test_loss_flow_exposes_selection_without_adding_masks_to_loss_or_logs():
     flow = LossFlow(uhl=1., quality=1., deltas=1., logits=1.)
     result = flow.distill(wrapper, output, output, DistillationSettings(1., 1.),
                           teacher_name="ir", phase_weight=1.)
-    assert result is not None
+    assert set(result.metrics) == {"kd_selected_count", "kd_selected_ratio", "kd_hm_sum", "kd_empty_mask"}
     assert [mask.tolist() for mask in result.selected_masks] == [[False, False]]
     assert flow.logs["kd_empty_mask_ir"] == 1.
     assert flow.total_loss.requires_grad

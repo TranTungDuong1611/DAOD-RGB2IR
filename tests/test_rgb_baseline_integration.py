@@ -64,6 +64,9 @@ class CountingWrapper(nn.Module):
         self.supervised_calls = 0
         self.distill_calls = 0
 
+    def select_training_resize_short_edge(self):
+        return None
+
     def raw(self, images, targets=None, sample_ids=None):
         self.raw_calls += 1
         return {'images': images, 'targets': targets, 'sample_ids': sample_ids}

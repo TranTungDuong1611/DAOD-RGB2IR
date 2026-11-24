@@ -1,4 +1,3 @@
-import copy
 import unittest
 
 import torch
@@ -50,7 +49,7 @@ class FCOSIoUHeadTests(unittest.TestCase):
     def test_predictors_are_new_and_centerness_is_not_registered(self):
         head, detector = build_test_head(ClassificationInitMode.COCO_TOWER)
         self.assertEqual(head.classification_head.cls_logits.out_channels, 3)
-        self.assertEqual(head.quality_logits.out_channels, 1)
+        self.assertEqual(head.quality_predictor.out_channels, 1)
         self.assertFalse(any('bbox_ctrness' in name for name, _ in head.named_parameters()))
         self.assertFalse(torch.equal(
             head.classification_head.cls_logits.weight,

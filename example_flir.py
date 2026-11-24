@@ -24,15 +24,11 @@ from config import (
 )
 from data import FLIR_CLASSES, NUM_CLASSES
 from models.fcos_adapter import ClassificationInitMode
-from training.bootstrap import build_training, move_model_trio_to_device
+from training.bootstrap import build_training
 from training.observability import configure_training_logging
 
 
 logger = logging.getLogger(__name__)
-
-
-def _weight_identifier(value: str):
-    return None if value.strip().lower() in {"none", ""} else value
 
 
 def build_training_config(args) -> TrainingConfig:
@@ -47,7 +43,6 @@ def build_training_config(args) -> TrainingConfig:
         raise ValueError("gan_bridge uses --bridge-phase-fractions, not legacy --phaseN-end flags")
     if args.phase3_end is not None and args.phase3_end > total_iters:
         raise ValueError("phase3_end must not exceed total_iters")
-    weights = _weight_identifier(args.weights)
     # Collect phase boundaries and route proportions for the curriculum scheduler.
     curriculum = CurriculumConfig(
         phase1_end=args.phase1_end,
@@ -64,7 +59,7 @@ def build_training_config(args) -> TrainingConfig:
         model=FCOSModelConfig(
             num_classes=NUM_CLASSES,
             class_names=tuple(FLIR_CLASSES),
-            weights=weights,
+            weights=args.weights,
             classification_init_mode=ClassificationInitMode(
                 args.classification_init
             ),
@@ -139,16 +134,10 @@ def build_training_config(args) -> TrainingConfig:
     )
 
 
-# Backward-compatible name used by earlier local launch scripts.
-make_training_config = build_training_config
-# Preserve the helper name used by existing launch scripts and tests.
-_move_model_trio_to_device = move_model_trio_to_device
-
-
 def main(args) -> None:
     # Configure the experiment's existing log destinations before constructing
     # the dependencies that emit setup and progress messages.
-    config = make_training_config(args)
+    config = build_training_config(args)
     log_path = configure_training_logging(config.output_dir)
     logger.info("Training log -> %s", log_path)
     device = torch.device(config.device)

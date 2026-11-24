@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 @dataclass
 class DataConfig:
     root: str = "/home/intern/D3T/data/align"
+    rgb_min_area: float = 16.0
+    ir_val_min_area: float = 0.0
 
 
 @dataclass

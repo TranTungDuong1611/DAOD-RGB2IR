@@ -29,6 +29,8 @@ class FCOSModelConfig:
     vfl_weight_type: str = "iou"
 
     def __post_init__(self):
+        if isinstance(self.weights, str) and self.weights.strip().lower() in {"none", ""}:
+            self.weights = None
         if self.pretrained_backbone is None:
             self.pretrained_backbone = self.weights is not None
         self.class_names = tuple(self.class_names)

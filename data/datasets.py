@@ -34,6 +34,8 @@ Domain adaptation roles:
   FLIRIRValDataset → evaluation     (labeled IR, mAP computation)
 """
 
+from configs.data import DataConfig
+
 from pathlib import Path
 from typing import Callable, Dict, Optional, Sequence, Tuple
 import torch
@@ -84,7 +86,7 @@ class FLIRRGBDataset(Dataset):
         root: str,
         split: str = "train",
         transform: Optional[Callable] = None,
-        min_area: float = 16.0,
+        min_area: float = DataConfig.rgb_min_area,
         *,
         stems: Optional[Sequence[str]] = None,
     ) -> None:
@@ -183,7 +185,7 @@ class FLIRIRValDataset(Dataset):
         root: str,
         split: str = "validation",
         transform: Optional[Callable] = None,
-        min_area: float = 0.0,
+        min_area: float = DataConfig.ir_val_min_area,
     ) -> None:
         self.root      = Path(root)
         self.transform = transform or default_ir_transform()

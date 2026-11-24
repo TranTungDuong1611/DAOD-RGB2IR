@@ -55,6 +55,7 @@ class DistillConfig:
 
     # Uncertainty Weighting: weight = exp(-(1-HM) / un_regular_alpha)
     un_regular_alpha: float = 1.0
+    kd_gamma: float = 2.0
 
     def __post_init__(self):
         if self.hm_alpha < 0 or self.hm_beta < 0 or self.un_regular_alpha <= 0:
