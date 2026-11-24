@@ -1,3 +1,7 @@
+from data.augmentations import StudentAugmentor
+from training.data_flow import RouteDataFlow
+from scheduler import CurriculumScheduler
+
 import inspect
 import unittest
 
@@ -13,9 +17,11 @@ from config import (
     EMAConfig,
     EvalLoaderConfig,
     FCOSModelConfig,
+    LossConfig,
     TrainLoaderConfig,
     TrainingConfig,
 )
+from models.detector_adapter import CriterionResult
 from trainer import CurriculumDomainAdaptationTrainer
 
 
@@ -58,13 +64,16 @@ class CountingWrapper(nn.Module):
         self.supervised_calls = 0
         self.distill_calls = 0
 
+    def select_training_resize_short_edge(self):
+        return None
+
     def raw(self, images, targets=None, sample_ids=None):
         self.raw_calls += 1
         return {'images': images, 'targets': targets, 'sample_ids': sample_ids}
 
     def supervised_from_output(self, output, targets):
         self.supervised_calls += 1
-        return {'loss_cls': self.weight.square()}
+        return CriterionResult({'loss_cls': self.weight.square()})
 
     def distill_from_outputs(self, student_output, teacher_output, settings):
         self.distill_calls += 1
@@ -100,12 +109,13 @@ class RGBBaselineIntegrationTests(unittest.TestCase):
             aug=AugConfig(hflip_prob=0.0, blur_prob=0.0,
                           brightness_prob=0.0, contrast_prob=0.0),
             workflow='rgb_baseline',
+            loss=LossConfig(weight_logits=2.0),
             total_iters=1,
             device='cpu',
         )
         student = CountingWrapper()
-        rgb_teacher = CountingWrapper()
-        ir_teacher = CountingWrapper()
+        rgb_teacher = CountingWrapper().eval().requires_grad_(False)
+        ir_teacher = CountingWrapper().eval().requires_grad_(False)
         optimizer = CountingOptimizer(student.parameters())
         loader = DataLoader(RGBDataset(), batch_size=2, collate_fn=collate_rgb)
         ir_loader = DataLoader(IRDataset(), batch_size=2, collate_fn=collate_ir)
@@ -115,8 +125,8 @@ class RGBBaselineIntegrationTests(unittest.TestCase):
             ir_teacher=ir_teacher,
             optimizer=optimizer,
             config=config,
-            rgb_loader=loader,
-            ir_loader=ir_loader,
+            data_flow=RouteDataFlow(loader, ir_loader, device=config.device, augmentor=StudentAugmentor(config)),
+            scheduler=CurriculumScheduler(config),
         )
         logs = trainer.train_one_iteration()
         self.assertEqual(student.raw_calls, 1)

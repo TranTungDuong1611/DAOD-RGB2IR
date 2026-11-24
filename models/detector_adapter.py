@@ -1,4 +1,4 @@
-"""Detector-independent contracts used by the D3T training path.
+"""Detector-independent contracts for detection and distillation.
 
 Detector adapters own transforms, target assignment, decoding, postprocessing,
 and the rules used to establish student/teacher correspondence.  The criterion
@@ -14,6 +14,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 import torch
 from torch import Tensor, nn
 
+from configs.distillation import DistillConfig
+
 Targets = Sequence[Mapping[str, Any]]
 Losses = Dict[str, Tensor]
 SampleIds = Tuple[str, ...]
@@ -25,9 +27,9 @@ class DistillationSettings:
 
     top_ratio: float
     min_hm: float
-    hm_alpha: float = 0.5
-    hm_beta: float = 0.5
-    uncertainty_alpha: float = 1.0
+    hm_alpha: float = DistillConfig.hm_alpha
+    hm_beta: float = DistillConfig.hm_beta
+    uncertainty_alpha: float = DistillConfig.un_regular_alpha
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.top_ratio) or not 0.0 < self.top_ratio <= 1.0:
@@ -174,26 +176,6 @@ class DetectorAdapter(nn.Module, ABC):
 
         yield
 
-    @staticmethod
-    def validate_sample_ids(
-        sample_ids: Optional[Sequence[str]], batch_size: int
-    ) -> Optional[SampleIds]:
-        """Validate stable IDs when a caller supplies them.
-
-        The optional form keeps the original small adapter contract usable for
-        inference and legacy unit fixtures.  The FCOS adapter records IDs in
-        its context and rejects an ambiguous pair before position-wise KD.
-        """
-
-        if sample_ids is None:
-            return None
-        ids = tuple(sample_ids)
-        if len(ids) != batch_size:
-            raise ValueError("sample_ids must contain one ID per image")
-        if any(not isinstance(value, str) or not value.strip() for value in ids):
-            raise ValueError("sample_ids must contain non-empty stable strings")
-        return ids
-
     @abstractmethod
     def forward(
         self,
@@ -222,11 +204,11 @@ class DetectorAdapter(nn.Module, ABC):
         raise NotImplementedError
 
 
-class D3TCriterion(nn.Module, ABC):
+class DetectorCriterion(nn.Module, ABC):
     """Shared loss formulas receive prepared data, never detector internals."""
 
     @abstractmethod
-    def supervised(self, batch: SupervisedBatch) -> Losses:
+    def supervised(self, batch: SupervisedBatch) -> CriterionResult:
         raise NotImplementedError
 
     @abstractmethod

@@ -1,6 +1,6 @@
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 import torch
 
 FLIR_CLASSES    = ["person", "car", "bicycle"]

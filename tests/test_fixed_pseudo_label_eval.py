@@ -14,10 +14,10 @@ from torch.utils.data import DataLoader, Subset
 from data.datasets import FLIRIRDataset
 from data.dataloaders import ir_collate
 from data.ir_annotations import IRAnnotationReader
-from loss.d3t_criterion import D3TLossCriterion
-from models.d3t_adapter import DistillationPair, DistillationSettings, Predictions
-from models.d3t_wrapper import D3TWrapper
-from test_torchvision_fcos_adapter import build_adapter
+from loss.detection_criterion import DetectionLossCriterion
+from models.detector_adapter import DistillationPair, DistillationSettings, Predictions
+from models.detector_wrapper import DetectorWrapper
+from test_fcos_adapter import build_adapter
 
 
 @pytest.fixture
@@ -40,7 +40,7 @@ def validation_root():
 
 
 def test_shared_teacher_selection_matches_batch_global_training_mask():
-    from loss.d3t_criterion import select_distillation_masks
+    from loss.detection_criterion import select_distillation_masks
 
     predictions = tuple(Predictions(
         torch.logit(torch.tensor(values)).reshape(-1, 1),
@@ -49,12 +49,12 @@ def test_shared_teacher_selection_matches_batch_global_training_mask():
     settings = DistillationSettings(.34, 0., hm_alpha=1., hm_beta=0.)
     masks = select_distillation_masks(predictions, settings)
     assert [m.tolist() for m in masks] == [[False], [True, True]]
-    trained = D3TLossCriterion().distillation(DistillationPair(predictions, predictions), settings)
+    trained = DetectionLossCriterion().distillation(DistillationPair(predictions, predictions), settings)
     assert all(torch.equal(a, b) for a, b in zip(masks, trained.selected_masks))
 
 
 def test_aggregate_uses_row_and_object_denominators_instead_of_batch_means():
-    from training.pseudo_label_eval import aggregate_pseudo_label_metrics
+    from evaluator import aggregate_pseudo_label_metrics
 
     metrics = aggregate_pseudo_label_metrics([
         {"selected_rows": 3, "valid_rows": 1, "gt_count": 10, "covered_gt": 1,
@@ -72,7 +72,7 @@ def test_aggregate_uses_row_and_object_denominators_instead_of_batch_means():
 
 
 def test_fixed_subset_is_seeded_and_includes_rare_classes(validation_root):
-    from training.pseudo_label_eval import select_fixed_ir_subset
+    from evaluator import select_fixed_ir_subset
 
     dataset = FLIRIRDataset(validation_root, split="validation")
     reader = IRAnnotationReader(validation_root)
@@ -86,14 +86,14 @@ def test_fixed_subset_is_seeded_and_includes_rare_classes(validation_root):
 
 
 def make_evaluator(root):
-    from training.pseudo_label_eval import FixedIRPseudoLabelEvaluator
+    from evaluator import PseudoLabelEvaluator
 
     dataset = FLIRIRDataset(root, split="validation")
     fixed_indices = [0, 3, 4]
     def loader(data):
         return DataLoader(data, batch_size=2, shuffle=False, collate_fn=ir_collate,
                           generator=torch.Generator().manual_seed(42))
-    return FixedIRPseudoLabelEvaluator(
+    return PseudoLabelEvaluator(
         fixed_loader=loader(Subset(dataset, fixed_indices)), full_loader=loader(dataset),
         reader=IRAnnotationReader(root), device="cpu",
         fixed_sample_ids=tuple(dataset.ir_paths[i].stem for i in fixed_indices),
@@ -102,7 +102,7 @@ def make_evaluator(root):
 
 def test_fixed_and_full_passes_keep_last_batch_and_restore_model_and_rng(validation_root):
     evaluator = make_evaluator(validation_root)
-    model = D3TWrapper(build_adapter(), D3TLossCriterion())
+    model = DetectorWrapper(build_adapter(), DetectionLossCriterion())
     model.train()
     model.adapter.detector.backbone.eval()  # Preserve mixed child modes too.
     modes = {n: m.training for n, m in model.named_modules()}
@@ -131,7 +131,7 @@ def test_fixed_and_full_passes_keep_last_batch_and_restore_model_and_rng(validat
 
 def test_evaluation_restores_state_when_teacher_forward_raises(validation_root):
     evaluator = make_evaluator(validation_root)
-    model = D3TWrapper(build_adapter(), D3TLossCriterion()).train()
+    model = DetectorWrapper(build_adapter(), DetectionLossCriterion()).train()
     before = torch.get_rng_state().clone()
     def fail(*args, **kwargs):
         torch.rand(1)
@@ -175,7 +175,7 @@ def test_bootstrap_builds_isolated_fixed_and_full_validation_loaders(validation_
 
 
 def test_fixed_subset_fails_clearly_when_no_validation_labels_are_available(validation_root):
-    from training.pseudo_label_eval import select_fixed_ir_subset
+    from evaluator import select_fixed_ir_subset
 
     for path in (validation_root / "Annotations").glob("*.xml"):
         path.unlink()
@@ -187,6 +187,6 @@ def test_fixed_subset_fails_clearly_when_no_validation_labels_are_available(vali
 def test_fixed_pass_rejects_changed_image_order(validation_root):
     evaluator = make_evaluator(validation_root)
     evaluator.fixed_sample_ids = tuple(reversed(evaluator.fixed_sample_ids))
-    model = D3TWrapper(build_adapter(), D3TLossCriterion())
+    model = DetectorWrapper(build_adapter(), DetectionLossCriterion())
     with pytest.raises(ValueError, match="order"):
         evaluator.evaluate(model, DistillationSettings(.1, 0.), iou_threshold=.5, resize_short_edge=64)

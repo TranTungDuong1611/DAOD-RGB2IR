@@ -7,6 +7,7 @@ import torch
 
 from config import (
     AugConfig,
+    BridgeScheduleConfig,
     CurriculumConfig,
     DataConfig,
     DataLoaderConfig,
@@ -14,36 +15,21 @@ from config import (
     EMAConfig,
     EvalLoaderConfig,
     FCOSModelConfig,
-    LossConfig,
+    GANBridgeConfig,
     IntermediateDomainConfig,
     OptimizerConfig,
     Phase,
     PseudoLabelEvalConfig,
-    SoftSAGAConfig,
-    TeacherSchedule,
     TrainLoaderConfig,
     TrainingConfig,
 )
 from data import FLIR_CLASSES, NUM_CLASSES
-from models.torchvision_fcos_adapter import ClassificationInitMode
-from training.bootstrap import build_training, move_model_trio_to_device
+from models.fcos_adapter import ClassificationInitMode
+from training.bootstrap import build_training
 from training.observability import configure_training_logging
 
 
 logger = logging.getLogger(__name__)
-
-
-def _phase_boundaries(total_iters: int) -> tuple[int, int, int]:
-    """Create monotonic shortened boundaries for both normal and smoke runs."""
-
-    first = min(total_iters, max(1, round(total_iters * 0.20)))
-    second = min(total_iters, max(first, round(total_iters * 0.50)))
-    third = min(total_iters, max(second, round(total_iters * 0.80)))
-    return first, second, third
-
-
-def _weight_identifier(value: str):
-    return None if value.strip().lower() in {"none", ""} else value
 
 
 def build_training_config(args) -> TrainingConfig:
@@ -52,33 +38,20 @@ def build_training_config(args) -> TrainingConfig:
     # Resolve iteration boundaries and weight identifiers before building the
     # effective configuration consumed by bootstrap and checkpoint metadata.
     total_iters = int(args.total_iters)
-    default_boundaries = _phase_boundaries(total_iters)
-    phase1_end = (
-        default_boundaries[0] if args.phase1_end is None else args.phase1_end
-    )
-    phase2_end = (
-        default_boundaries[1] if args.phase2_end is None else args.phase2_end
-    )
-    phase3_end = (
-        default_boundaries[2] if args.phase3_end is None else args.phase3_end
-    )
-    if phase3_end > total_iters:
+    if args.workflow == "gan_bridge" and any(
+        value is not None for value in (args.phase1_end, args.phase2_end, args.phase3_end)
+    ):
+        raise ValueError("gan_bridge uses --bridge-phase-fractions, not legacy --phaseN-end flags")
+    if args.phase3_end is not None and args.phase3_end > total_iters:
         raise ValueError("phase3_end must not exceed total_iters")
-    weights = _weight_identifier(args.weights)
-    pretrained_backbone = (
-        bool(args.pretrained_backbone)
-        if args.pretrained_backbone is not None
-        else weights is not None
-    )
-
-
     # Collect phase boundaries and route proportions for the curriculum scheduler.
     curriculum = CurriculumConfig(
-        phase1_end=phase1_end,
-        phase2_end=phase2_end,
-        phase3_end=phase3_end,
+        phase1_end=args.phase1_end,
+        phase2_end=args.phase2_end,
+        phase3_end=args.phase3_end,
         phase2_rgb_sampling_ratio=args.phase2_rgb_ratio,
         phase3_rgb_sampling_ratio=args.phase3_rgb_ratio,
+        sampling_mode=args.domain_sampling,
         phase4_rgb_sampling_ratio=args.phase4_rgb_ratio,
     )
 
@@ -87,11 +60,11 @@ def build_training_config(args) -> TrainingConfig:
         model=FCOSModelConfig(
             num_classes=NUM_CLASSES,
             class_names=tuple(FLIR_CLASSES),
-            weights=weights,
+            weights=args.weights,
             classification_init_mode=ClassificationInitMode(
                 args.classification_init
             ),
-            pretrained_backbone=pretrained_backbone,
+            pretrained_backbone=args.pretrained_backbone,
             trainable_backbone_layers=args.trainable_backbone_layers,
             min_sizes=tuple(args.min_sizes),
             max_size=args.max_size,
@@ -100,45 +73,24 @@ def build_training_config(args) -> TrainingConfig:
             nms_thresh=args.nms_thresh,
             topk_candidates=args.topk_candidates,
             detections_per_img=args.detections_per_img,
-            vfl_alpha=0.75,
-            vfl_gamma=2.0,
         ),
         # Teacher-specific KD selection schedules and shared distillation settings.
         distill=DistillConfig(
             hm_alpha=args.hm_alpha,
             hm_beta=args.hm_beta,
             un_regular_alpha=args.un_regular_alpha,
-            rgb_teacher=TeacherSchedule(
-                phase1=(0.010, 0.45),
-                phase2=(0.020, 0.35),
-                phase3=(0.040, 0.25),
-                phase4=(0.060, 0.20),
-            ),
-            ir_teacher=TeacherSchedule(
-                phase1=(0.002, 0.60),
-                phase2=(0.005, 0.50),
-                phase3=(0.015, 0.35),
-                phase4=(0.030, 0.25),
-            ),
         ),
         curriculum=curriculum,
-        # Phase and component weights are resolved upstream of loss execution.
-        loss=LossConfig(
-            p1_sup_weight=1.0,
-            p1_distill_weight=0.0,
-            p2_sup_weight=1.0,
-            p2_distill_weight=0.7,
-            p3_sup_weight=0.5,
-            p3_distill_weight=1.0,
-            p4_sup_weight=1.0,
-            p4_distill_weight=1.0,
-            weight_logits=4.0,
-            weight_deltas=1.0,
-            weight_quality=1.0,
-            weight_uhl=1.0,
+        bridge_schedule=BridgeScheduleConfig(
+            phase_ratios=args.bridge_ratios,
+            phase_fractions=tuple(args.bridge_phase_fractions),
         ),
-        # Keep update schedules and view-generation parameters in configuration;
-        # executors receive the values selected by the trainer for each step.
+        gan_bridge=GANBridgeConfig(
+            checkpoint=args.gan_weights, source_sup_weight=args.bridge_source_sup_weight,
+            saga_student_alphas=tuple(args.bridge_saga_student_alphas),
+            saga_teacher_alphas=tuple(args.bridge_saga_teacher_alphas),
+            saga_teachers=tuple(args.bridge_saga_teachers),
+        ),
         optimizer=OptimizerConfig(
             base_lr=args.lr,
             warmup_iters=args.warmup_iters,
@@ -152,11 +104,6 @@ def build_training_config(args) -> TrainingConfig:
             texture_strength=args.texture_strength,
             btf_radius=args.btf_radius,
             btf_iterations=args.btf_iterations,
-        ),
-        soft_saga=SoftSAGAConfig(
-            alpha_near_rgb=0.75,
-            alpha_intermediate=0.5,
-            alpha_near_ir=0.25,
         ),
         aug=AugConfig(
             hflip_prob=args.hflip_prob,
@@ -177,7 +124,6 @@ def build_training_config(args) -> TrainingConfig:
             ),
         ),
         # Run lifecycle, output, workflow, and monitoring cadence settings.
-        max_iter=total_iters,
         total_iters=total_iters,
         output_dir=args.output_dir,
         device=args.device,
@@ -195,16 +141,10 @@ def build_training_config(args) -> TrainingConfig:
     )
 
 
-# Backward-compatible name used by earlier local launch scripts.
-make_training_config = build_training_config
-# Preserve the helper name used by existing launch scripts and tests.
-_move_model_trio_to_device = move_model_trio_to_device
-
-
 def main(args) -> None:
     # Configure the experiment's existing log destinations before constructing
     # the dependencies that emit setup and progress messages.
-    config = make_training_config(args)
+    config = build_training_config(args)
     log_path = configure_training_logging(config.output_dir)
     logger.info("Training log -> %s", log_path)
     device = torch.device(config.device)
@@ -219,15 +159,18 @@ def main(args) -> None:
     )
 
     logger.info("Intermediate domain: %s", config.intermediate_domain)
-    if config.workflow == "curriculum" and config.intermediate_domain.mode == "randommono_btf" and config.intermediate_domain.texture_strength:
-        from intermediate_domain import require_btf
+    if (
+        config.workflow in {"curriculum", "gan_bridge"}
+        and config.intermediate_domain.mode == "randommono_btf"
+        and config.intermediate_domain.texture_strength
+    ):
+        from randommono_btf import require_btf
         require_btf()
 
     # Bootstrap wires dependencies; this entrypoint retains the sequence of
     # resume/initial evaluation, training, interruption handling, and final save.
     trainer = build_training(config, logger=logger)
-    student = trainer.student
-    phase_evaluator = trainer.phase_evaluator
+    evaluator = trainer.evaluator
 
     # Resume saved progress or evaluate the initial model using the original
     # mutually exclusive paths and initial phase label.
@@ -235,37 +178,62 @@ def main(args) -> None:
         trainer.load_checkpoint(args.resume)
     else:
         logger.info("Running initial IR evaluation")
-        phase_evaluator.evaluate(
-            student,
-            global_step=trainer.global_step,
+        trainer.evaluate(
             current_phase=Phase.PHASE1_RGB_WARMUP,
             trigger_reason="initial",
         )
 
-    # Retain final persistence and history reporting on normal completion,
-    # interruption, or an exception raised inside the training loop.
+    # An interrupted iteration can leave partial runtime state. Resume the last
+    # completed checkpoint instead of publishing that state as a final model.
     try:
         trainer.train()
     except KeyboardInterrupt:
-        logger.info("Training interrupted by user")
-    finally:
+        logger.info("Training interrupted; resume from the last completed checkpoint")
+    else:
         trainer.save_checkpoint("final_model.pth")
-        phase_evaluator.print_history()
+    finally:
+        evaluator.print_history()
+
+
+def _bridge_ratios(value):
+    try:
+        ratios = tuple(tuple(float(weight) for weight in row.split(":")) for row in value.split(","))
+        BridgeScheduleConfig(phase_ratios=ratios)
+        return ratios
+    except (ValueError, TypeError) as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def parse_args(argv=None):
+    defaults = TrainingConfig()
     # Declare launch options here; build_training_config translates them into
     # one effective configuration before any training dependency is assembled.
     parser = argparse.ArgumentParser(
         description="Curriculum D3T training for aligned FLIR RGB/IR data"
     )
     parser.add_argument("--data_root", required=True)
-    parser.add_argument("--intermediate-domain", choices=("randommono_btf", "saga"), default="randommono_btf")
-    parser.add_argument("--texture-strength", type=float, default=0.25)
-    parser.add_argument("--btf-radius", type=int, default=2)
-    parser.add_argument("--btf-iterations", type=int, default=1)
-    parser.add_argument("--output_dir", default="./output_flir")
-    parser.add_argument("--total_iters", type=int, default=10000)
+    parser.add_argument(
+        "--intermediate-domain",
+        choices=("randommono_btf", "saga"),
+        default=defaults.intermediate_domain.mode,
+    )
+    parser.add_argument(
+        "--texture-strength",
+        type=float,
+        default=defaults.intermediate_domain.texture_strength,
+    )
+    parser.add_argument(
+        "--btf-radius",
+        type=int,
+        default=defaults.intermediate_domain.btf_radius,
+    )
+    parser.add_argument(
+        "--btf-iterations",
+        type=int,
+        default=defaults.intermediate_domain.btf_iterations,
+    )
+    parser.add_argument("--output_dir", default=defaults.output_dir)
+    parser.add_argument("--total_iters", type=int, default=defaults.total_iters)
     parser.add_argument(
         "--phase1-end", "--phase1_end", dest="phase1_end", type=int, default=None
     )
@@ -275,37 +243,37 @@ def parse_args(argv=None):
     parser.add_argument(
         "--phase3-end", "--phase3_end", dest="phase3_end", type=int, default=None
     )
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--eval_batch_size", type=int, default=4)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=defaults.loader.train.batch_size)
+    parser.add_argument("--eval_batch_size", type=int, default=defaults.loader.eval.batch_size)
+    parser.add_argument("--workers", type=int, default=defaults.loader.train.num_workers)
     parser.add_argument(
         "--lr",
         type=float,
-        default=None,
+        default=OptimizerConfig.base_lr,
         help="Actual LR; defaults to D3T's 0.016 scaled from batch 16",
     )
-    parser.add_argument("--warmup-iters", type=int, default=None)
-    parser.add_argument("--warmup-factor", type=float, default=1.0 / 1000.0)
-    parser.add_argument("--lr-steps", type=int, nargs="*", default=(70000,))
-    parser.add_argument("--lr-gamma", type=float, default=0.1)
+    parser.add_argument("--warmup-iters", type=int, default=OptimizerConfig.warmup_iters)
+    parser.add_argument("--warmup-factor", type=float, default=defaults.optimizer.warmup_factor)
+    parser.add_argument("--lr-steps", type=int, nargs="*", default=defaults.optimizer.milestones)
+    parser.add_argument("--lr-gamma", type=float, default=defaults.optimizer.gamma)
     parser.add_argument(
         "--min-sizes",
         type=int,
         nargs="+",
-        default=(640, 672, 704, 736, 768, 800),
+        default=defaults.model.min_sizes,
         help="Training short-edge choices; evaluation uses the final value",
     )
-    parser.add_argument("--max_size", type=int, default=1333)
-    parser.add_argument("--center_sampling_radius", type=float, default=0.0)
-    parser.add_argument("--score_thresh", type=float, default=0.05)
-    parser.add_argument("--nms_thresh", type=float, default=0.6)
-    parser.add_argument("--topk_candidates", type=int, default=1000)
-    parser.add_argument("--detections_per_img", type=int, default=100)
-    parser.add_argument("--trainable_backbone_layers", type=int, default=3)
+    parser.add_argument("--max_size", type=int, default=defaults.model.max_size)
+    parser.add_argument("--center_sampling_radius", type=float, default=defaults.model.center_sampling_radius)
+    parser.add_argument("--score_thresh", type=float, default=defaults.model.score_thresh)
+    parser.add_argument("--nms_thresh", type=float, default=defaults.model.nms_thresh)
+    parser.add_argument("--topk_candidates", type=int, default=defaults.model.topk_candidates)
+    parser.add_argument("--detections_per_img", type=int, default=defaults.model.detections_per_img)
+    parser.add_argument("--trainable_backbone_layers", type=int, default=defaults.model.trainable_backbone_layers)
     parser.add_argument(
         "--weights",
         choices=("DEFAULT", "none"),
-        default="DEFAULT",
+        default=defaults.model.weights,
         help="Torchvision FCOS COCO weights or none",
     )
     parser.add_argument(
@@ -323,53 +291,65 @@ def parse_args(argv=None):
         "--classification-init",
         dest="classification_init",
         choices=[mode.value for mode in ClassificationInitMode],
-        default=ClassificationInitMode.COCO_TOWER.value,
+        default=defaults.model.classification_init_mode.value,
     )
     parser.add_argument(
         "--workflow",
-        choices=("curriculum", "rgb_baseline"),
-        default="curriculum",
+        choices=("curriculum", "rgb_baseline", "gan_bridge"),
+        default=defaults.workflow,
     )
     parser.add_argument(
         "--teacher-mode",
         choices=("rgb", "ir", "two_teacher"),
-        default="two_teacher",
+        default=defaults.teacher_mode,
         help="Enable one teacher for staged smoke/ablation or both for curriculum",
     )
-    parser.add_argument("--phase2-rgb-ratio", type=float, default=0.7)
-    parser.add_argument("--phase3-rgb-ratio", type=float, default=0.3)
+    parser.add_argument("--phase2-rgb-ratio", type=float, default=defaults.curriculum.phase2_rgb_sampling_ratio)
+    parser.add_argument("--phase3-rgb-ratio", type=float, default=defaults.curriculum.phase3_rgb_sampling_ratio)
     parser.add_argument(
-        "--phase4-rgb-ratio", type=float, default=0.2,
+        "--domain-sampling", choices=("grouped", "interleaved"), default=defaults.curriculum.sampling_mode,
+        help="Group existing curriculum routes in short cycles or spread them per iteration",
+    )
+    parser.add_argument("--gan-weights", default=defaults.gan_bridge.checkpoint, help="Pretrained RGB(3)->IR(1) CycleGAN G_A checkpoint")
+    parser.add_argument("--bridge-ratios", type=_bridge_ratios, default=defaults.bridge_schedule.phase_ratios)
+    parser.add_argument("--bridge-phase-fractions", type=float, nargs=5, default=defaults.bridge_schedule.phase_fractions)
+    parser.add_argument("--bridge-source-sup-weight", type=float, default=defaults.gan_bridge.source_sup_weight)
+    parser.add_argument("--bridge-saga-student-alphas", type=float, nargs=5, default=defaults.gan_bridge.saga_student_alphas)
+    parser.add_argument("--bridge-saga-teacher-alphas", type=float, nargs=5, default=defaults.gan_bridge.saga_teacher_alphas)
+    parser.add_argument("--bridge-saga-teachers", choices=("none", "rgb", "ir"), nargs=5,
+                        default=defaults.gan_bridge.saga_teachers)
+    parser.add_argument(
+        "--phase4-rgb-ratio", type=float, default=defaults.curriculum.phase4_rgb_sampling_ratio,
         help="Fraction of phase-4 steps using supervised RGB; use 0 for IR-only",
     )
-    parser.add_argument("--hm-alpha", type=float, default=0.5)
-    parser.add_argument("--hm-beta", type=float, default=0.5)
-    parser.add_argument("--un-regular-alpha", type=float, default=1.0)
-    parser.add_argument("--ema-alpha", type=float, default=0.9996)
+    parser.add_argument("--hm-alpha", type=float, default=defaults.distill.hm_alpha)
+    parser.add_argument("--hm-beta", type=float, default=defaults.distill.hm_beta)
+    parser.add_argument("--un-regular-alpha", type=float, default=defaults.distill.un_regular_alpha)
+    parser.add_argument("--ema-alpha", type=float, default=defaults.ema.alpha)
     parser.add_argument(
         "--ema-start",
         type=int,
-        default=None,
+        default=EMAConfig.start_steps,
         help="EMA initialization step; defaults to the start of phase 2",
     )
-    parser.add_argument("--hflip-prob", type=float, default=0.5)
-    parser.add_argument("--blur-prob", type=float, default=0.5)
-    parser.add_argument("--brightness-prob", type=float, default=0.3)
-    parser.add_argument("--contrast-prob", type=float, default=0.3)
-    parser.add_argument("--eval_every", type=int, default=500)
+    parser.add_argument("--hflip-prob", type=float, default=defaults.aug.hflip_prob)
+    parser.add_argument("--blur-prob", type=float, default=defaults.aug.blur_prob)
+    parser.add_argument("--brightness-prob", type=float, default=defaults.aug.brightness_prob)
+    parser.add_argument("--contrast-prob", type=float, default=defaults.aug.contrast_prob)
+    parser.add_argument("--eval_every", type=int, default=defaults.eval_period)
     # Audit labels are independent of supervised targets and student validation.
-    parser.add_argument("--eval-pseudo-labels", action="store_true",
+    parser.add_argument("--eval-pseudo-labels", action="store_true", default=defaults.pseudo_label_eval.enabled,
                         help="Compare selected KD rows with IR GT; never train on IR GT")
-    parser.add_argument("--pseudo-label-eval-interval", type=int, default=500,
+    parser.add_argument("--pseudo-label-eval-interval", type=int, default=defaults.pseudo_label_eval.interval,
                         help="Global iteration interval after EMA teachers are initialized")
-    parser.add_argument("--pseudo-label-iou-threshold", type=float, default=0.5)
-    parser.add_argument("--pseudo-label-eval-samples", type=int, default=256,
+    parser.add_argument("--pseudo-label-iou-threshold", type=float, default=defaults.pseudo_label_eval.iou_threshold)
+    parser.add_argument("--pseudo-label-eval-samples", type=int, default=defaults.pseudo_label_eval.sample_size,
                         help="Maximum labeled IR validation images in each periodic teacher audit")
-    parser.add_argument("--pseudo-label-eval-seed", type=int, default=0,
+    parser.add_argument("--pseudo-label-eval-seed", type=int, default=defaults.pseudo_label_eval.subset_seed,
                         help="Local seed for reproducible fixed IR validation image selection")
-    parser.add_argument("--log_interval", type=int, default=50)
+    parser.add_argument("--log_interval", type=int, default=defaults.log_interval)
     parser.add_argument("--resume", default=None)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default=defaults.device)
     return parser.parse_args(argv)
 
 

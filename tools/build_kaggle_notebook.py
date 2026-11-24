@@ -16,10 +16,10 @@ import textwrap
 
 
 ROOT_MODULES = (
-    "config", "intermediate_domain", "saga", "ema", "evaluator", "optimization",
+    "config", "randommono_btf", "saga", "evaluator", "optimization",
     "scheduler", "trainer", "example_flir", "evaluate_coco", "notebook_support",
 )
-PACKAGES = ("data", "models", "loss", "training", "utils")
+PACKAGES = ("configs", "data", "models", "loss", "training", "utils")
 
 DEPENDENCY_SOURCE = r'''
 # Keep the Kaggle CUDA torch/torchvision stack. Install only missing optional
@@ -140,6 +140,7 @@ SETTINGS = {
     "device": "cuda",
     "weights": "DEFAULT",
     "workflow": "curriculum",
+    "gan_weights": None,
     "teacher_mode": "two_teacher",
     "intermediate_domain": "randommono_btf",
     "texture_strength": 0.25,

@@ -41,7 +41,7 @@ class KaggleNotebookTests(unittest.TestCase):
 
     def test_source_cells_match_canonical_files_and_cover_all_runtime_modules(self):
         manifests = self.notebook["metadata"]["flir_source_manifest"]
-        for name in ("example_flir", "evaluate_coco", "intermediate_domain"):
+        for name in ("example_flir", "evaluate_coco", "randommono_btf"):
             self.assertIn(name, manifests)
         cells = {c["metadata"]["flir_module"]: c for c in self.notebook["cells"]
                  if c["metadata"].get("flir_role") == "source"}
@@ -55,9 +55,9 @@ class KaggleNotebookTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), item["sha256"])
 
     def test_module_code_is_visible_python_not_a_quoted_source_value(self):
-        cell = next(c for c in self.notebook["cells"] if c["metadata"].get("flir_module") == "config")
+        cell = next(c for c in self.notebook["cells"] if c["metadata"].get("flir_module") == "configs.training")
         header, body = cell_source(cell).split("\n", 1)
-        self.assertEqual(header, "%%flir_module config")
+        self.assertEqual(header, "%%flir_module configs.training")
         self.assertNotIn("EMBEDDED_SOURCES[", body)
         self.assertTrue(any(isinstance(node, ast.ClassDef) and node.name == "TrainingConfig"
                             for node in ast.parse(body).body))
@@ -104,14 +104,14 @@ for name, expected in ns['EXPECTED_SOURCE_MANIFEST'].items():
     # IPython normalizes whitespace-only lines, as it does for normal code cells.
     assert [line for line in actual['source'].splitlines() if line.strip()] == [line for line in canonical.splitlines() if line.strip()], name
 old_config = ns['config']
-source = ns['EMBEDDED_SOURCES']['config']['source']
+source = ns['EMBEDDED_SOURCES']['configs.data']['source']
 edited = source.replace('texture_strength: float = 0.25', 'texture_strength: float = 0.4')
 assert edited != source
-shell.run_cell_magic('flir_module', 'config', edited)
+shell.run_cell_magic('flir_module', 'configs.data', edited)
 exec(next(source for role, source in CELLS if role == 'loader'), ns)
 exec('import config; assert config.IntermediateDomainConfig().texture_strength==0.4', ns)
 assert ns['config'] is not old_config
-assert ns['SOURCE_MANIFEST']['config']['sha256'] == hashlib.sha256(edited.encode()).hexdigest()
+assert ns['SOURCE_MANIFEST']['configs.data']['sha256'] == hashlib.sha256(edited.encode()).hexdigest()
 try:
     shell.run_cell_magic('flir_module', 'unknown', 'x = 1')
 except ValueError:
@@ -156,3 +156,56 @@ assert ns['EMBEDDED_SOURCES']['config']['source'] == registered
                 select_checkpoint(tmp, str(Path(tmp) / "absent.pth"))
             with self.assertRaisesRegex(FileNotFoundError, "JPEGImages"):
                 validate_dataset(tmp, 4)
+
+    def test_validate_dataset_uses_disjoint_rgb_ir_split(self):
+        from PIL import Image
+        from notebook_support import validate_dataset
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "JPEGImages").mkdir()
+            (root / "Annotations").mkdir()
+            train_stems = [f"FLIR_{i:05d}_PreviewData" for i in range(6)]
+            val_stems = ["FLIR_00010_PreviewData"]
+            (root / "align_train.txt").write_text("\n".join(train_stems) + "\n", encoding="utf-8")
+            (root / "align_validation.txt").write_text("\n".join(val_stems) + "\n", encoding="utf-8")
+            for stem in train_stems + val_stems:
+                rgb_name = stem.replace("_PreviewData", "") + "_RGB.jpg"
+                Image.new("RGB", (8, 8)).save(root / "JPEGImages" / rgb_name)
+                Image.new("L", (8, 8)).save(root / "JPEGImages" / f"{stem}.jpeg")
+                (root / "Annotations" / f"{stem}.xml").write_text("<annotation></annotation>", encoding="utf-8")
+            # Remove XML from second half (unlabeled IR train) to prove only RGB half requires GT XML.
+            for stem in train_stems[3:]:
+                (root / "Annotations" / f"{stem}.xml").unlink()
+            counts = validate_dataset(tmp, 3)
+            self.assertEqual(counts, {"rgb_train": 3, "ir_train": 3, "ir_validation": 1})
+            with self.assertRaisesRegex(ValueError, "drop_last"):
+                validate_dataset(tmp, 4)
+
+    def test_make_training_args_forwards_gan_bridge_settings(self):
+        from example_flir import build_training_config
+        from notebook_support import make_training_args
+
+        args = make_training_args({
+            "data_root": "unused",
+            "output_dir": "out",
+            "workflow": "gan_bridge",
+            "gan_weights": "/kaggle/input/gan/latest_net_G_A.pth",
+            "domain_sampling": "interleaved",
+            "bridge_ratios": ((10, 0, 0, 0), (5, 3, 2, 0), (3, 3, 3, 1), (2, 2, 4, 2), (1, 1, 2, 6)),
+            "bridge_phase_fractions": (0.1, 0.3, 0.5, 0.7, 1.0),
+            "bridge_source_sup_weight": 0.5,
+            "bridge_saga_student_alphas": (1.0, 0.8, 0.6, 0.4, 0.2),
+            "bridge_saga_teacher_alphas": (1.0, 0.8, 0.6, 0.6, 0.2),
+            "bridge_saga_teachers": ("none", "rgb", "ir", "ir", "ir"),
+        })
+        cfg = build_training_config(args)
+        self.assertEqual(cfg.workflow, "gan_bridge")
+        self.assertEqual(cfg.gan_bridge.checkpoint, "/kaggle/input/gan/latest_net_G_A.pth")
+        self.assertEqual(cfg.curriculum.sampling_mode, "interleaved")
+        self.assertEqual(cfg.bridge_schedule.phase_fractions, (0.1, 0.3, 0.5, 0.7, 1.0))
+        self.assertEqual(cfg.gan_bridge.source_sup_weight, 0.5)
+        self.assertEqual(cfg.gan_bridge.saga_student_alphas, (1.0, 0.8, 0.6, 0.4, 0.2))
+        self.assertEqual(cfg.gan_bridge.saga_teacher_alphas, (1.0, 0.8, 0.6, 0.6, 0.2))
+        self.assertEqual(cfg.gan_bridge.saga_teachers, ("none", "rgb", "ir", "ir", "ir"))
+        self.assertEqual(cfg.intermediate_domain.mode, "randommono_btf")

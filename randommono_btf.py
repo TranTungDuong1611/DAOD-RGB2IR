@@ -1,4 +1,4 @@
-"""Source-only RandomMono/BTF views, shared across teacher/student levels."""
+"""Source-only RandomMono + BTF views, shared across teacher/student levels."""
 
 from __future__ import annotations
 
@@ -23,8 +23,8 @@ def require_btf():
     return function
 
 
-class IntermediateDomainAugmentation:
-    """Generate one endpoint per image, then render multiple alpha views.
+class RandomMonoBTF:
+    """Generate one RandomMono + BTF endpoint per image, then render alpha views.
 
     Alpha=1 is RGB and consumes no bridge random numbers/backend work.
     Inputs may be a BCHW tensor or a sequence of CHW tensors. Outputs preserve
@@ -44,7 +44,7 @@ class IntermediateDomainAugmentation:
                         numIter=self.config.btf_iterations,
                         sigmaAlpha=-1.0, sigmaAvg=-1.0)
 
-    def make_views(self, images, alphas: Sequence[float], *, boxes=None):
+    def make_views(self, images, alphas: Sequence[float]):
         alphas = tuple(float(alpha) for alpha in alphas)
         if any(not math.isfinite(alpha) or not 0 <= alpha <= 1 for alpha in alphas):
             raise ValueError("bridge alphas must be finite values in [0, 1]")
@@ -60,30 +60,24 @@ class IntermediateDomainAugmentation:
             return ()
         if all(alpha == 1 for alpha in alphas):
             return tuple(images.clone() if stacked else tuple(image.clone() for image in items) for _ in alphas)
-        if self.config.mode == "saga":
-            from saga import SoftSAGA
-            if boxes is None or len(boxes) != len(items):
-                raise ValueError("legacy SAGA requires boxes for each image")
-            views = [tuple(SoftSAGA().apply(image, box, alpha) for image, box in zip(items, boxes)) for alpha in alphas]
-        else:
-            if any(not bool(torch.isfinite(image).all()) or bool((image < 0).any()) or bool((image > 1).any()) for image in items):
-                raise ValueError("bridge inputs must be finite values in [0, 1] before detector normalization")
-            weights = torch.rand(len(items), 3, 1, 1)
-            sums = weights.sum(dim=1, keepdim=True)
-            weights = torch.where(sums > 0, weights / sums.clamp_min(1e-12), torch.full_like(weights, 1 / 3))
-            endpoints = []
-            for image, weight in zip(items, weights):
-                mono = (image.float() * weight.to(image.device)).sum(dim=0)
-                if self.config.texture_strength:
-                    source = np.ascontiguousarray(mono.detach().cpu().numpy(), dtype=np.float32)
-                    filtered = np.asarray(self._filter(source), dtype=np.float32)
-                    if filtered.shape != source.shape or not np.isfinite(filtered).all():
-                        raise ValueError("BTF must return a finite intensity image of the original size")
-                    endpoint = torch.from_numpy(source + self.config.texture_strength * (filtered - source))
-                    endpoint = endpoint.to(device=image.device, dtype=image.dtype).clamp(0, 1)
-                else:
-                    endpoint = mono.to(image.dtype)
-                endpoints.append(endpoint.unsqueeze(0).expand_as(image))
-            views = [tuple(image.clone() if alpha == 1 else alpha * image + (1 - alpha) * endpoint
-                           for image, endpoint in zip(items, endpoints)) for alpha in alphas]
+        if any(not bool(torch.isfinite(image).all()) or bool((image < 0).any()) or bool((image > 1).any()) for image in items):
+            raise ValueError("bridge inputs must be finite values in [0, 1] before detector normalization")
+        weights = torch.rand(len(items), 3, 1, 1)
+        sums = weights.sum(dim=1, keepdim=True)
+        weights = torch.where(sums > 0, weights / sums.clamp_min(1e-12), torch.full_like(weights, 1 / 3))
+        endpoints = []
+        for image, weight in zip(items, weights):
+            mono = (image.float() * weight.to(image.device)).sum(dim=0)
+            if self.config.texture_strength:
+                source = np.ascontiguousarray(mono.detach().cpu().numpy(), dtype=np.float32)
+                filtered = np.asarray(self._filter(source), dtype=np.float32)
+                if filtered.shape != source.shape or not np.isfinite(filtered).all():
+                    raise ValueError("BTF must return a finite intensity image of the original size")
+                endpoint = torch.from_numpy(source + self.config.texture_strength * (filtered - source))
+                endpoint = endpoint.to(device=image.device, dtype=image.dtype).clamp(0, 1)
+            else:
+                endpoint = mono.to(image.dtype)
+            endpoints.append(endpoint.unsqueeze(0).expand_as(image))
+        views = [tuple(image.clone() if alpha == 1 else alpha * image + (1 - alpha) * endpoint
+                       for image, endpoint in zip(items, endpoints)) for alpha in alphas]
         return tuple(torch.stack(view) if stacked else view for view in views)

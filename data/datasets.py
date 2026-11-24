@@ -34,8 +34,10 @@ Domain adaptation roles:
   FLIRIRValDataset → evaluation     (labeled IR, mAP computation)
 """
 
+from configs.data import DataConfig
+
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
@@ -76,6 +78,7 @@ class FLIRRGBDataset(Dataset):
         split      : "train" or "validation"
         transform  : image transform (default: ToTensor)
         min_area   : skip boxes smaller than this (pixels²)
+        stems      : optional ordered subset supplied by the train loader
     """
 
     def __init__(
@@ -83,18 +86,21 @@ class FLIRRGBDataset(Dataset):
         root: str,
         split: str = "train",
         transform: Optional[Callable] = None,
-        min_area: float = 16.0,
+        min_area: float = DataConfig.rgb_min_area,
+        *,
+        stems: Optional[Sequence[str]] = None,
     ) -> None:
         self.root      = Path(root)
         self.transform = transform or default_rgb_transform()
         self.min_area  = min_area
 
-        split_file = _resolve_split_file(self.root, split)
-        self.stems = read_split_file(split_file)
+        if stems is None:
+            split_file = _resolve_split_file(self.root, split)
+            stems = read_split_file(split_file)
 
         # Filter to stems where the RGB image actually exists
         self.stems = [
-            s for s in self.stems
+            s for s in stems
             if (self.root / "JPEGImages" / ir_stem_to_rgb_filename(s)).exists()
         ]
 
@@ -126,6 +132,7 @@ class FLIRIRDataset(Dataset):
         root      : path to the `align/` directory
         split     : "train" or "validation"
         transform : image transform (default: Grayscale→3ch, ToTensor)
+        stems     : optional ordered subset supplied by the train loader
     """
 
     def __init__(
@@ -133,16 +140,19 @@ class FLIRIRDataset(Dataset):
         root: str,
         split: str = "train",
         transform: Optional[Callable] = None,
+        *,
+        stems: Optional[Sequence[str]] = None,
     ) -> None:
         self.root      = Path(root)
         self.transform = transform or default_ir_transform()
 
-        split_file = _resolve_split_file(self.root, split)
-        all_stems  = read_split_file(split_file)
+        if stems is None:
+            split_file = _resolve_split_file(self.root, split)
+            stems = read_split_file(split_file)
 
         self.ir_paths = [
             self.root / "JPEGImages" / f"{s}.jpeg"
-            for s in all_stems
+            for s in stems
             if (self.root / "JPEGImages" / f"{s}.jpeg").exists()
         ]
 
@@ -175,7 +185,7 @@ class FLIRIRValDataset(Dataset):
         root: str,
         split: str = "validation",
         transform: Optional[Callable] = None,
-        min_area: float = 0.0,
+        min_area: float = DataConfig.ir_val_min_area,
     ) -> None:
         self.root      = Path(root)
         self.transform = transform or default_ir_transform()
